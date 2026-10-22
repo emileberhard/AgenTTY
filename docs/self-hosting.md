@@ -39,6 +39,12 @@ paid transcription provider credentials. Protect state and ingress, apply
 resource limits, and publish your own privacy policy. Internal companion-app
 broker scopes are not required for SSH use.
 
+For a custom bundle ID, change `models::MAIN_BUNDLE_ID` in
+`services/backend/src/models.rs` to match `AGENTTY_BUNDLE_ID` in your local app
+configuration. Set `AGENTTY_BACKEND_APP_APPLE_ID` to your app's numeric App Store
+ID for signed AppTransaction verification. The backend currently compiles its
+accepted base bundle ID into the binary, so rebuild it after that change.
+
 For main releases, use the tag-driven release workflow in your own public
 repository. It builds all four runtime targets, packages checksums/notices and
 attaches them to the same GitHub release as the app. Configure

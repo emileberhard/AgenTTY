@@ -4,6 +4,8 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 1
   - package-ecosystem: cargo
     directories: [/services/backend, /tools/agentty-notify, /tools/agentty-host-connector]
     schedule:
