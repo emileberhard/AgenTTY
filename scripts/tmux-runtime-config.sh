@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+
+TMUX_RUNTIME_TMUX_VERSION="3.6a"
+TMUX_RUNTIME_TMUX_URL="https://github.com/tmux/tmux/releases/download/${TMUX_RUNTIME_TMUX_VERSION}/tmux-${TMUX_RUNTIME_TMUX_VERSION}.tar.gz"
+TMUX_RUNTIME_TMUX_SHA256="b6d8d9c76585db8ef5fa00d4931902fa4b8cbe8166f528f44fc403961a3f3759"
+
+TMUX_RUNTIME_LIBEVENT_VERSION="2.1.12-stable"
+TMUX_RUNTIME_LIBEVENT_URL="https://github.com/libevent/libevent/releases/download/release-${TMUX_RUNTIME_LIBEVENT_VERSION}/libevent-${TMUX_RUNTIME_LIBEVENT_VERSION}.tar.gz"
+TMUX_RUNTIME_LIBEVENT_SHA256="92e6de1be9ec176428fd2367677e61ceffc2ee1cb119035037a27d346b0403bb"
+
+TMUX_RUNTIME_NCURSES_VERSION="6.5"
+TMUX_RUNTIME_NCURSES_URL="https://ftp.gnu.org/pub/gnu/ncurses/ncurses-${TMUX_RUNTIME_NCURSES_VERSION}.tar.gz"
+TMUX_RUNTIME_NCURSES_SHA256="136d91bc269a9a5785e5f9e980bc76ab57428f604ce3e5a5a90cebc767971cc6"
+
+TMUX_RUNTIME_TARGETS=(
+  "darwin-arm64"
+  "darwin-x86_64"
+  "linux-arm64"
+  "linux-x86_64"
+)
+
+TMUX_RUNTIME_TERMINFO_ENTRIES=(
+  "xterm-256color"
+  "tmux-256color"
+)

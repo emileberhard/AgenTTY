@@ -1,0 +1,26 @@
+tmux segfaults (killing the whole server and every shell in it) when a
+focus event (ESC[O / ESC[I) reaches a client tty while c->session is
+still NULL — the window between tty registration and session binding
+during attach, or after detach with input still buffered. Present in
+3.6a, 3.7b, and master as of 2026-08-14. AgenTTY emits synthetic focus
+pulses over SSH, which can land in exactly that window.
+
+--- a/tty-keys.c
++++ b/tty-keys.c
+@@ -978,12 +978,14 @@
+ 	/* Check for focus events. */
+ 	if (key == KEYC_FOCUS_OUT) {
+ 		c->flags &= ~CLIENT_FOCUSED;
+-		window_update_focus(c->session->curw->window);
++		if (c->session != NULL)
++			window_update_focus(c->session->curw->window);
+ 		notify_client("client-focus-out", c);
+ 	} else if (key == KEYC_FOCUS_IN) {
+ 		c->flags |= CLIENT_FOCUSED;
+ 		notify_client("client-focus-in", c);
+-		window_update_focus(c->session->curw->window);
++		if (c->session != NULL)
++			window_update_focus(c->session->curw->window);
+ 	}
+ 
+ 	/* Fire the key. */

@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install_missing=false
+
+while (($# > 0)); do
+  case "$1" in
+    --install-missing)
+      install_missing=true
+      shift
+      ;;
+    -h|--help)
+      cat <<'EOF'
+Usage:
+  ensure-notify-helper-toolchain [--install-missing]
+EOF
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+export PATH="$HOME/.cargo/bin:$PATH"
+expected_rust_version="${AGENTTY_RELEASE_RUST_VERSION:-1.97.0}"
+expected_zig_version="${AGENTTY_RELEASE_HOST_ZIG_VERSION:-0.17.0}"
+expected_cargo_zigbuild_version="${AGENTTY_RELEASE_CARGO_ZIGBUILD_VERSION:-0.22.1}"
+
+if ! command -v rustup >/dev/null 2>&1; then
+  if [[ "$install_missing" != true ]]; then
+    echo "FATAL: rustup is required." >&2
+    exit 1
+  fi
+  brew install rustup-init
+  rustup-init -y --no-modify-path --default-toolchain "$expected_rust_version"
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "FATAL: cargo is required." >&2
+  exit 1
+fi
+
+actual_rust_version="$(rustc --version | awk '{print $2}')"
+if [[ "$actual_rust_version" != "$expected_rust_version" ]]; then
+  echo "FATAL: rustc $expected_rust_version is required; found $actual_rust_version." >&2
+  exit 1
+fi
+
+if ! command -v zig >/dev/null 2>&1; then
+  if [[ "$install_missing" != true ]]; then
+    echo "FATAL: Zig $expected_zig_version is required." >&2
+    exit 1
+  fi
+  brew install zig
+fi
+actual_zig_version="$(zig version)"
+if [[ "$actual_zig_version" != "$expected_zig_version" ]]; then
+  echo "FATAL: Zig $expected_zig_version is required; found $actual_zig_version." >&2
+  exit 1
+fi
+
+actual_cargo_zigbuild_version="$(
+  cargo install --list | sed -n 's/^cargo-zigbuild v\([^:]*\):$/\1/p' | head -n 1
+)"
+if [[ "$actual_cargo_zigbuild_version" != "$expected_cargo_zigbuild_version" ]]; then
+  if [[ "$install_missing" != true ]]; then
+    echo "FATAL: cargo-zigbuild $expected_cargo_zigbuild_version is required; found ${actual_cargo_zigbuild_version:-none}." >&2
+    exit 1
+  fi
+  cargo install cargo-zigbuild --version "$expected_cargo_zigbuild_version" --locked --force
+fi
+
+cargo --version >/dev/null
+rustup --version >/dev/null
+cargo zigbuild --help >/dev/null

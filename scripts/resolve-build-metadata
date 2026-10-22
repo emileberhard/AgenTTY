@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd -- "$script_dir/.." && pwd)"
+cd "$repo_root"
+
+git_sha="$(git rev-parse --verify --short=12 HEAD 2>/dev/null || true)"
+if [[ -z "$git_sha" ]]; then
+    echo "failed to resolve git commit sha from HEAD" >&2
+    exit 1
+fi
+
+git_tag=""
+while IFS= read -r candidate; do
+    if [[ "$candidate" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+        git_tag="$candidate"
+        break
+    fi
+done < <(git tag --points-at HEAD --sort=-version:refname 2>/dev/null)
+
+version="$git_sha"
+if [[ -n "$git_tag" ]]; then
+    version="$git_tag"
+fi
+
+print_field() {
+    case "${1:-}" in
+        version)
+            printf '%s\n' "$version"
+            ;;
+        git_sha)
+            printf '%s\n' "$git_sha"
+            ;;
+        git_tag)
+            printf '%s\n' "$git_tag"
+            ;;
+        *)
+            echo "unknown field: ${1:-}" >&2
+            exit 1
+            ;;
+    esac
+}
+
+case "${1:-}" in
+    "")
+        printf 'version=%s\n' "$version"
+        printf 'git_sha=%s\n' "$git_sha"
+        printf 'git_tag=%s\n' "$git_tag"
+        ;;
+    --field)
+        if [[ $# -ne 2 ]]; then
+            echo "usage: resolve-build-metadata [--field version|git_sha|git_tag]" >&2
+            exit 1
+        fi
+        print_field "$2"
+        ;;
+    *)
+        echo "usage: resolve-build-metadata [--field version|git_sha|git_tag]" >&2
+        exit 1
+        ;;
+esac

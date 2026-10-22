@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+from pathlib import Path
+import re
+
+path = Path(__file__).resolve().parent.parent / "Config/Local.xcconfig"
+if not path.is_file():
+    raise SystemExit("Copy Config/Local.xcconfig.example to Config/Local.xcconfig and configure your Apple identity before signing or releasing")
+values = dict(re.findall(r"^([A-Z_]+)\s*=\s*(.*?)\s*$", path.read_text(), re.MULTILINE))
+for key in ("DEVELOPMENT_TEAM", "AGENTTY_BUNDLE_ID", "AGENTTY_APP_GROUP", "AGENTTY_CLOUDKIT_CONTAINER", "AGENTTY_KEYCHAIN_NAMESPACE", "AGENTTY_UNLOCK_PRODUCT_ID"):
+    value = values.get(key, "")
+    if not value or "example" in value.lower() or value == "YOURTEAMID":
+        raise SystemExit(f"Configure {key} in Config/Local.xcconfig before signing or releasing")
+print("Build identity configured")

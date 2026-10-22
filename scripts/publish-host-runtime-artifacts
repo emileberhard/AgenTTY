@@ -1,0 +1,606 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage:
+  publish-host-runtime-artifacts --version <semver> [--auto-rebuild-notify]
+  publish-host-runtime-artifacts --version <semver> --reuse-existing-release [--auto-rebuild-notify]
+  publish-host-runtime-artifacts --version <semver> --verify-existing-release
+  publish-host-runtime-artifacts --latest [--auto-rebuild-notify]
+EOF
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+source_root="$repo_root/HostRuntimeArtifacts/bin"
+public_root="${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-$HOME/.agentty/public/host-runtime}"
+base_url="${AGENTTY_HOST_RUNTIME_BASE_URL:-https://agentty-assets.esmadil.se/host-runtime}"
+base_url="${base_url%/}"
+required_host="${AGENTTY_HOST_RUNTIME_PUBLISH_HOST:-}"
+host_connector_smoke_config="${AGENTTY_HOST_CONNECTOR_SMOKE_CONFIG:-$HOME/.agentty/config/host-connector.json}"
+skip_host_connector_smoke="${AGENTTY_SKIP_HOST_CONNECTOR_SMOKE:-false}"
+notify_source_hash_script="$script_dir/agentty-notify-source-hash"
+notify_source_hash_stamp="$source_root/.agentty-notify-source.sha256"
+connector_source_hash_script="$script_dir/agentty-host-connector-source-hash"
+connector_source_hash_stamp="$source_root/.agentty-host-connector-source.sha256"
+# shellcheck source=scripts/tmux-runtime-config.sh
+source "$script_dir/tmux-runtime-config.sh"
+
+current_host() {
+  if command -v scutil >/dev/null 2>&1; then
+    scutil --get LocalHostName 2>/dev/null && return 0
+  fi
+  hostname -s 2>/dev/null || hostname
+}
+
+require_mac_mini_host() {
+  if [[ -n "$required_host" && "$(current_host)" != "$required_host" ]]; then
+    echo "This command only runs locally on $required_host." >&2
+    exit 1
+  fi
+}
+
+sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    sha256sum "$path" | awk '{print $1}'
+  fi
+}
+
+read_trimmed_file() {
+  local path="$1"
+  tr -d '[:space:]' < "$path"
+}
+
+json_runtime_version() {
+  local path="$1"
+  python3 - "$path" <<'PY'
+import json
+import pathlib
+import sys
+
+manifest_path = pathlib.Path(sys.argv[1])
+runtime_version = json.loads(manifest_path.read_text(encoding="utf-8"))["runtime_version"]
+print(runtime_version)
+PY
+}
+
+ensure_notify_helper_artifacts_current() {
+  local source_hash=""
+  local stamped_hash=""
+
+  [[ -x "$notify_source_hash_script" ]] || {
+    echo "Missing executable $notify_source_hash_script" >&2
+    exit 1
+  }
+
+  source_hash="$("$notify_source_hash_script")"
+  if [[ -f "$notify_source_hash_stamp" ]]; then
+    stamped_hash="$(read_trimmed_file "$notify_source_hash_stamp")"
+  fi
+
+  if [[ -n "$stamped_hash" && "$source_hash" == "$stamped_hash" ]]; then
+    return 0
+  fi
+
+  if [[ "$auto_rebuild_notify" != true ]]; then
+    if [[ -z "$stamped_hash" ]]; then
+      echo "Missing $notify_source_hash_stamp. Run 'just notify-helper-rebuild' before publishing host runtime artifacts." >&2
+    else
+      echo "agentty-notify artifacts drift from tools/agentty-notify source. Run 'just notify-helper-rebuild' before publishing host runtime artifacts." >&2
+    fi
+    exit 1
+  fi
+
+  echo "agentty-notify artifacts drift from source; rebuilding host runtime helper"
+  (
+    cd "$repo_root"
+    just --justfile "$repo_root/Justfile" notify-helper-rebuild
+  )
+
+  [[ -f "$notify_source_hash_stamp" ]] || {
+    echo "Missing $notify_source_hash_stamp after notify-helper-rebuild." >&2
+    exit 1
+  }
+
+  stamped_hash="$(read_trimmed_file "$notify_source_hash_stamp")"
+  if [[ "$source_hash" != "$stamped_hash" ]]; then
+    echo "agentty-notify artifact source stamp still mismatches after rebuild." >&2
+    exit 1
+  fi
+}
+
+ensure_host_connector_artifacts_current() {
+  local source_hash=""
+  local stamped_hash=""
+
+  [[ -x "$connector_source_hash_script" ]] || {
+    echo "Missing executable $connector_source_hash_script" >&2
+    exit 1
+  }
+
+  source_hash="$("$connector_source_hash_script")"
+  if [[ -f "$connector_source_hash_stamp" ]]; then
+    stamped_hash="$(read_trimmed_file "$connector_source_hash_stamp")"
+  fi
+
+  if [[ -n "$stamped_hash" && "$source_hash" == "$stamped_hash" ]]; then
+    return 0
+  fi
+
+  echo "agentty-host-connector artifacts drift from source; rebuilding host runtime connector"
+  (
+    cd "$repo_root"
+    just --justfile "$repo_root/Justfile" host-connector-rebuild
+  )
+
+  [[ -f "$connector_source_hash_stamp" ]] || {
+    echo "Missing $connector_source_hash_stamp after host-connector-rebuild." >&2
+    exit 1
+  }
+
+  stamped_hash="$(read_trimmed_file "$connector_source_hash_stamp")"
+  if [[ "$source_hash" != "$stamped_hash" ]]; then
+    echo "agentty-host-connector artifact source stamp still mismatches after rebuild." >&2
+    exit 1
+  fi
+}
+
+render_manifest() {
+  local manifest_path="$1"
+  local runtime_version="$2"
+  local generated_at="$3"
+  local url_prefix="$4"
+  local payload_root="$5"
+
+  MANIFEST_PATH="$manifest_path" \
+  RUNTIME_VERSION="$runtime_version" \
+  GENERATED_AT="$generated_at" \
+  URL_PREFIX="$url_prefix" \
+  PAYLOAD_ROOT="$payload_root" \
+  NOTIFY_SOURCE_HASH="$("$notify_source_hash_script")" \
+  CONNECTOR_SOURCE_HASH="$("$connector_source_hash_script")" \
+  python3 <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path
+
+payload_root = Path(os.environ["PAYLOAD_ROOT"])
+targets = {}
+for target_dir in sorted(path for path in payload_root.iterdir() if path.is_dir()):
+    target = target_dir.name
+    terminfo_entries = []
+    terminfo_root = target_dir / "terminfo"
+    if terminfo_root.exists():
+        for terminfo_path in sorted(path for path in terminfo_root.rglob("*") if path.is_file()):
+            relative_path = terminfo_path.relative_to(terminfo_root).as_posix()
+            terminfo_entries.append(
+                {
+                    "relative_path": relative_path,
+                    "url": f"{os.environ['URL_PREFIX']}/{target}/terminfo/{relative_path}",
+                    "sha256": hashlib.sha256(terminfo_path.read_bytes()).hexdigest(),
+                }
+            )
+    targets[target] = {
+        "tmux": {
+            "url": f"{os.environ['URL_PREFIX']}/{target}/tmux",
+            "sha256": hashlib.sha256((target_dir / "tmux").read_bytes()).hexdigest(),
+        },
+        "agentty_notify": {
+            "url": f"{os.environ['URL_PREFIX']}/{target}/agentty-notify",
+            "sha256": hashlib.sha256((target_dir / "agentty-notify").read_bytes()).hexdigest(),
+        },
+        "agentty_host_connector": {
+            "url": f"{os.environ['URL_PREFIX']}/{target}/agentty-host-connector",
+            "sha256": hashlib.sha256((target_dir / "agentty-host-connector").read_bytes()).hexdigest(),
+        },
+        "terminfo_entries": terminfo_entries,
+    }
+
+payload = {
+    "schema_version": 1,
+    "runtime_version": os.environ["RUNTIME_VERSION"],
+    "generated_at": os.environ["GENERATED_AT"],
+    "source_hashes": {
+        "agentty_notify": os.environ["NOTIFY_SOURCE_HASH"],
+        "agentty_host_connector": os.environ["CONNECTOR_SOURCE_HASH"],
+    },
+    "targets": targets,
+}
+
+Path(os.environ["MANIFEST_PATH"]).write_text(
+    json.dumps(payload, indent=2, sort_keys=False) + "\n",
+    encoding="utf-8",
+)
+PY
+}
+
+list_target_payload_files() {
+  local target_root="$1"
+  find "$target_root" -type f ! -name '.DS_Store' | sort | while IFS= read -r path; do
+    path="${path#"$target_root"/}"
+    printf '%s\n' "$path"
+  done
+}
+
+assert_source_files() {
+  ensure_notify_helper_artifacts_current
+  ensure_host_connector_artifacts_current
+
+  local target=""
+  local entry=""
+  local terminfo_path=""
+  for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+    cp "$repo_root/THIRD-PARTY-NOTICES.txt" "$source_root/$target/THIRD-PARTY-NOTICES.txt"
+    cp "$repo_root/LICENSE" "$source_root/$target/LICENSE"
+    [[ -x "$source_root/$target/tmux" ]] || {
+      echo "Missing $source_root/$target/tmux" >&2
+      exit 1
+    }
+    [[ -x "$source_root/$target/agentty-notify" ]] || {
+      echo "Missing $source_root/$target/agentty-notify" >&2
+      exit 1
+    }
+    [[ -x "$source_root/$target/agentty-host-connector" ]] || {
+      echo "Missing $source_root/$target/agentty-host-connector" >&2
+      exit 1
+    }
+
+    for entry in "${TMUX_RUNTIME_TERMINFO_ENTRIES[@]}"; do
+      terminfo_path="$(find "$source_root/$target/terminfo" -type f -name "$entry" -print -quit)"
+      [[ -n "$terminfo_path" ]] || {
+        echo "Missing compiled terminfo entry for $target: $entry" >&2
+        exit 1
+      }
+    done
+  done
+}
+
+verify_staged_host_connector_artifact() {
+  local config_path="$host_connector_smoke_config"
+  local connector_binary="$source_root/darwin-arm64/agentty-host-connector"
+
+  if [[ "$skip_host_connector_smoke" == "1" || "$skip_host_connector_smoke" == "true" ]]; then
+    echo "Skipping host connector smoke verification because AGENTTY_SKIP_HOST_CONNECTOR_SMOKE is set."
+    return 0
+  fi
+
+  [[ -x "$connector_binary" ]] || {
+    echo "Missing executable $connector_binary" >&2
+    exit 1
+  }
+  [[ -f "$config_path" ]] || {
+    echo "Missing $config_path required for host connector smoke verification." >&2
+    exit 1
+  }
+
+  echo "Verifying staged darwin-arm64 host connector artifact"
+  "$connector_binary" probe-control --config "$config_path"
+}
+
+stage_release_tree() {
+  local destination_root="$1"
+  local target=""
+
+  mkdir -p "$destination_root"
+  for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+    local target_dir="$destination_root/$target"
+    mkdir -p "$target_dir"
+    cp -R "$source_root/$target/." "$target_dir/"
+  done
+}
+
+release_payload_matches_source() {
+  local release_root="$1"
+  local target=""
+
+  [[ -f "$release_root/manifest.json" ]] || return 1
+
+  for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+    local source_target_root="$source_root/$target"
+    local release_target_root="$release_root/$target"
+    local source_files
+    local release_files
+    local relative_path
+
+    [[ -d "$release_target_root" ]] || return 1
+
+    source_files="$(list_target_payload_files "$source_target_root")"
+    release_files="$(list_target_payload_files "$release_target_root")"
+    [[ "$source_files" == "$release_files" ]] || return 1
+
+    while IFS= read -r relative_path; do
+      [[ -n "$relative_path" ]] || continue
+      [[ "$(sha256_file "$source_target_root/$relative_path")" == "$(sha256_file "$release_target_root/$relative_path")" ]] || return 1
+    done <<< "$source_files"
+  done
+
+  return 0
+}
+
+release_manifest_matches_payload() {
+  local runtime_version="$1"
+  local release_root="$2"
+
+  [[ -f "$release_root/manifest.json" ]] || return 1
+
+  EXPECTED_TARGETS="${TMUX_RUNTIME_TARGETS[*]}" \
+  EXPECTED_NOTIFY_SOURCE_HASH="$("$notify_source_hash_script")" \
+  EXPECTED_CONNECTOR_SOURCE_HASH="$("$connector_source_hash_script")" \
+  EXPECTED_URL_PREFIX="$base_url/releases/$runtime_version" \
+  python3 - "$release_root" "$runtime_version" <<'PY'
+import hashlib
+import json
+import os
+from pathlib import Path, PurePosixPath
+import sys
+
+release_root = Path(sys.argv[1])
+expected_version = sys.argv[2]
+expected_targets = set(os.environ["EXPECTED_TARGETS"].split())
+expected_url_prefix = os.environ["EXPECTED_URL_PREFIX"]
+
+try:
+    manifest = json.loads((release_root / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("schema_version") != 1:
+        raise ValueError("unsupported manifest schema")
+    if manifest.get("runtime_version") != expected_version:
+        raise ValueError("runtime version mismatch")
+
+    source_hashes = manifest.get("source_hashes")
+    expected_source_hashes = {
+        "agentty_notify": os.environ["EXPECTED_NOTIFY_SOURCE_HASH"],
+        "agentty_host_connector": os.environ["EXPECTED_CONNECTOR_SOURCE_HASH"],
+    }
+    if not isinstance(source_hashes, dict):
+        raise ValueError("missing source hashes")
+    for name, expected_source_hash in expected_source_hashes.items():
+        if source_hashes.get(name) != expected_source_hash:
+            raise ValueError(f"source hash mismatch for {name}")
+
+    targets = manifest.get("targets")
+    if not isinstance(targets, dict) or set(targets) != expected_targets:
+        raise ValueError("target set mismatch")
+
+    artifact_names = {
+        "tmux": "tmux",
+        "agentty_notify": "agentty-notify",
+        "agentty_host_connector": "agentty-host-connector",
+    }
+
+    def verify(path: Path, expected_sha256: object) -> None:
+        if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
+            raise ValueError(f"invalid SHA-256 for {path}")
+        if not path.is_file():
+            raise ValueError(f"missing payload {path}")
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual != expected_sha256:
+            raise ValueError(f"checksum mismatch for {path}")
+
+    for target in sorted(expected_targets):
+        target_manifest = targets[target]
+        if not isinstance(target_manifest, dict):
+            raise ValueError(f"invalid target manifest for {target}")
+
+        target_root = release_root / target
+        for key, filename in artifact_names.items():
+            artifact = target_manifest.get(key)
+            if not isinstance(artifact, dict):
+                raise ValueError(f"missing {key} descriptor for {target}")
+            expected_url = f"{expected_url_prefix}/{target}/{filename}"
+            if artifact.get("url") != expected_url:
+                raise ValueError(f"URL mismatch for {target}/{filename}")
+            verify(target_root / filename, artifact.get("sha256"))
+
+        entries = target_manifest.get("terminfo_entries")
+        if not isinstance(entries, list) or not entries:
+            raise ValueError(f"missing terminfo entries for {target}")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"invalid terminfo descriptor for {target}")
+            relative_path = entry.get("relative_path")
+            if not isinstance(relative_path, str):
+                raise ValueError(f"invalid terminfo path for {target}")
+            parsed_path = PurePosixPath(relative_path)
+            if parsed_path.is_absolute() or ".." in parsed_path.parts:
+                raise ValueError(f"unsafe terminfo path for {target}")
+            expected_url = f"{expected_url_prefix}/{target}/terminfo/{relative_path}"
+            if entry.get("url") != expected_url:
+                raise ValueError(f"URL mismatch for {target}/terminfo/{relative_path}")
+            verify(target_root / "terminfo" / Path(*parsed_path.parts), entry.get("sha256"))
+except (OSError, ValueError, json.JSONDecodeError) as error:
+    print(f"Existing host runtime release is invalid: {error}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+publish_immutable_release() {
+  local runtime_version="$1"
+  local release_root="$public_root/releases/$runtime_version"
+  local staging_root="$public_root/.publish-release-$runtime_version-$$"
+  local generated_at
+
+  if [[ -d "$release_root" ]]; then
+    if release_payload_matches_source "$release_root" &&
+       release_manifest_matches_payload "$runtime_version" "$release_root"; then
+      echo "release runtime already published version=$runtime_version"
+      return 0
+    fi
+
+    echo "Refusing to overwrite existing host runtime release $runtime_version with different bytes." >&2
+    exit 1
+  fi
+
+  stage_release_tree "$staging_root"
+  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  render_manifest \
+    "$staging_root/manifest.json" \
+    "$runtime_version" \
+    "$generated_at" \
+    "$base_url/releases/$runtime_version" \
+    "$staging_root"
+
+  mkdir -p "$(dirname "$release_root")"
+  mv "$staging_root" "$release_root"
+  echo "published release runtime version=$runtime_version path=$release_root"
+}
+
+publish_latest_manifest() {
+  local latest_manifest="$public_root/latest.json"
+  local runtime_hash
+  local runtime_version
+  local published_runtime_version=""
+  local generated_at
+  local manifest_tmp
+  local target=""
+
+  runtime_hash="$(
+    {
+      printf '%s  %s\n' "$base_url" config/base-url
+      printf '%s  %s\n' "$("$notify_source_hash_script")" source/agentty-notify
+      printf '%s  %s\n' "$("$connector_source_hash_script")" source/agentty-host-connector
+      for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+        while IFS= read -r relative_path; do
+          [[ -n "$relative_path" ]] || continue
+          printf '%s  %s\n' "$(sha256_file "$source_root/$target/$relative_path")" "$target/$relative_path"
+        done < <(list_target_payload_files "$source_root/$target")
+      done
+    } | shasum -a 256 | awk '{print $1}'
+  )"
+  runtime_version="latest-${runtime_hash:0:12}"
+
+  if [[ -f "$latest_manifest" ]]; then
+    published_runtime_version="$(json_runtime_version "$latest_manifest" || true)"
+    if [[ "$published_runtime_version" == "$runtime_version" ]] &&
+       release_payload_matches_source "$public_root/releases/$runtime_version" &&
+       release_manifest_matches_payload "$runtime_version" "$public_root/releases/$runtime_version"; then
+      echo "latest runtime already published version=$runtime_version"
+      return 0
+    fi
+  fi
+
+  publish_immutable_release "$runtime_version"
+
+  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  manifest_tmp="$(mktemp "$public_root/latest.json.tmp.XXXXXX")"
+  render_manifest \
+    "$manifest_tmp" \
+    "$runtime_version" \
+    "$generated_at" \
+    "$base_url/releases/$runtime_version" \
+    "$public_root/releases/$runtime_version"
+
+  mv "$manifest_tmp" "$latest_manifest"
+  echo "published latest runtime version=$runtime_version"
+}
+
+mode=""
+version=""
+auto_rebuild_notify=false
+reuse_existing_release=false
+verify_existing_release=false
+while (($# > 0)); do
+  case "$1" in
+    --version)
+      mode="release"
+      version="${2:-}"
+      shift 2
+      ;;
+    --latest)
+      mode="latest"
+      shift
+      ;;
+    --auto-rebuild-notify)
+      auto_rebuild_notify=true
+      shift
+      ;;
+    --reuse-existing-release)
+      reuse_existing_release=true
+      shift
+      ;;
+    --verify-existing-release)
+      verify_existing_release=true
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [[ "$mode" == "release" && ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  echo "Release version must be semver (x.y.z)." >&2
+  exit 1
+fi
+
+if [[ "$mode" != "release" && "$mode" != "latest" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ "$reuse_existing_release" == true && "$verify_existing_release" == true ]]; then
+  echo "Choose either --reuse-existing-release or --verify-existing-release." >&2
+  exit 2
+fi
+
+if [[ "$mode" != "release" && ("$reuse_existing_release" == true || "$verify_existing_release" == true) ]]; then
+  echo "Existing-release options require --version <semver>." >&2
+  exit 2
+fi
+
+if [[ "$verify_existing_release" == true && "$auto_rebuild_notify" == true ]]; then
+  echo "--verify-existing-release cannot rebuild artifacts." >&2
+  exit 2
+fi
+
+require_mac_mini_host
+
+if [[ "$mode" == "release" && "$verify_existing_release" == true ]]; then
+  existing_release_root="$public_root/releases/$version"
+  if [[ ! -d "$existing_release_root" ]]; then
+    echo "host runtime release is not published version=$version"
+    exit 3
+  fi
+  if release_manifest_matches_payload "$version" "$existing_release_root"; then
+    echo "verified immutable release runtime version=$version"
+    exit 0
+  fi
+  echo "Host runtime release $version exists but failed verification." >&2
+  exit 1
+fi
+
+mkdir -p "$public_root/releases"
+
+if [[ "$mode" == "release" && "$reuse_existing_release" == true ]]; then
+  existing_release_root="$public_root/releases/$version"
+  if [[ -d "$existing_release_root" ]]; then
+    if release_manifest_matches_payload "$version" "$existing_release_root"; then
+      echo "reusing verified immutable release runtime version=$version"
+      exit 0
+    fi
+    echo "Refusing to reuse invalid host runtime release $version." >&2
+    exit 1
+  fi
+fi
+
+assert_source_files
+verify_staged_host_connector_artifact
+
+case "$mode" in
+  release)
+    publish_immutable_release "$version"
+    ;;
+  latest)
+    publish_latest_manifest
+    ;;
+esac

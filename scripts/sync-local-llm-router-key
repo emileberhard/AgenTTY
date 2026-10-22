@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+key_file="$HOME/.config/llm-router/agentty-ios.key"
+if [[ ! -s "$key_file" ]]; then
+    echo "No local router key; developer AI remains unconfigured."
+    exit 0
+fi
+
+KEY_FILE="$key_file" python3 <<'PY'
+import base64
+import json
+import os
+import sys
+from pathlib import Path
+
+path = Path("AgenTTY/Resources/AgenTTYLocalSecrets.json")
+config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+origin = config.get("llmRouter", {}).get("origin")
+if not origin:
+    print("No local router origin; developer AI remains unconfigured.")
+    sys.exit(0)
+key = Path(os.environ["KEY_FILE"]).read_text(encoding="utf-8").strip()
+router = {
+    "origin": origin,
+    "keyBase64": base64.b64encode(key.encode("utf-8")).decode("ascii"),
+}
+
+retired = config.pop("dictation", None) is not None
+if config.get("llmRouter") != router or retired:
+    config["llmRouter"] = router
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    print("Synced the llm-router key" + (" and removed retired provider keys" if retired else ""))
+PY

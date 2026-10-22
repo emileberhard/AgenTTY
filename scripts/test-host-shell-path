@@ -1,0 +1,95 @@
+#!/bin/bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+fixture_root="$(mktemp -d "${TMPDIR:-/tmp}/agentty-shell-path.XXXXXX")"
+trap 'rm -rf "$fixture_root"' EXIT
+zsh_bin="$(command -v zsh || true)"
+bash_bin="$(command -v bash)"
+
+prepare_fixture() {
+    local home="$1"
+    mkdir -p "$home/.agentty/bin" "$home/.local/bin" "$home/.fnm/bin"
+    printf '#!/bin/sh\nprintf "managed-claude\\n"\n' > "$home/.agentty/bin/claude"
+    printf '#!/bin/sh\nprintf "managed-codex\\n"\n' > "$home/.agentty/bin/codex"
+    printf '#!/bin/sh\nprintf "real-claude\\n"\n' > "$home/.local/bin/claude"
+    printf '#!/bin/sh\nprintf "real-codex\\n"\n' > "$home/.fnm/bin/codex"
+    chmod +x "$home/.agentty/bin/claude" "$home/.agentty/bin/codex" \
+        "$home/.local/bin/claude" "$home/.fnm/bin/codex"
+}
+
+assert_managed_commands_win() {
+    local shell_name="$1"
+    local actual="$2"
+    local expected=$'managed-claude\nmanaged-codex'
+    if [[ "$actual" != "$expected" ]]; then
+        printf 'FATAL: %s startup resolved unmanaged agent commands.\nExpected:\n%s\nActual:\n%s\n' \
+            "$shell_name" "$expected" "$actual" >&2
+        exit 1
+    fi
+}
+
+if [[ -n "$zsh_bin" ]]; then
+    zsh_home="$fixture_root/zsh-home"
+    prepare_fixture "$zsh_home"
+    mkdir -p "$zsh_home/.agentty/config/shell/zsh"
+    cp "$repo_root/AgenTTY/Resources/notifications/shell/zsh/.zshrc" \
+        "$zsh_home/.agentty/config/shell/zsh/.zshrc"
+    printf '%s\n' \
+        'autoload -Uz add-zsh-hook' \
+        '_move_agent_bins_ahead() { PATH="$HOME/.local/bin:$HOME/.fnm/bin:$PATH"; export PATH; }' \
+        'add-zsh-hook chpwd _move_agent_bins_ahead' \
+        '_move_agent_bins_ahead' \
+        'claude() { command env claude "$@"; }' > "$zsh_home/.zshrc"
+    zsh_output="$(
+        HOME="$zsh_home" \
+        ZDOTDIR="$zsh_home/.agentty/config/shell/zsh" \
+        PATH="$zsh_home/.agentty/bin:/usr/bin:/bin" \
+        "$zsh_bin" -i -c 'cd /; claude; codex'
+    )"
+    assert_managed_commands_win zsh "$zsh_output"
+fi
+
+bash_home="$fixture_root/bash-home"
+prepare_fixture "$bash_home"
+printf '%s\n' \
+    '_move_agent_bins_ahead() { PATH="$HOME/.local/bin:$HOME/.fnm/bin:$PATH"; export PATH; }' \
+    'PROMPT_COMMAND=_move_agent_bins_ahead' \
+    '_move_agent_bins_ahead' \
+    'claude() { command env claude "$@"; }' > "$bash_home/.bashrc"
+bash_output="$(
+    printf '%s\n' 'cd /' 'claude' 'codex' 'exit' | \
+        HOME="$bash_home" \
+        PATH="$bash_home/.agentty/bin:/usr/bin:/bin" \
+        "$bash_bin" --rcfile "$repo_root/AgenTTY/Resources/notifications/shell/bashrc" \
+            -i 2>/dev/null
+)"
+assert_managed_commands_win bash "$bash_output"
+
+modern_bash=""
+for candidate in "$bash_bin" /opt/homebrew/bin/bash /usr/local/bin/bash; do
+    if [[ -x "$candidate" ]] && [[ "$("$candidate" -c 'printf %s "${BASH_VERSINFO[0]}"')" -ge 5 ]]; then
+        modern_bash="$candidate"
+        break
+    fi
+done
+
+if [[ -n "$modern_bash" ]]; then
+    bash_array_home="$fixture_root/bash-array-home"
+    prepare_fixture "$bash_array_home"
+    printf '%s\n' \
+        '_move_agent_bins_ahead() { PATH="$HOME/.local/bin:$HOME/.fnm/bin:$PATH"; export PATH; }' \
+        'declare -a PROMPT_COMMAND=(_move_agent_bins_ahead)' \
+        '_move_agent_bins_ahead' \
+        'claude() { command env claude "$@"; }' > "$bash_array_home/.bashrc"
+    bash_array_output="$(
+        printf '%s\n' 'cd /' 'claude' 'codex' 'exit' | \
+            HOME="$bash_array_home" \
+            PATH="$bash_array_home/.agentty/bin:/usr/bin:/bin" \
+            "$modern_bash" --rcfile "$repo_root/AgenTTY/Resources/notifications/shell/bashrc" \
+                -i 2>/dev/null
+    )"
+    assert_managed_commands_win "bash array PROMPT_COMMAND" "$bash_array_output"
+fi
+
+printf 'Host shell PATH precedence verified for zsh, Bash 3, and Bash 5.\n'

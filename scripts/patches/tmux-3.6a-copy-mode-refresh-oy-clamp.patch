@@ -1,0 +1,39 @@
+tmux crashes (killing the whole server and every shell in it) when the
+copy-mode refresh-from-pane command — bound to "r" in both default
+copy-mode key tables — replaces the copy-mode backing screen with a
+clone that has less history than the current scroll offset. The pane
+can legitimately have less history than before, most commonly because
+it switched to the alternate screen (hsize 0) after copy mode was
+entered on the normal screen and scrolled up. window_copy_size_changed
+→ window_copy_clear_selection then computes
+py = screen_hsize(backing) + cy - oy with the stale larger oy, the
+u_int subtraction wraps to a huge line number, and grid_line_length
+reads far outside the grid (observed as SIGBUS in unallocated reserved
+VM). Upstream later restructured this path and clamps oy the same way;
+3.6a does not. The grid_line_length bounds guard additionally turns any
+other out-of-range line-length lookup into a harmless empty-line result
+instead of a server-killing wild read.
+
+--- a/window-copy.c
++++ b/window-copy.c
+@@ -2682,6 +2682,9 @@
+ 	data->backing = window_copy_clone_screen(&wp->base, &data->screen, NULL,
+ 	    NULL, wme->swp != wme->wp);
+
++	if (data->oy > screen_hsize(data->backing))
++		data->oy = screen_hsize(data->backing);
++
+ 	window_copy_size_changed(wme);
+ 	return (WINDOW_COPY_CMD_REDRAW);
+ }
+--- a/grid.c
++++ b/grid.c
+@@ -1549,6 +1549,8 @@
+ 	struct grid_cell	gc;
+ 	u_int			px;
+
++	if (py >= gd->hsize + gd->sy)
++		return (0);
+ 	px = grid_get_line(gd, py)->cellsize;
+ 	if (px > gd->sx)
+ 		px = gd->sx;

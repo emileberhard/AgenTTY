@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage: sync-tmux-runtime-artifacts <run-id>
+EOF
+}
+
+if [ "$#" -ne 1 ]; then
+  usage
+  exit 2
+fi
+
+run_id="$1"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+resource_root="$repo_root/HostRuntimeArtifacts/bin"
+gh_cli="${AGENTTY_GH_CLI:-ghp}"
+source "$script_dir/tmux-runtime-config.sh"
+tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/agentty-tmux-artifacts.XXXXXX")"
+trap 'rm -rf "$tmpdir"' EXIT
+
+sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    sha256sum "$path" | awk '{print $1}'
+  fi
+}
+
+verify_checksums() {
+  local artifact_dir="$1"
+  local checksums_path="$artifact_dir/checksums.txt"
+
+  if [ ! -f "$checksums_path" ]; then
+    echo "Missing checksums.txt in workflow artifact: $artifact_dir" >&2
+    exit 1
+  fi
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    expected_checksum="${line%%  *}"
+    relative_path="${line#*  }"
+    file_path="$artifact_dir/$relative_path"
+
+    if [ ! -f "$file_path" ]; then
+      echo "Missing $relative_path in workflow artifact." >&2
+      exit 1
+    fi
+
+    actual_checksum="$(sha256_file "$file_path")"
+    if [ "$expected_checksum" != "$actual_checksum" ]; then
+      echo "Checksum mismatch for $relative_path" >&2
+      echo "  expected: $expected_checksum" >&2
+      echo "  actual:   $actual_checksum" >&2
+      exit 1
+    fi
+  done < "$checksums_path"
+}
+
+"$gh_cli" run download "$run_id" -n tmux-runtime-bundle --dir "$tmpdir"
+
+bundle_dir="$tmpdir"
+
+for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+  artifact_dir="$bundle_dir/$target"
+  binary_path="$artifact_dir/tmux"
+  terminfo_dir="$artifact_dir/terminfo"
+
+  if [ ! -f "$binary_path" ]; then
+    echo "Missing tmux binary for $target in workflow artifact." >&2
+    exit 1
+  fi
+
+  if [ ! -d "$terminfo_dir" ]; then
+    echo "Missing terminfo directory for $target in workflow artifact." >&2
+    exit 1
+  fi
+
+  verify_checksums "$artifact_dir"
+
+  install -d "$resource_root/$target"
+  cp "$binary_path" "$resource_root/$target/tmux"
+  chmod 755 "$resource_root/$target/tmux"
+  rm -rf "$resource_root/$target/terminfo"
+  cp -R "$terminfo_dir" "$resource_root/$target/terminfo"
+  echo "synced $target"
+done

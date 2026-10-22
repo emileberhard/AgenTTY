@@ -1,0 +1,438 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF' >&2
+Usage: build-tmux-runtime [options]
+
+Options:
+  --target <darwin-arm64|darwin-x86_64|linux-arm64|linux-x86_64>
+      Build one explicit target.
+
+  --output-dir <dir>
+      Output root for bundled binaries.
+      Default: HostRuntimeArtifacts/bin
+
+  --build-root <dir>
+      Reuse a caller-provided temporary build root.
+
+  --keep-build-root
+      Do not delete the build root on exit.
+EOF
+}
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+default_output_root="$repo_root/HostRuntimeArtifacts/bin"
+source "$script_dir/tmux-runtime-config.sh"
+
+tmux_version="$TMUX_RUNTIME_TMUX_VERSION"
+tmux_url="$TMUX_RUNTIME_TMUX_URL"
+tmux_sha256="$TMUX_RUNTIME_TMUX_SHA256"
+
+libevent_version="$TMUX_RUNTIME_LIBEVENT_VERSION"
+libevent_url="$TMUX_RUNTIME_LIBEVENT_URL"
+libevent_sha256="$TMUX_RUNTIME_LIBEVENT_SHA256"
+
+ncurses_version="$TMUX_RUNTIME_NCURSES_VERSION"
+ncurses_url="$TMUX_RUNTIME_NCURSES_URL"
+ncurses_sha256="$TMUX_RUNTIME_NCURSES_SHA256"
+
+target=""
+output_root="$default_output_root"
+build_root=""
+keep_build_root="false"
+
+while (($# > 0)); do
+  case "$1" in
+    --target)
+      target="${2:-}"
+      shift 2
+      ;;
+    --output-dir)
+      output_root="${2:-}"
+      shift 2
+      ;;
+    --build-root)
+      build_root="${2:-}"
+      shift 2
+      ;;
+    --keep-build-root)
+      keep_build_root="true"
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+current_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
+current_arch_raw="$(uname -m | tr '[:upper:]' '[:lower:]')"
+case "$current_arch_raw" in
+  arm64|aarch64)
+    current_arch="arm64"
+    ;;
+  x86_64|amd64)
+    current_arch="x86_64"
+    ;;
+  *)
+    echo "Unsupported host architecture: $current_arch_raw" >&2
+    exit 1
+    ;;
+esac
+
+if [ -z "$target" ]; then
+  case "$current_os" in
+    darwin)
+      targets=(darwin-arm64 darwin-x86_64)
+      ;;
+    linux)
+      targets=("linux-${current_arch}")
+      ;;
+    *)
+      echo "Unsupported host OS: $current_os" >&2
+      exit 1
+      ;;
+  esac
+else
+  targets=("$target")
+fi
+
+if [ -n "$build_root" ]; then
+  mkdir -p "$build_root"
+else
+  build_root="$(mktemp -d "${TMPDIR:-/tmp}/agentty-tmux-build.XXXXXX")"
+fi
+
+if [ "$keep_build_root" != "true" ]; then
+  trap 'rm -rf "$build_root"' EXIT
+fi
+
+downloads_dir="$build_root/downloads"
+work_dir="$build_root/work"
+mkdir -p "$downloads_dir" "$work_dir"
+
+if command -v getconf >/dev/null 2>&1; then
+  cpu_count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+else
+  cpu_count="$(sysctl -n hw.ncpu 2>/dev/null || echo 8)"
+fi
+
+sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    sha256sum "$path" | awk '{print $1}'
+  fi
+}
+
+require_command() {
+  local command_name="$1"
+  if ! command -v "$command_name" >/dev/null 2>&1; then
+    echo "Missing required command: $command_name" >&2
+    exit 1
+  fi
+}
+
+download_archive() {
+  local archive_name="$1"
+  local archive_url="$2"
+  local expected_sha256="$3"
+  local archive_path="$downloads_dir/$archive_name"
+
+  if [ -f "$archive_path" ]; then
+    local cached_sha256
+    cached_sha256="$(sha256_file "$archive_path")"
+    if [ "$cached_sha256" = "$expected_sha256" ]; then
+      printf '%s\n' "$archive_path"
+      return
+    fi
+    rm -f "$archive_path"
+  fi
+
+  local download_tmp
+  download_tmp="$(mktemp "$downloads_dir/${archive_name}.part.XXXXXX")"
+  if ! curl --fail --location --retry 3 --retry-delay 2 --retry-connrefused --output "$download_tmp" "$archive_url"; then
+    rm -f "$download_tmp"
+    exit 1
+  fi
+
+  local actual_sha256
+  actual_sha256="$(sha256_file "$download_tmp")"
+  if [ "$actual_sha256" != "$expected_sha256" ]; then
+    rm -f "$download_tmp"
+    echo "SHA256 mismatch for $archive_name" >&2
+    echo "  expected: $expected_sha256" >&2
+    echo "  actual:   $actual_sha256" >&2
+    exit 1
+  fi
+
+  mv "$download_tmp" "$archive_path"
+
+  printf '%s\n' "$archive_path"
+}
+
+extract_archive() {
+  local archive_path="$1"
+  local destination_dir="$2"
+
+  rm -rf "$destination_dir"
+  mkdir -p "$destination_dir"
+  tar -xzf "$archive_path" -C "$destination_dir" --strip-components=1
+}
+
+patch_tmux_source() {
+  local tmux_source_dir="$1"
+  local patch_file
+  for patch_file in "$script_dir/patches/tmux-"*.patch; do
+    if ! patch -p1 -d "$tmux_source_dir" < "$patch_file"; then
+      echo "tmux patch failed to apply: $patch_file (rebase it against tmux $tmux_version)" >&2
+      exit 1
+    fi
+  done
+}
+
+strip_binary() {
+  local binary_path="$1"
+  case "$current_os" in
+    darwin)
+      strip -x "$binary_path"
+      ;;
+    linux)
+      strip --strip-unneeded "$binary_path"
+      ;;
+  esac
+}
+
+compile_terminfo_entries() {
+  local terminfo_source_path="$1"
+  local destination_dir="$2"
+  local entry_name
+  local entry_path
+  local entry_source_path="$terminfo_source_path"
+  local entry_source_dir=""
+
+  require_command tic
+
+  rm -rf "$destination_dir"
+  mkdir -p "$destination_dir"
+
+  if [ "$current_os" = "darwin" ]; then
+    require_command infocmp
+    entry_source_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentty-terminfo-src.XXXXXX")"
+  else
+    # Compile only the managed entries. Compiling all of terminfo.src bundles
+    # thousands of entries, including names that differ only by case, which
+    # cannot be extracted on case-insensitive APFS when maintainer machines
+    # sync the artifact bundle.
+    local managed_entry_list
+    managed_entry_list="$(IFS=,; printf '%s' "${TMUX_RUNTIME_TERMINFO_ENTRIES[*]}")"
+    tic -x -e "$managed_entry_list" -o "$destination_dir" "$terminfo_source_path"
+  fi
+
+  for entry_name in "${TMUX_RUNTIME_TERMINFO_ENTRIES[@]}"; do
+    if [ "$current_os" = "darwin" ]; then
+      entry_source_path="$entry_source_dir/$entry_name.src"
+      infocmp -x "$entry_name" > "$entry_source_path"
+      tic -x -o "$destination_dir" "$entry_source_path" || true
+    fi
+
+    entry_path="$(find "$destination_dir" -type f -name "$entry_name" -print -quit)"
+    if [ -z "$entry_path" ]; then
+      echo "Missing compiled terminfo entry: $entry_name" >&2
+      exit 1
+    fi
+  done
+
+  if [ -n "$entry_source_dir" ]; then
+    rm -rf "$entry_source_dir"
+  fi
+}
+
+install_binary() {
+  local output_target="$1"
+  local built_binary_path="$2"
+  local destination_dir="$output_root/$output_target"
+  local destination_path="$destination_dir/tmux"
+
+  install -d "$destination_dir"
+  cp "$built_binary_path" "$destination_path"
+  chmod 755 "$destination_path"
+  strip_binary "$destination_path"
+
+  echo "built $output_target -> $destination_path"
+  file "$destination_path"
+  case "$output_target" in
+    darwin-*)
+      otool -L "$destination_path"
+      ;;
+    linux-*)
+      ldd "$destination_path" || true
+      ;;
+  esac
+  echo "sha256 $(sha256_file "$destination_path")"
+}
+
+build_darwin_target() {
+  local output_target="$1"
+  local arch="$2"
+  local host_triplet="$3"
+  local target_root="$work_dir/$output_target"
+  local prefix_dir="$target_root/prefix"
+  local libevent_source_dir="$target_root/libevent"
+  local tmux_source_dir="$target_root/tmux"
+  local sdk_root
+
+  if [ "$current_os" != "darwin" ]; then
+    echo "$output_target requires a macOS host." >&2
+    exit 1
+  fi
+
+  require_command xcrun
+  require_command clang
+
+  sdk_root="$(xcrun --sdk macosx --show-sdk-path)"
+
+  extract_archive "$(download_archive tmux.tar.gz "$tmux_url" "$tmux_sha256")" "$tmux_source_dir"
+  patch_tmux_source "$tmux_source_dir"
+  extract_archive "$(download_archive libevent.tar.gz "$libevent_url" "$libevent_sha256")" "$libevent_source_dir"
+
+  (
+    export CC="clang"
+    export CFLAGS="-arch $arch -isysroot $sdk_root -mmacosx-version-min=11.0 -O2"
+    export CPPFLAGS="-I$prefix_dir/include"
+    export LDFLAGS="-arch $arch -isysroot $sdk_root -mmacosx-version-min=11.0 -L$prefix_dir/lib"
+    export PKG_CONFIG_PATH="$prefix_dir/lib/pkgconfig"
+
+    cd "$libevent_source_dir"
+    ./configure \
+      --host="$host_triplet" \
+      --disable-shared \
+      --enable-static \
+      --disable-libevent-regress \
+      --disable-samples \
+      --prefix="$prefix_dir"
+    make -j"$cpu_count"
+    make install
+
+    cd "$tmux_source_dir"
+    ./configure \
+      --host="$host_triplet" \
+      --disable-dependency-tracking \
+      --disable-utf8proc
+    make -j"$cpu_count"
+  )
+
+  install_binary "$output_target" "$tmux_source_dir/tmux"
+  compile_terminfo_entries "" "$output_root/$output_target/terminfo"
+}
+
+build_linux_target() {
+  local output_target="$1"
+  local expected_arch="$2"
+  local target_root="$work_dir/$output_target"
+  local prefix_dir="$target_root/prefix"
+  local ncurses_source_dir="$target_root/ncurses"
+  local libevent_source_dir="$target_root/libevent"
+  local tmux_source_dir="$target_root/tmux"
+
+  if [ "$current_os" != "linux" ]; then
+    echo "$output_target requires a Linux host." >&2
+    exit 1
+  fi
+
+  if [ "$current_arch" != "$expected_arch" ]; then
+    echo "$output_target requires a $expected_arch Linux host, not $current_arch." >&2
+    exit 1
+  fi
+
+  require_command musl-gcc
+  require_command gcc
+
+  extract_archive "$(download_archive tmux.tar.gz "$tmux_url" "$tmux_sha256")" "$tmux_source_dir"
+  patch_tmux_source "$tmux_source_dir"
+  extract_archive "$(download_archive libevent.tar.gz "$libevent_url" "$libevent_sha256")" "$libevent_source_dir"
+  extract_archive "$(download_archive ncurses.tar.gz "$ncurses_url" "$ncurses_sha256")" "$ncurses_source_dir"
+
+  (
+    export CC="musl-gcc"
+    export CXX="g++"
+    export CFLAGS="-O2"
+    export CPPFLAGS="-I$prefix_dir/include -I$prefix_dir/include/ncursesw"
+    export LDFLAGS="-static -L$prefix_dir/lib"
+    export PKG_CONFIG_PATH="$prefix_dir/lib/pkgconfig"
+
+    cd "$ncurses_source_dir"
+    ./configure \
+      --prefix="$prefix_dir" \
+      --without-ada \
+      --without-debug \
+      --without-manpages \
+      --without-profile \
+      --without-shared \
+      --with-normal \
+      --with-termlib \
+      --enable-widec
+    make -j"$cpu_count"
+    make install
+
+    if [ -f "$prefix_dir/lib/libtinfow.a" ] && [ ! -e "$prefix_dir/lib/libtinfo.a" ]; then
+      ln -s libtinfow.a "$prefix_dir/lib/libtinfo.a"
+    fi
+
+    cd "$libevent_source_dir"
+    ./configure \
+      --disable-openssl \
+      --disable-shared \
+      --enable-static \
+      --disable-libevent-regress \
+      --disable-samples \
+      --prefix="$prefix_dir"
+    make -j"$cpu_count"
+    make install
+
+    cd "$tmux_source_dir"
+    ac_cv_func_openpty=yes \
+    ac_cv_func_forkpty=yes \
+    ac_cv_search_openpty="-lutil" \
+    ac_cv_search_forkpty="-lutil" \
+    LIBS="-lutil -ltinfow -lncursesw -lresolv" ./configure \
+      --disable-dependency-tracking \
+      --disable-utf8proc
+    make -j"$cpu_count"
+  )
+
+  install_binary "$output_target" "$tmux_source_dir/tmux"
+  compile_terminfo_entries \
+    "$ncurses_source_dir/misc/terminfo.src" \
+    "$output_root/$output_target/terminfo"
+}
+
+for selected_target in "${targets[@]}"; do
+  case "$selected_target" in
+    darwin-arm64)
+      build_darwin_target "$selected_target" arm64 arm-apple-darwin
+      ;;
+    darwin-x86_64)
+      build_darwin_target "$selected_target" x86_64 x86_64-apple-darwin
+      ;;
+    linux-arm64)
+      build_linux_target "$selected_target" arm64
+      ;;
+    linux-x86_64)
+      build_linux_target "$selected_target" x86_64
+      ;;
+    *)
+      echo "Unsupported target: $selected_target" >&2
+      exit 1
+      ;;
+  esac
+done

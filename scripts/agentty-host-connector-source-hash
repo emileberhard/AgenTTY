@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/.." && pwd)"
+crate_root="$repo_root/tools/agentty-host-connector"
+build_config_path="$script_dir/host-connector-build-config.sh"
+toolchain_check_path="$script_dir/ensure-notify-helper-toolchain"
+rust_toolchain_path="$repo_root/rust-toolchain.toml"
+
+sha256_file() {
+  local path="$1"
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+  else
+    sha256sum "$path" | awk '{print $1}'
+  fi
+}
+
+{
+"$repo_root/scripts/resolve-build-metadata" --field version
+while IFS= read -r path; do
+  printf '%s\n' "${path#"$repo_root"/}"
+  sha256_file "$path"
+done < <(
+  {
+    printf '%s\n' \
+      "$build_config_path" \
+      "$toolchain_check_path" \
+      "$rust_toolchain_path" \
+      "$repo_root/scripts/rust-build-identity.rs" \
+      "$repo_root/scripts/resolve-build-metadata"
+    find "$crate_root" \
+      \( -path "$crate_root/target" -o -path "$crate_root/target/*" \) -prune -o \
+      -type f \
+      \( -name Cargo.toml -o -name Cargo.lock -o -path "$crate_root/src/*" \) \
+      -print
+  } | LC_ALL=C sort
+)
+} | if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 | awk '{print $1}'
+else
+  sha256sum | awk '{print $1}'
+fi
