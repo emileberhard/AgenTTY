@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+root="${1:-ascelerate/media}"
+devices=",${AGENTTY_SCREENSHOT_DEVICES:-iphone,ipad},"
+iphone_dir="$root/en-US/APP_IPHONE_69"
+ipad_dir="$root/en-US/APP_IPAD_PRO_3GEN_129"
+
+validate_set() {
+  local directory="$1"
+  local expected_width="$2"
+  local expected_height="$3"
+  local label="$4"
+
+  [[ -d "$directory" ]] || { echo "missing $label screenshot directory: $directory" >&2; exit 1; }
+  files=()
+  while IFS= read -r file; do
+    files+=("$file")
+  done < <(find "$directory" -maxdepth 1 -type f -name '*.png' -print | LC_ALL=C sort)
+  [[ "${#files[@]}" -eq 5 ]] || {
+    echo "expected 5 $label screenshots, found ${#files[@]} in $directory" >&2
+    exit 1
+  }
+
+  for file in "${files[@]}"; do
+    width="$(sips -g pixelWidth "$file" 2>/dev/null | awk '/pixelWidth/ { print $2 }')"
+    height="$(sips -g pixelHeight "$file" 2>/dev/null | awk '/pixelHeight/ { print $2 }')"
+    if [[ "$width" != "$expected_width" || "$height" != "$expected_height" ]]; then
+      echo "invalid $label dimensions for $file: ${width}x${height}, expected ${expected_width}x${expected_height}" >&2
+      exit 1
+    fi
+  done
+
+  echo "$label screenshots verified: ${#files[@]} files at ${expected_width}x${expected_height}"
+}
+
+if [[ "$devices" == *,iphone,* ]]; then
+  validate_set "$iphone_dir" 1320 2868 "iPhone"
+fi
+if [[ "$devices" == *,ipad,* ]]; then
+  validate_set "$ipad_dir" 2064 2752 "iPad"
+fi

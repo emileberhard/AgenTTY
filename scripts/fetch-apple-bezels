@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Download Apple Product Bezels needed for App Store screenshot framing.
+#
+# Apple's design-resources license does not permit redistributing the bezel
+# images, so they are gitignored; this script restores them deterministically
+# from Apple's CDN into ascelerate/bezels/.
+set -euo pipefail
+
+BEZEL_DIR="$(cd "$(dirname "$0")/.." && pwd)/ascelerate/bezels"
+mkdir -p "$BEZEL_DIR"
+
+required_bezels=(
+  "$BEZEL_DIR/iPhone 17 Pro Max - Silver - Portrait.png"
+  "$BEZEL_DIR/iPad Pro (M5) 13\" - Silver - Portrait.png"
+)
+if [[ -f "${required_bezels[0]}" && -f "${required_bezels[1]}" ]]; then
+  echo "Required Apple bezels already installed in $BEZEL_DIR."
+  exit 0
+fi
+
+DMGS=(
+  "https://devimages-cdn.apple.com/design/resources/download/Bezel-iPhone-17.dmg"
+  "https://devimages-cdn.apple.com/design/resources/download/Bezel-iPad-Pro-(M5).dmg"
+)
+
+for url in "${DMGS[@]}"; do
+  name="$(basename "$url" .dmg)"
+  temporary_directory="$(mktemp -d)"
+  dmg="$temporary_directory/$name.dmg"
+  mount_point=""
+  cleanup() {
+    if [[ -n "$mount_point" ]]; then
+      hdiutil detach "$mount_point" -quiet || true
+    fi
+    rm -rf "$temporary_directory"
+  }
+  trap cleanup EXIT
+
+  echo "Downloading $name..."
+  curl -fsSL "$url" -o "$dmg"
+  # The DMGs embed a license agreement that hdiutil prompts for on stdin.
+  mount_point="$(echo Y | hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | awk -F'\t' '{print $NF}')"
+  find "$mount_point" -name '*.png' -not -path '*__MACOSX*' -exec cp {} "$BEZEL_DIR/" \;
+  hdiutil detach "$mount_point" -quiet
+  mount_point=""
+  rm -rf "$temporary_directory"
+  trap - EXIT
+done
+
+echo "Bezels installed in $BEZEL_DIR:"
+ls "$BEZEL_DIR"

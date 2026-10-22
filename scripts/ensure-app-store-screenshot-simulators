@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_id="${AGENTTY_SCREENSHOT_RUNTIME_ID:-}"
+if [[ -z "$runtime_id" ]]; then
+  runtime_version="${AGENTTY_SCREENSHOT_RUNTIME_VERSION:-26.5}"
+  runtime_id="$(xcrun simctl list runtimes -j | jq -r \
+    --arg version "$runtime_version" '
+    .runtimes[]
+    | select(.isAvailable == true)
+    | select(.identifier | contains("SimRuntime.iOS-"))
+    | select(.version == $version)
+    | .identifier
+  ' | head -1)"
+fi
+
+[[ -n "$runtime_id" ]] || {
+  echo "No available iOS simulator runtime found." >&2
+  exit 1
+}
+
+ensure_device() {
+  local name="$1"
+  local type_name="$2"
+  local device_id
+  local type_id
+
+  device_id="$({ xcrun simctl list devices -j | jq -r \
+    --arg runtime "$runtime_id" \
+    --arg name "$name" \
+    '(.devices[$runtime] // [])[] | select(.name == $name and .isAvailable == true) | .udid' | head -1; })"
+  if [[ -n "$device_id" ]]; then
+    printf '%s\t%s\n' "$name" "$device_id"
+    return
+  fi
+
+  type_id="$({ xcrun simctl list devicetypes -j | jq -r \
+    --arg name "$type_name" \
+    '.devicetypes[] | select(.name == $name) | .identifier' | head -1; })"
+  [[ -n "$type_id" ]] || {
+    echo "Simulator device type not found: $type_name" >&2
+    exit 1
+  }
+
+  device_id="$(xcrun simctl create "$name" "$type_id" "$runtime_id")"
+  printf '%s\t%s\n' "$name" "$device_id"
+}
+
+echo "Screenshot simulator runtime: $runtime_id"
+ensure_device "iPhone 17 Pro Max" "iPhone 17 Pro Max"
+ensure_device "iPad Pro 13-inch (M5)" "iPad Pro 13-inch (M5)"

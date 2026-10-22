@@ -1,0 +1,29 @@
+{
+  "en-US": [
+    {
+      "slug": "terminal-anywhere",
+      "headline": "Your Terminal, Anywhere",
+      "subtitle": "Run Claude Code & Codex CLI from your pocket"
+    },
+    {
+      "slug": "themes",
+      "headline": "Make It Yours",
+      "subtitle": "20+ terminal themes built in"
+    },
+    {
+      "slug": "hosts",
+      "headline": "All Your Machines, One Tap",
+      "subtitle": "Manage multiple SSH hosts effortlessly"
+    },
+    {
+      "slug": "switch-hosts",
+      "headline": "Switch Hosts Instantly",
+      "subtitle": "Jump between machines in a swipe"
+    },
+    {
+      "slug": "secure-keys",
+      "headline": "Secure By Design",
+      "subtitle": "SSH keys in Keychain, never exposed"
+    }
+  ]
+}

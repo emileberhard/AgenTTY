@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote_mode="${1:-}"
+if [[ "$remote_mode" == "remote-prepare" ]]; then
+  tmux_cmd="$HOME/.agentty/bin/tmux"
+  session_name="agentty-screenshot"
+  session_name_path="$HOME/.agentty/config/tmux-session-name"
+  fixture_path="$HOME/.agentty/state/app-store-screenshot-fixture.sh"
+
+  [[ -x "$tmux_cmd" ]] || { echo "missing AgenTTY tmux wrapper" >&2; exit 1; }
+  previous_session_name="__MISSING__"
+  if [[ -f "$session_name_path" ]]; then
+    previous_session_name="$(cat "$session_name_path")"
+  fi
+  "$tmux_cmd" kill-session -t "$session_name" 2>/dev/null || true
+
+  mkdir -p "$(dirname "$fixture_path")"
+  cat > "$fixture_path" <<'FIXTURE'
+#!/bin/sh
+set -eu
+
+draw_fixture() {
+  printf '\033[2J\033[H'
+  printf '\033[1;35m╭─ Claude Code ───────────────╮\033[0m\n'
+  printf '\033[1;35m│\033[0m  AgenTTY release workspace    \033[1;35m│\033[0m\n'
+  printf '\033[1;35m╰──────────────────────────────╯\033[0m\n\n'
+  printf '\033[1;36m›\033[0m Finish the App Store release.\n\n'
+  printf '\033[2m⏺ I’ll build and verify the full\033[0m\n'
+  printf '\033[2m  iPhone + iPad screenshot flow.\033[0m\n\n'
+  printf '\033[1;32m✓\033[0m Captured the production UI\n'
+  printf '\033[1;32m✓\033[0m Framed official Apple devices\n'
+  printf '\033[1;32m✓\033[0m Exported App Store artwork\n'
+  printf '\033[1;32m✓\033[0m Verified every output size\n\n'
+  printf '\033[1;34mReady for App Review.\033[0m\n\n'
+  printf '\033[2m────────────────────────────────\033[0m\n'
+  printf '\033[33mAgenTTY\033[0m  Claude Code & Codex anywhere\n'
+}
+
+trap draw_fixture WINCH
+draw_fixture
+while :; do
+  sleep 3600 &
+  wait "$!"
+done
+FIXTURE
+  chmod 700 "$fixture_path"
+
+  mkdir -p "$(dirname "$session_name_path")"
+  session_name_tmp="${session_name_path}.part.$$"
+  printf '%s\n' "$session_name" > "$session_name_tmp"
+  chmod 600 "$session_name_tmp"
+  mv -f "$session_name_tmp" "$session_name_path"
+  "$tmux_cmd" new-session -d -s "$session_name" -n screenshot "$fixture_path"
+  printf '%s\n' "$previous_session_name"
+  exit 0
+fi
+
+if [[ "$remote_mode" == "remote-cleanup" ]]; then
+  previous_session_name="${2:?missing previous session name}"
+  tmux_cmd="$HOME/.agentty/bin/tmux"
+  session_name="agentty-screenshot"
+  session_name_path="$HOME/.agentty/config/tmux-session-name"
+  fixture_path="$HOME/.agentty/state/app-store-screenshot-fixture.sh"
+
+  "$tmux_cmd" kill-session -t "$session_name" 2>/dev/null || true
+  if [[ "$previous_session_name" == "__MISSING__" ]]; then
+    rm -f "$session_name_path"
+  else
+    session_name_tmp="${session_name_path}.part.$$"
+    printf '%s\n' "$previous_session_name" > "$session_name_tmp"
+    chmod 600 "$session_name_tmp"
+    mv -f "$session_name_tmp" "$session_name_path"
+  fi
+  rm -f "$fixture_path"
+  exit 0
+fi
+
+if [[ "$#" -eq 0 ]]; then
+  echo "usage: $0 command [args...]" >&2
+  exit 2
+fi
+
+fixture_host="${AGENTTY_SCREENSHOT_HOST:?Set AGENTTY_SCREENSHOT_HOST to your dedicated SSH fixture host}"
+ssh_args=(-o BatchMode=yes -o ConnectTimeout=10 "$fixture_host")
+previous_session_name="$({ ssh "${ssh_args[@]}" /bin/bash -s -- remote-prepare < "$0"; } 2>&1)" || {
+  printf '%s\n' "$previous_session_name" >&2
+  exit 1
+}
+if [[ -z "$previous_session_name" ]]; then
+  echo "invalid fixture state from $fixture_host" >&2
+  exit 1
+fi
+
+cleanup() {
+  ssh "${ssh_args[@]}" /bin/bash -s -- remote-cleanup "$previous_session_name" < "$0" >/dev/null 2>&1 || \
+    echo "warning: failed to clean screenshot fixture session on $fixture_host" >&2
+}
+trap cleanup EXIT INT TERM
+
+"$@"

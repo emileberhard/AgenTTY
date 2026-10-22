@@ -1,0 +1,26 @@
+:root {
+  color-scheme: dark;
+  font-family: "Avenir Next", "SF Pro Rounded", "SF Pro Display", sans-serif;
+  background: #07161b;
+  color: #f7fbfc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+button {
+  font: inherit;
+}
+
+body {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(44, 122, 139, 0.22), transparent 36rem),
+    #07161b;
+}

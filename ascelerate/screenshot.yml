@@ -1,0 +1,25 @@
+workspace: AgenTTY.xcworkspace
+scheme: AgenTTY-iOS-Dev
+devices:
+  - simulator: AgenTTY iPhone 17 Pro Max Screenshots iOS 26.5
+    frameDevice: true
+    deviceBezel: ./ascelerate/bezels/iPhone 17 Pro Max - Silver - Portrait.png
+  - simulator: AgenTTY iPad Pro 13-inch Screenshots iOS 26.5
+    frameDevice: true
+    deviceBezel: ./ascelerate/bezels/iPad Pro (M5) 13" - Silver - Portrait.png
+languages:
+  - en-US
+outputDirectory: ./ascelerate/screenshots
+framedOutputDirectory: ./ascelerate/screenshots/framed
+clearPreviousScreenshots: true
+eraseSimulator: false
+localizeSimulator: true
+overrideStatusBar: true
+disableAnimations: true
+waitAfterBoot: 5
+headless: true
+configuration: Debug
+xcargs: ARCHS=arm64 ONLY_ACTIVE_ARCH=YES
+numberOfRetries: 1
+stopAfterFirstError: true
+reinstallApp: true
