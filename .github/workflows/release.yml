@@ -3,6 +3,12 @@ name: Release
 on:
   push:
     tags: ['[0-9]+.[0-9]+.[0-9]+']
+  workflow_dispatch:
+    inputs:
+      release_run_id:
+        description: Original release run containing the built npm candidate
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -13,6 +19,7 @@ concurrency:
 
 jobs:
   guard:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -208,6 +215,7 @@ jobs:
 
   npm:
     needs: publish
+    if: ${{ !cancelled() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')) }}
     runs-on: ubuntu-24.04
     environment: testflight
     timeout-minutes: 10
@@ -218,12 +226,30 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       VERSION: ${{ github.ref_name }}
+      RELEASE_RUN_ID: ${{ inputs.release_run_id || github.run_id }}
     steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
         with:
           node-version: '24'
       - name: Restore the built pairing package
-        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name npm-candidate --dir package
+        run: |
+          ./scripts/check-release-tag "$VERSION"
+          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > release-run.json
+          python3 - "$VERSION" "$(git rev-parse HEAD)" <<'PY'
+          import json
+          import sys
+          run = json.load(open("release-run.json"))
+          expected = {"event": "push", "path": ".github/workflows/release.yml", "head_branch": sys.argv[1], "head_sha": sys.argv[2]}
+          if any(run.get(key) != value for key, value in expected.items()):
+              raise SystemExit("npm candidate must come from this tag's release run")
+          PY
+          [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == false ]]
+          gh run download "$RELEASE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name npm-candidate --dir package
       - name: Publish with npm OIDC and provenance
         run: |
           node -e 'if (+process.versions.node.split(".")[0] < 22) process.exit(1)'

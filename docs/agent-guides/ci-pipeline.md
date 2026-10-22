@@ -130,6 +130,13 @@ uses Node 24 and npm 11.6.2, which supports OIDC. Registry publication, Apple
 upload and GitHub publication are separate service boundaries: inspect all
 three after an uncertain failure rather than overwriting a version.
 
+To recover npm after local signing or an npm outage, dispatch `release.yml` on
+the same version tag with `release_run_id` set to the original run. This runs
+only npm publication. It requires a published GitHub release and verifies the
+candidate run's workflow, tag and commit before restoring its existing tarball;
+it never rebuilds the package or repeats an Apple upload. Candidate artifacts
+expire after three days, so recover before then.
+
 ## First public release checks
 
 Create annotated tag 2.12.0 on the final main commit only after anonymous

@@ -124,6 +124,8 @@ build number. GitHub notes are the annotated tag message verbatim, a Markdown
 list of user-visible changes. npm uses OIDC and provenance. Metadata dispatch
 runs on that tag and targets that same version; App Review stays manual.
 See the CI guide for exact environment setup and the local signing fallback.
+Manual release recovery publishes only the verified original npm candidate on
+its version tag; it never rebuilds or uploads the app.
 
 Work in a locked worktree and preserve other agents' work. The task brief sets
 integration authority; do not merge, deploy or publish when assigned a
