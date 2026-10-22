@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "description": "Pairing CLI for connecting a computer to AgenTTY.",
   "type": "module",
-  "packageManager": "bun@1.3.10",
+  "packageManager": "bun@1.4.3",
   "bin": {
     "agentty-pair": "bin/agentty-host.js"
   },
