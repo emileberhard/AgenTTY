@@ -1,0 +1,43 @@
+{
+  "name": "@agentty-app/pair",
+  "version": "0.0.0",
+  "description": "Pairing CLI for connecting a computer to AgenTTY.",
+  "type": "module",
+  "packageManager": "bun@1.3.10",
+  "bin": {
+    "agentty-pair": "bin/agentty-host.js"
+  },
+  "scripts": {
+    "build": "bun run typecheck && bun ./scripts/build.mjs",
+    "prepack": "bun run build",
+    "test": "bun run typecheck && bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.7.2",
+    "esbuild": "^0.25.11",
+    "typescript": "^5.9.3"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "LICENSE",
+    "THIRD-PARTY-NOTICES.txt"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emileberhard/AgenTTY.git",
+    "directory": "tools/agentty-host"
+  }
+}
