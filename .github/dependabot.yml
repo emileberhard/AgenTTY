@@ -1,0 +1,24 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: cargo
+    directories: [/services/backend, /tools/agentty-notify, /tools/agentty-host-connector]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 1
+  - package-ecosystem: bundler
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 1
+  - package-ecosystem: npm
+    directories: [/tools/agentty-host, /AppStoreScreenshots]
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 1

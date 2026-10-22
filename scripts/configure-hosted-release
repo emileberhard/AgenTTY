@@ -1,0 +1,12 @@
+#!/usr/bin/env python3
+import os
+from pathlib import Path
+
+keys = ("DEVELOPMENT_TEAM", "AGENTTY_BUNDLE_ID", "AGENTTY_APP_GROUP", "AGENTTY_CLOUDKIT_CONTAINER", "AGENTTY_KEYCHAIN_NAMESPACE", "AGENTTY_UNLOCK_PRODUCT_ID", "AGENTTY_RELAY_URL", "AGENTTY_ARTIFACT_URL", "AGENTTY_RELEASE_ARTIFACT_URL", "AGENTTY_SENTRY_DSN")
+lines = []
+for key in keys:
+    value = os.environ.get(key, "")
+    if (not value and key != "AGENTTY_SENTRY_DSN") or any(character in value for character in "\r\n"):
+        raise SystemExit(f"Set testflight environment variable {key}")
+    lines.append(f"{key} = {value.replace('://', ':/$()/')}\n")
+Path("Config/Local.xcconfig").write_text("".join(lines))

@@ -1,0 +1,182 @@
+name: build-tmux-runtime
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  build_darwin:
+    name: build darwin tmux runtimes
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: ensure macOS build tools installed
+        run: |
+          set -euo pipefail
+          if command -v pkg-config >/dev/null 2>&1; then
+            pkg-config --version
+          else
+            brew install pkgconf
+          fi
+
+      - name: build darwin-arm64
+        run: |
+          set -euo pipefail
+          ./scripts/build-tmux-runtime \
+            --target darwin-arm64 \
+            --output-dir "$RUNNER_TEMP/tmux-runtime"
+
+      - name: build darwin-x86_64
+        run: |
+          set -euo pipefail
+          ./scripts/build-tmux-runtime \
+            --target darwin-x86_64 \
+            --output-dir "$RUNNER_TEMP/tmux-runtime"
+
+      - name: package darwin artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./scripts/tmux-runtime-config.sh
+          artifact_root="$RUNNER_TEMP/artifacts"
+          mkdir -p "$artifact_root"
+
+          for target in darwin-arm64 darwin-x86_64; do
+            src="$RUNNER_TEMP/tmux-runtime/$target"
+            dst="$artifact_root/$target"
+            mkdir -p "$dst"
+            cp -R "$src/." "$dst/"
+            python3 ./scripts/write-runtime-checksums.py "$dst"
+            printf '{\n  "target": "%s",\n  "tmux_version": "%s",\n  "libevent_version": "%s",\n  "runner_os": "%s",\n  "runner_arch": "%s"\n}\n' \
+              "$target" \
+              "$TMUX_RUNTIME_TMUX_VERSION" \
+              "$TMUX_RUNTIME_LIBEVENT_VERSION" \
+              "${RUNNER_OS}" \
+              "${RUNNER_ARCH}" \
+              > "$dst/metadata.json"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tmux-runtime-darwin-arm64
+          path: ${{ runner.temp }}/artifacts/darwin-arm64
+          if-no-files-found: error
+          retention-days: 90
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tmux-runtime-darwin-x86_64
+          path: ${{ runner.temp }}/artifacts/darwin-x86_64
+          if-no-files-found: error
+          retention-days: 90
+
+  build_linux:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-arm64
+            runner: ubuntu-24.04-arm
+          - target: linux-x86_64
+            runner: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: ensure Linux build tools installed
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential musl-tools pkg-config bison ncurses-bin
+
+      - name: build tmux runtime
+        run: |
+          set -euo pipefail
+          ./scripts/build-tmux-runtime \
+            --target "${{ matrix.target }}" \
+            --output-dir "$RUNNER_TEMP/tmux-runtime"
+
+      - name: package artifact
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./scripts/tmux-runtime-config.sh
+          target="${{ matrix.target }}"
+          src="$RUNNER_TEMP/tmux-runtime/$target"
+          dst="$RUNNER_TEMP/artifact/$target"
+          mkdir -p "$dst"
+          cp -R "$src/." "$dst/"
+          python3 ./scripts/write-runtime-checksums.py "$dst"
+          printf '{\n  "target": "%s",\n  "tmux_version": "%s",\n  "libevent_version": "%s",\n  "ncurses_version": "%s",\n  "runner_os": "%s",\n  "runner_arch": "%s"\n}\n' \
+            "$target" \
+            "$TMUX_RUNTIME_TMUX_VERSION" \
+            "$TMUX_RUNTIME_LIBEVENT_VERSION" \
+            "$TMUX_RUNTIME_NCURSES_VERSION" \
+            "${RUNNER_OS}" \
+            "${RUNNER_ARCH}" \
+            > "$dst/metadata.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tmux-runtime-${{ matrix.target }}
+          path: ${{ runner.temp }}/artifact/${{ matrix.target }}
+          if-no-files-found: error
+          retention-days: 90
+
+  bundle:
+    name: bundle tmux runtime artifacts
+    runs-on: ubuntu-latest
+    needs:
+      - build_darwin
+      - build_linux
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: tmux-runtime-*
+          path: ${{ runner.temp }}/downloaded
+
+      - name: verify bundle contents
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./scripts/tmux-runtime-config.sh
+          artifact_root="$RUNNER_TEMP/downloaded"
+          for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+            base="$artifact_root/tmux-runtime-$target"
+            test -f "$base/tmux"
+            test -f "$base/checksums.txt"
+            test -f "$base/metadata.json"
+            for entry in "${TMUX_RUNTIME_TERMINFO_ENTRIES[@]}"; do
+              find "$base/terminfo" -type f -name "$entry" | grep -q .
+            done
+          done
+
+      - name: create combined bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./scripts/tmux-runtime-config.sh
+          mkdir -p "$RUNNER_TEMP/bundle"
+          for target in "${TMUX_RUNTIME_TARGETS[@]}"; do
+            cp -R "$RUNNER_TEMP/downloaded/tmux-runtime-$target" "$RUNNER_TEMP/bundle/$target"
+          done
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: tmux-runtime-bundle
+          path: ${{ runner.temp }}/bundle
+          if-no-files-found: error
+          retention-days: 90

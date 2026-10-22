@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+import re
+import subprocess
+import sys
+
+version = sys.argv[1]
+pattern = r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)"
+if not re.fullmatch(pattern, version):
+    raise SystemExit("Release tags must be plain MAJOR.MINOR.PATCH")
+def git(*arguments):
+    return subprocess.check_output(["git", *arguments], text=True).strip()
+if git("rev-parse", f"refs/tags/{version}^{{commit}}") != git("rev-parse", "HEAD"):
+    raise SystemExit("The release tag does not identify this checkout")
+subprocess.run(["git", "merge-base", "--is-ancestor", "HEAD", "origin/main"], check=True)
+tags = [tag for tag in git("tag", "--list").splitlines() if re.fullmatch(pattern, tag)]
+if max(tags, key=lambda tag: tuple(map(int, tag.split(".")))) != version:
+    raise SystemExit("Release tag must be newer than every other version tag")
+if git("cat-file", "-t", f"refs/tags/{version}") != "tag":
+    raise SystemExit("Release tags must be annotated with user-visible release notes")
+notes = subprocess.check_output(["./scripts/release-notes", version], text=True)
+if not notes.strip() or any(not line.startswith("- ") for line in notes.splitlines() if line.strip()):
+    raise SystemExit("Tag notes must be a Markdown list of user-visible changes")
+print(f"Verified annotated release tag {version} on main")

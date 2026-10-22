@@ -1,0 +1,53 @@
+#!/usr/bin/env ruby
+require "base64"
+require "json"
+require "net/http"
+require "openssl"
+require "uri"
+
+version = ARGV.fetch(0)
+metadata = ARGV.drop(1) == ["--metadata"]
+pattern = /\A(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\z/
+abort("Expected plain MAJOR.MINOR.PATCH") unless pattern.match?(version)
+encode = ->(value) { Base64.urlsafe_encode64(value, padding: false) }
+now = Time.now.to_i
+header = encode.call(JSON.generate(alg: "ES256", kid: ENV.fetch("APP_STORE_CONNECT_KEY_ID"), typ: "JWT"))
+payload = encode.call(JSON.generate(iss: ENV.fetch("APP_STORE_CONNECT_ISSUER_ID"), iat: now, exp: now + 600, aud: "appstoreconnect-v1"))
+message = "#{header}.#{payload}"
+key = OpenSSL::PKey.read(File.read(ENV.fetch("APP_STORE_CONNECT_KEY_PATH")))
+signature = OpenSSL::ASN1.decode(key.sign("SHA256", message)).value.map { |integer| integer.value.to_s(16).rjust(64, "0") }.join
+jwt = "#{message}.#{encode.call([signature].pack("H*"))}"
+get = lambda do |path|
+  result = []
+  url = URI.join("https://api.appstoreconnect.apple.com", path)
+  while url
+    abort("Unexpected App Store Connect pagination host") unless url.scheme == "https" && url.host == "api.appstoreconnect.apple.com"
+    request = Net::HTTP::Get.new(url)
+    request["Authorization"] = "Bearer #{jwt}"
+    response = Net::HTTP.start(url.host, url.port, use_ssl: true, open_timeout: 15, read_timeout: 30) { |http| http.request(request) }
+    abort("App Store Connect read failed: HTTP #{response.code}") unless response.is_a?(Net::HTTPSuccess)
+    document = JSON.parse(response.body)
+    result.concat(document.fetch("data"))
+    following = document.fetch("links", {})["next"]
+    url = following ? URI(following) : nil
+  end
+  result
+end
+bundle = ENV.fetch("AGENTTY_APP_IDENTIFIER", ENV.fetch("AGENTTY_BUNDLE_ID", ""))
+abort("Set AGENTTY_APP_IDENTIFIER") if bundle.empty?
+apps = get.call("/v1/apps?" + URI.encode_www_form("filter[bundleId]" => bundle, "limit" => 2))
+abort("Expected one matching app") unless apps.length == 1
+app = apps.first.fetch("id")
+store = get.call("/v1/apps/#{app}/appStoreVersions?limit=200").map { |entry| entry.fetch("attributes").fetch("versionString") }
+beta = get.call("/v1/apps/#{app}/preReleaseVersions?limit=200").map { |entry| entry.fetch("attributes").fetch("version") }
+parse = ->(value) { abort("Unexpected Apple version: #{value}") unless /\A\d+(?:\.\d+){0,2}\z/.match?(value); (value.split(".").map(&:to_i) + [0, 0]).first(3) }
+requested = parse.call(version)
+newest_store = store.max_by(&parse)
+newest_beta = beta.max_by(&parse)
+abort("#{version} must exceed App Store version #{newest_store}") if newest_store && (requested <=> parse.call(newest_store)) <= 0
+if metadata
+  abort("Metadata must target the newest uploaded TestFlight version (#{newest_beta})") unless newest_beta && requested == parse.call(newest_beta)
+else
+  abort("#{version} must exceed uploaded TestFlight version #{newest_beta}") if newest_beta && (requested <=> parse.call(newest_beta)) <= 0
+end
+puts "Verified #{version}; App Store #{newest_store || 'none'}, TestFlight #{newest_beta || 'none'}"

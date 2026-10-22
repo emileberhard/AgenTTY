@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+explicit_version="${MARKETING_VERSION:-}"
+if [[ -n "$explicit_version" && "$explicit_version" != "0.0.0" ]]; then
+    printf '%s\n' "$explicit_version"
+    exit 0
+fi
+
+exact_tag="$(./scripts/resolve-build-metadata --field git_tag)"
+if [[ -n "$exact_tag" ]]; then
+    printf '%s\n' "$exact_tag"
+    exit 0
+fi
+
+echo "failed to resolve release marketing version from MARKETING_VERSION or an exact semver tag at HEAD" >&2
+exit 1

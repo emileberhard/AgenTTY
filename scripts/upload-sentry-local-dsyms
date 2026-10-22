@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+upload-sentry-local-dsyms
+
+Upload locally built iPhone dSYMs to Sentry for side-loaded builds.
+
+Usage:
+  upload-sentry-local-dsyms --scheme <scheme> (--project <.xcodeproj> | --workspace <.xcworkspace>) [options]
+
+Options:
+  --configuration <Debug|Release>   Build configuration (default: Debug)
+  --derived-data <path>             Explicit DerivedData path
+  --project <path>                  Xcode project path
+  --workspace <path>                Xcode workspace path
+  --scheme <scheme>                 Xcode scheme
+  -h, --help                        Show help
+EOF
+}
+
+project=""
+workspace=""
+scheme=""
+configuration="Debug"
+derived_data=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --project)
+      project="${2:-}"; shift 2 ;;
+    --workspace)
+      workspace="${2:-}"; shift 2 ;;
+    --scheme)
+      scheme="${2:-}"; shift 2 ;;
+    --configuration)
+      configuration="${2:-}"; shift 2 ;;
+    --derived-data)
+      derived_data="${2:-}"; shift 2 ;;
+    -h|--help)
+      usage; exit 0 ;;
+    *)
+      echo "Unknown arg: $1" >&2
+      usage
+      exit 2 ;;
+  esac
+done
+
+if [[ -n "$project" && -n "$workspace" ]]; then
+  echo "Pass either --project or --workspace (not both)." >&2
+  exit 2
+fi
+
+if [[ -z "$project" && -z "$workspace" ]]; then
+  echo "Missing --project or --workspace." >&2
+  exit 2
+fi
+
+if [[ -z "$scheme" ]]; then
+  echo "Missing --scheme." >&2
+  exit 2
+fi
+
+resolve_dev_root() {
+  if [[ -n "${EMIL_DEV_ROOT:-}" && -d "${EMIL_DEV_ROOT}/Xcode/DerivedData" ]]; then
+    echo "$EMIL_DEV_ROOT"
+    return 0
+  fi
+
+  local host
+  host="$(scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null || hostname 2>/dev/null || true)"
+  required_host="${AGENTTY_SENTRY_DSYM_UPLOAD_HOST:-}"
+  if [[ -n "$required_host" && "$host" != "$required_host" ]]; then
+    return 1
+  fi
+
+  local vol
+  for vol in /Volumes/*; do
+    [[ -d "$vol/dev/Xcode/DerivedData" ]] || continue
+    echo "$vol/dev"
+    return 0
+  done
+
+  return 1
+}
+
+if [[ -z "${SENTRY_AUTH_TOKEN:-}" ]]; then
+  shared_env="$HOME/configs/shared-env.sh"
+  if [[ -f "$shared_env" ]]; then
+    # shellcheck disable=SC1090
+    source "$shared_env" >/dev/null 2>&1 || true
+  fi
+fi
+
+if [[ -z "${SENTRY_AUTH_TOKEN:-}" ]]; then
+  echo "SENTRY_AUTH_TOKEN is not set; skipping local dSYM upload." >&2
+  exit 2
+fi
+
+if ! command -v sentry-cli >/dev/null 2>&1; then
+  echo "sentry-cli is not installed; skipping local dSYM upload." >&2
+  exit 2
+fi
+
+if [[ -z "$derived_data" ]]; then
+  xcode_build="$(xcodebuild -version 2>/dev/null | awk '/Build version/ { print $3; exit }' || true)"
+  project_base="app"
+  if [[ -n "$project" ]]; then
+    project_base="$(basename "$project" .xcodeproj)"
+  else
+    project_base="$(basename "$workspace" .xcworkspace)"
+  fi
+
+  safe_project="${project_base//[^A-Za-z0-9._-]/_}"
+  safe_scheme="${scheme//[^A-Za-z0-9._-]/_}"
+  dev_root="$(resolve_dev_root || true)"
+  if [[ -n "$dev_root" ]]; then
+    derived_data="${dev_root}/Xcode/DerivedData/${safe_project}-${safe_scheme}-${xcode_build:-unknown}"
+  else
+    derived_data="$HOME/Library/Developer/Xcode/DerivedData/${safe_project}-${safe_scheme}-${xcode_build:-unknown}"
+  fi
+fi
+
+products_dir="${derived_data}/Build/Products/${configuration}-iphoneos"
+if [[ ! -d "$products_dir" ]]; then
+  echo "No build products found at ${products_dir}; skipping local dSYM upload." >&2
+  exit 2
+fi
+
+if ! find "$products_dir" -maxdepth 1 -type d -name '*.dSYM' | grep -q .; then
+  echo "No dSYM bundles found in ${products_dir}; skipping local dSYM upload." >&2
+  exit 2
+fi
+
+sentry_org="${SENTRY_ORG:-${AGENTTY_SENTRY_ORG:-}}"
+sentry_project="${SENTRY_PROJECT:-${AGENTTY_SENTRY_PROJECT:-agentty}}"
+
+if [[ -z "$sentry_org" ]]; then
+  echo "SENTRY_ORG or AGENTTY_SENTRY_ORG is not set; skipping local dSYM upload." >&2
+  exit 2
+fi
+
+export SENTRY_ORG="$sentry_org"
+export SENTRY_PROJECT="$sentry_project"
+
+echo "uploading local dSYMs from ${products_dir} to Sentry..."
+sentry-cli debug-files upload --include-sources "$products_dir"

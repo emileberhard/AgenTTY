@@ -1,0 +1,37 @@
+AgenTTY is a fast, Ghostty-based SSH client for iPhone, purpose-built for power users of agentic AI coding TUIs such as Codex CLI and Claude Code.
+
+What makes AgenTTY different from a typical iOS SSH client is that it is built around the workflows power users actually care about when running long-lived coding-agent sessions from a phone.
+
+FEATURES
+
+- Native iOS notifications when work finishes or an agent needs input
+- Paste screenshots and images directly into supported workflows from your phone
+- Persistent tmux sessions with quick reconnect
+- Long-press the spacebar for a fast shell quick switcher
+- AI-generated shell titles plus live folder and git-branch context
+- A custom keyboard built for terminal work, with familiar shortcuts and modifier slide-chords
+- Whisper-based dictation for hands-free prompting on the go
+
+BUILT FOR LONG-RUNNING SESSIONS
+
+AgenTTY is especially good for Codex, Claude Code, tmux, and similar terminal-native AI workflows. Keep work alive in persistent shells, jump back in when an agent needs attention, and move quickly between sessions while you are away from your desk.
+
+NATIVE PERFORMANCE
+
+Built on an ultra-fast Ghostty core, AgenTTY delivers native-feeling performance and smooth terminal rendering on iPhone, even during heavy output and real CLI use.
+
+EASY HOST SETUP
+
+Run one `npx` helper command on the host, then scan its QR code or enter the short code in the app. AgenTTY reuses or creates a device SSH key automatically, keeps the private key local on your iPhone, and finishes the setup for you.
+
+REAL SSH ON IPHONE
+
+Even if you do not use AI coding agents at all, AgenTTY still stands on its own as a serious SSH client. Connect to your own machines with public-key authentication, host-key verification, persistent sessions, and a terminal that feels fast, responsive, and native on iPhone.
+
+SECURITY BY DEFAULT
+
+Generate Ed25519 keys on-device. Private keys stay in the iOS Keychain. Host keys are pinned with trust-on-first-use protection.
+
+AgenTTY includes 5 hours of free usage. After the trial, a one-time in-app purchase unlocks lifetime access.
+
+AgenTTY is an independent app and is not affiliated with OpenAI or Anthropic.

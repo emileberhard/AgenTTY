@@ -1,0 +1,228 @@
+name: Release
+
+on:
+  push:
+    tags: ['[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: testflight
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify release ref
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: ./scripts/check-release-tag "$VERSION"
+
+  check:
+    needs: guard
+    uses: ./.github/workflows/ci.yml
+
+  tmux:
+    needs: check
+    uses: ./.github/workflows/build-tmux-runtime.yml
+
+  npm-candidate:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: npm install --global bun@1.3.10
+      - name: Build the tagged pairing package
+        working-directory: tools/agentty-host
+        run: |
+          bun install --frozen-lockfile
+          npm version "$VERSION" --no-git-tag-version
+          npm pack
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: npm-candidate
+          path: tools/agentty-host/*.tgz
+          if-no-files-found: error
+          retention-days: 3
+
+  build:
+    needs: [check, tmux, npm-candidate]
+    permissions:
+      contents: read
+      actions: read
+    runs-on: xcode-27
+    environment: testflight
+    timeout-minutes: 90
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      MARKETING_VERSION: ${{ github.ref_name }}
+      DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
+      AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+      AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
+      AGENTTY_CLOUDKIT_CONTAINER: ${{ vars.AGENTTY_CLOUDKIT_CONTAINER }}
+      AGENTTY_KEYCHAIN_NAMESPACE: ${{ vars.AGENTTY_KEYCHAIN_NAMESPACE }}
+      AGENTTY_UNLOCK_PRODUCT_ID: ${{ vars.AGENTTY_UNLOCK_PRODUCT_ID }}
+      AGENTTY_RELAY_URL: ${{ vars.AGENTTY_RELAY_URL }}
+      AGENTTY_ARTIFACT_URL: ${{ vars.AGENTTY_ARTIFACT_URL }}
+      AGENTTY_RELEASE_ARTIFACT_URL: https://github.com/${{ github.repository }}/releases/download
+      AGENTTY_SENTRY_DSN: ${{ vars.AGENTTY_SENTRY_DSN }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Configure official build
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          ./scripts/configure-hosted-release
+          ./scripts/check-build-identity
+          plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
+          export APP_STORE_CONNECT_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          ./scripts/check-release-version "$MARKETING_VERSION"
+      - run: brew install just tuist/tuist/tuist@4.212.0
+      - run: echo "$(brew --prefix tuist/tuist/tuist@4.212.0)/bin" >> "$GITHUB_PATH"
+      - name: Build host runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTTY_GH_CLI: gh
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          ./scripts/ensure-notify-helper-toolchain --install-missing
+          just tmux-runtime-sync "$GITHUB_RUN_ID"
+          just notify-helper-rebuild
+          just host-connector-rebuild
+          ./scripts/package-release-runtime
+      - run: just ios-cloud-archive
+      - name: Preserve complete candidate
+        run: tar -czf build/release-candidate.tar.gz -C build AgenTTY.xcarchive release-runtime
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-candidate
+          path: build/release-candidate.tar.gz
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: xcode-27
+    environment: testflight
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      actions: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
+      MARKETING_VERSION: ${{ github.ref_name }}
+      DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
+      AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+      AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
+      AGENTTY_CLOUDKIT_CONTAINER: ${{ vars.AGENTTY_CLOUDKIT_CONTAINER }}
+      AGENTTY_KEYCHAIN_NAMESPACE: ${{ vars.AGENTTY_KEYCHAIN_NAMESPACE }}
+      AGENTTY_UNLOCK_PRODUCT_ID: ${{ vars.AGENTTY_UNLOCK_PRODUCT_ID }}
+      AGENTTY_RELAY_URL: ${{ vars.AGENTTY_RELAY_URL }}
+      AGENTTY_ARTIFACT_URL: ${{ vars.AGENTTY_ARTIFACT_URL }}
+      AGENTTY_RELEASE_ARTIFACT_URL: https://github.com/${{ github.repository }}/releases/download
+      AGENTTY_SENTRY_DSN: ${{ vars.AGENTTY_SENTRY_DSN }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Restore verified candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p build
+          gh run download "$GITHUB_RUN_ID" --name release-candidate --dir build
+          tar -xzf build/release-candidate.tar.gz -C build
+          (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
+          ./scripts/configure-hosted-release
+          plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
+      - run: brew install just
+      - run: npm install --global @sentry/cli@3.8.1
+      - name: Upload Sentry symbols
+        env:
+          SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
+          SENTRY_ORG: ${{ vars.SENTRY_ORG }}
+          SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
+        run: |
+          sentry-cli releases new "$MARKETING_VERSION"
+          sentry-cli debug-files upload --include-sources build/AgenTTY.xcarchive/dSYMs
+          sentry-cli releases finalize "$MARKETING_VERSION"
+      - name: Stage complete runtime release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/release-notes "$MARKETING_VERSION" > build/release-notes.md
+          gh release create "$MARKETING_VERSION" --draft --verify-tag --title "$MARKETING_VERSION" --notes-file build/release-notes.md
+          touch build/created-release-draft
+          gh release upload "$MARKETING_VERSION" build/release-runtime/*
+      - name: Sign and upload
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          export APP_STORE_CONNECT_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          ./scripts/check-release-version "$MARKETING_VERSION"
+          just ios-cloud-export
+      - name: Publish runtime after successful TestFlight upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$MARKETING_VERSION" --draft=false
+      - name: Remove an unpublished draft after failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ -f build/created-release-draft && $(gh release view "$MARKETING_VERSION" --json isDraft --jq .isDraft) == true ]]; then
+            gh release delete "$MARKETING_VERSION" --yes
+          fi
+
+  npm:
+    needs: publish
+    runs-on: ubuntu-24.04
+    environment: testflight
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f
+        with:
+          node-version: '24'
+      - name: Restore the built pairing package
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name npm-candidate --dir package
+      - name: Publish with npm OIDC and provenance
+        run: |
+          node -e 'if (+process.versions.node.split(".")[0] < 22) process.exit(1)'
+          npm install --global npm@11.6.2
+          npm publish package/*.tgz --provenance --access public --ignore-scripts

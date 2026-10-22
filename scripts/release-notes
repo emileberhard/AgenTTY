@@ -1,0 +1,9 @@
+#!/usr/bin/env python3
+import subprocess
+import sys
+
+tag = subprocess.check_output(["git", "cat-file", "tag", f"refs/tags/{sys.argv[1]}"])
+message = tag.partition(b"\n\n")[2]
+if not message.strip():
+    raise SystemExit("Annotated release tag must contain user-visible release notes")
+sys.stdout.buffer.write(message)

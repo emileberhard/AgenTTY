@@ -1,0 +1,2 @@
+app_identifier(ENV["AGENTTY_APP_IDENTIFIER"])
+team_id(ENV["DEVELOPMENT_TEAM"])

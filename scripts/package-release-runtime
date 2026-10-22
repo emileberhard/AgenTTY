@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+from datetime import datetime, timezone
+from pathlib import Path
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+
+root = Path(__file__).resolve().parent.parent
+version = os.environ["MARKETING_VERSION"]
+if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", version):
+    raise SystemExit("MARKETING_VERSION must be plain semver")
+repository = os.environ["GITHUB_REPOSITORY"]
+base_url = f"https://github.com/{repository}/releases/download/{version}"
+output = root / "build/release-runtime"
+output.mkdir(parents=True, exist_ok=False)
+
+def copy(source, name):
+    destination = output / name
+    shutil.copyfile(source, destination)
+    return {"url": f"{base_url}/{name}", "sha256": hashlib.sha256(destination.read_bytes()).hexdigest()}
+
+targets = {}
+for target in ("darwin-arm64", "darwin-x86_64", "linux-arm64", "linux-x86_64"):
+    source = root / "HostRuntimeArtifacts/bin" / target
+    entries = {}
+    for filename, key in (("tmux", "tmux"), ("agentty-notify", "agentty_notify"), ("agentty-host-connector", "agentty_host_connector")):
+        entries[key] = copy(source / filename, f"{target}-{filename}")
+    terminfo = []
+    for path in sorted((source / "terminfo").rglob("*")):
+        if path.is_file():
+            relative = path.relative_to(source / "terminfo").as_posix()
+            descriptor = copy(path, f"{target}-terminfo-{relative.replace('/', '-')}")
+            descriptor["relative_path"] = relative
+            terminfo.append(descriptor)
+    if not terminfo:
+        raise SystemExit(f"Missing terminfo for {target}")
+    entries["terminfo_entries"] = terminfo
+    targets[target] = entries
+source_hashes = {}
+for name in ("agentty-notify", "agentty-host-connector"):
+    expected = subprocess.check_output([root / "scripts" / f"{name}-source-hash"], text=True).strip()
+    stamp = root / "HostRuntimeArtifacts/bin" / f".{name}-source.sha256"
+    if stamp.read_text().strip() != expected:
+        raise SystemExit(f"Rebuild {name}: artifact source fingerprint does not match checkout")
+    source_hashes[name.replace("-", "_")] = expected
+manifest = {
+    "schema_version": 1,
+    "runtime_version": version,
+    "generated_at": datetime.now(timezone.utc).isoformat(),
+    "source_hashes": source_hashes,
+    "targets": targets,
+}
+(output / "host-runtime-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+for filename in ("LICENSE", "THIRD-PARTY-NOTICES.txt"):
+    shutil.copyfile(root / filename, output / filename)
+checksums = "".join(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n" for path in sorted(output.iterdir()))
+(output / "SHA256SUMS").write_text(checksums)
+print(f"Packaged {len(targets)} targets in {output}")

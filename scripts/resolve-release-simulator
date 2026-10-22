@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+runtime_version="${AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME:-27.0}"
+device_name="${AGENTTY_RELEASE_IOS_SIMULATOR_DEVICE:-iPhone 17 Pro}"
+runtime_identifier="com.apple.CoreSimulator.SimRuntime.iOS-${runtime_version//./-}"
+
+devices_json="$(mktemp -t agentty-release-simulators.XXXXXX.json)"
+trap 'rm -f "$devices_json"' EXIT
+xcrun simctl list devices available --json > "$devices_json"
+
+python3 - "$devices_json" "$runtime_identifier" "$runtime_version" "$device_name" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path, runtime_identifier, runtime_version, device_name = sys.argv[1:]
+devices_by_runtime = json.loads(Path(path).read_text(encoding="utf-8")).get("devices", {})
+if runtime_version == "latest":
+    available = [key for key, devices in devices_by_runtime.items() if key.startswith("com.apple.CoreSimulator.SimRuntime.iOS-") and any(device.get("isAvailable", True) and device.get("name") == device_name for device in devices)]
+    if not available:
+        raise SystemExit(f"FATAL: no installed iOS runtime has an available {device_name}")
+    runtime_identifier = max(available, key=lambda key: tuple(map(int, key.rsplit("iOS-", 1)[1].split("-"))))
+    runtime_version = runtime_identifier.rsplit("iOS-", 1)[1].replace("-", ".")
+
+if runtime_identifier not in devices_by_runtime:
+    raise SystemExit(
+        f"FATAL: iOS {runtime_version} Simulator is not installed. "
+        "Run `xcodebuild -downloadPlatform iOS` with the pinned release Xcode."
+    )
+
+matches = sorted(
+    device["udid"]
+    for device in devices_by_runtime[runtime_identifier]
+    if device.get("name") == device_name and device.get("isAvailable", True)
+)
+if not matches:
+    available = sorted(
+        device.get("name", "")
+        for device in devices_by_runtime[runtime_identifier]
+        if device.get("isAvailable", True)
+    )
+    available_text = ", ".join(name for name in available if name) or "none"
+    raise SystemExit(
+        f"FATAL: no available {device_name!r} simulator for iOS {runtime_version}. "
+        f"Available devices: {available_text}"
+    )
+
+print(matches[0])
+PY

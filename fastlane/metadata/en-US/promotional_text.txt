@@ -1,0 +1,1 @@
+A fast, Ghostty-based iPhone SSH client for Codex & CC - notifications, image paste, persistent sessions, and a custom keyboard with familiar shortcuts.

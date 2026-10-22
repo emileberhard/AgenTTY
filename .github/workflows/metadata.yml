@@ -1,0 +1,48 @@
+name: App Store metadata
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metadata
+  cancel-in-progress: false
+
+jobs:
+  metadata:
+    runs-on: xcode-27
+    environment: testflight
+    timeout-minutes: 15
+    env:
+      APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+      AGENTTY_APP_IDENTIFIER: ${{ vars.AGENTTY_BUNDLE_ID }}
+      APP_STORE_VERSION: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify metadata ref
+        shell: bash
+        run: |
+          [[ $GITHUB_REF == refs/tags/* ]]
+          [[ $GITHUB_REF_NAME =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: Install Ruby and locked Fastlane
+        run: |
+          brew install ruby
+          echo "$(brew --prefix ruby)/bin" >> "$GITHUB_PATH"
+      - run: gem install bundler -v 4.0.16 --no-document && bundle _4.0.16_ install --jobs 4 --retry 3
+      - name: Upload text metadata
+        env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: |
+          export APP_STORE_CONNECT_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          ./scripts/check-release-version "$APP_STORE_VERSION" --metadata
+          bundle _4.0.16_ exec fastlane ios metadata version:"$APP_STORE_VERSION" skip_screenshots:true

@@ -1,0 +1,1 @@
+vibe,code,terminal,remote,shell,tmux,agent,cli,agentic,mosh,native,ghostty,gpt,anthropic,openai,ai
