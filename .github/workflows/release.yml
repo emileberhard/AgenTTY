@@ -69,6 +69,7 @@ jobs:
 
   build:
     needs: [check, tmux, npm-candidate]
+    if: github.event_name == 'push'
     permissions:
       contents: read
       actions: read
@@ -135,6 +136,7 @@ jobs:
 
   publish:
     needs: build
+    if: github.event_name == 'push'
     runs-on: xcode-27
     environment: testflight
     timeout-minutes: 30
@@ -163,9 +165,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          : "${RUNNER_TEMP:?}"
           mkdir -p build
-          gh run download "$GITHUB_RUN_ID" --name release-candidate --dir build
-          tar -xzf build/release-candidate.tar.gz -C build
+          mkdir "$RUNNER_TEMP/agentty-release-candidate"
+          trap 'rm -rf "$RUNNER_TEMP/agentty-release-candidate"' EXIT
+          gh run download "$GITHUB_RUN_ID" --name release-candidate --dir "$RUNNER_TEMP/agentty-release-candidate"
+          tar -xzf "$RUNNER_TEMP/agentty-release-candidate/release-candidate.tar.gz" -C "$RUNNER_TEMP/agentty-release-candidate" AgenTTY.xcarchive release-runtime
+          mv "$RUNNER_TEMP/agentty-release-candidate/AgenTTY.xcarchive" "$RUNNER_TEMP/agentty-release-candidate/release-runtime" build/
           (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
           ./scripts/configure-hosted-release
           plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist

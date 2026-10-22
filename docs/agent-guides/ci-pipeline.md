@@ -26,7 +26,9 @@ all other version tags and uploaded Apple versions. The first public tag is
 TestFlight 2.11.3. `check-release-version` reads fresh paginated ASC state and
 refuses an equal/lower version before construction. `release.yml` rejects other versions, serializes
 releases, runs CI, builds all runtime targets with source fingerprints, archives without signing,
-and preserves a complete candidate. A separate publication job stages runtime
+and preserves a complete candidate. Publication extracts only the expected
+archive/runtime directories in runner temporary storage before moving them into
+the build directory. A separate publication job stages runtime
 Sentry dSYMs with the tag as the release name, stages complete runtime assets
 in a draft GitHub release, requests Xcode cloud signing/upload, then publishes
 that release only after the upload succeeds. The release title is the bare version
