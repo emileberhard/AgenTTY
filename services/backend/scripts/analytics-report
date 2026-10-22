@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+database_path="${1:-${AGENTTY_BACKEND_DATABASE_PATH:-$HOME/.agentty/backend.sqlite3}}"
+if [[ "$database_path" == "~/"* ]]; then
+  database_path="$HOME/${database_path#~/}"
+fi
+
+if [[ ! -f "$database_path" ]]; then
+  echo "Analytics database not found at: $database_path" >&2
+  exit 1
+fi
+
+internal_user_filter="1=1"
+if [[ -n "${AGENTTY_BACKEND_INTERNAL_ANALYTICS_USER_KEY_HASHES:-}" ]]; then
+  IFS=',' read -r -a internal_user_hashes <<< "${AGENTTY_BACKEND_INTERNAL_ANALYTICS_USER_KEY_HASHES}"
+  quoted_hashes=()
+  for hash in "${internal_user_hashes[@]}"; do
+    trimmed="$(printf '%s' "$hash" | xargs)"
+    [[ -z "$trimmed" ]] && continue
+    quoted_hashes+=("'${trimmed//\'/''}'")
+  done
+  if (( ${#quoted_hashes[@]} > 0 )); then
+    internal_user_filter="user_key_hash NOT IN ($(IFS=,; printf '%s' "${quoted_hashes[*]}"))"
+  fi
+fi
+
+run_query() {
+  local title="$1"
+  local sql="$2"
+  printf '\n== %s ==\n' "$title"
+  sqlite3 -readonly -header -column "$database_path" "$sql"
+}
+
+run_query \
+  "Active External Blockers" \
+  "
+  SELECT
+    substr(user_key_hash, 1, 12) AS user,
+    issue_kind,
+    issue_severity,
+    occurrence_count,
+    datetime(last_seen_at_epoch_seconds, 'unixepoch', 'localtime') AS last_seen,
+    summary
+  FROM analytics_blocked_user_candidates
+  WHERE $internal_user_filter
+  ORDER BY
+    CASE issue_severity
+      WHEN 'blocked' THEN 0
+      ELSE 1
+    END,
+    last_seen_at_epoch_seconds DESC,
+    signature_key ASC
+  LIMIT 20;
+  "
+
+run_query \
+  "Top Issue Signatures" \
+  "
+  SELECT
+    issue_kind,
+    issue_severity,
+    COUNT(DISTINCT user_key_hash) AS users,
+    SUM(occurrence_count) AS occurrences,
+    MAX(datetime(last_seen_at_epoch_seconds, 'unixepoch', 'localtime')) AS last_seen
+  FROM analytics_blocked_user_candidates
+  WHERE $internal_user_filter
+  GROUP BY issue_kind, issue_severity
+  ORDER BY
+    CASE issue_severity
+      WHEN 'blocked' THEN 0
+      ELSE 1
+    END,
+    occurrences DESC,
+    issue_kind ASC;
+  "
+
+run_query \
+  "Recent Digest Rows" \
+  "
+  SELECT
+    digest_date,
+    issue_kind,
+    issue_severity,
+    affected_user_count,
+    total_occurrence_count,
+    datetime(last_seen_at_epoch_seconds, 'unixepoch', 'localtime') AS last_seen
+  FROM analytics_alert_digest_queue
+  ORDER BY digest_date DESC, issue_severity ASC, total_occurrence_count DESC
+  LIMIT 20;
+  "
+
+run_query \
+  "Recent Alerts Sent" \
+  "
+  SELECT
+    substr(user_key_hash, 1, 12) AS user,
+    issue_kind,
+    issue_severity,
+    alert_count,
+    datetime(last_alerted_at_epoch_seconds, 'unixepoch', 'localtime') AS last_alerted,
+    summary
+  FROM analytics_recent_issue_alerts
+  ORDER BY last_alerted_at_epoch_seconds DESC, signature_key ASC
+  LIMIT 20;
+  "

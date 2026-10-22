@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+resolve_script_path() {
+  local source_path="$1"
+  while [[ -L "$source_path" ]]; do
+    local source_dir
+    source_dir="$(cd "$(dirname "$source_path")" && pwd)"
+    source_path="$(readlink "$source_path")"
+    if [[ "$source_path" != /* ]]; then
+      source_path="$source_dir/$source_path"
+    fi
+  done
+  cd "$(dirname "$source_path")" && pwd
+}
+
+resolve_cargo_bin() {
+  if command -v cargo >/dev/null 2>&1; then
+    command -v cargo
+    return 0
+  fi
+
+  local candidate=""
+  for candidate in "$HOME/.cargo/bin/cargo" "/opt/homebrew/bin/cargo"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  echo "agentty-backend: cargo is required but was not found on PATH." >&2
+  return 127
+}
+
+script_dir="$(resolve_script_path "${BASH_SOURCE[0]}")"
+service_root="$(cd "$script_dir/.." && pwd)"
+cargo_bin="$(resolve_cargo_bin)"
+repo_root="$(cd "$service_root/../.." && pwd)"
+backend_env="$repo_root/ops/macos/backend/env.sh"
+
+if [[ -f "$backend_env" ]]; then
+  # shellcheck disable=SC1090
+  source "$backend_env"
+fi
+
+mkdir -p "$HOME/.agentty"
+cd "$service_root"
+exec "$cargo_bin" run --manifest-path "$service_root/Cargo.toml" -- "$@"
