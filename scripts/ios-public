@@ -10,7 +10,7 @@ case "$operation" in
   export) ;;
   *) echo "Unknown operation: $operation" >&2; exit 2 ;;
 esac
-common=(-workspace AgenTTY.xcworkspace -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 4)
+common=(-workspace AgenTTY.xcworkspace -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -skipMacroValidation -jobs 4)
 case "$operation" in
   build)
     xcodebuild build "${common[@]}" -scheme AgenTTY-iOS-Dev -configuration Debug \

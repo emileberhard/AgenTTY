@@ -11,7 +11,8 @@ Project.swift and Package.resolved are updated together by a maintainer.
 
 `just ios-check` and `just ios-test` are public entry points. They fetch the
 reviewed GhosttyKit artifact, generate the workspace, install the canonical
-package lock, and call the repo-owned build script. TestFlight uses Xcode 27.1;
+package lock, and call the repo-owned build script. Headless commands allow
+compiler macros from those reviewed, locked package revisions. TestFlight uses Xcode 27.1;
 select the matching developer directory explicitly. Never weaken strict
 concurrency to make a new toolchain compile. Public simulator tests select the
 newest installed iOS runtime with an available iPhone; the maintainer
