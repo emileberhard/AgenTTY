@@ -1,0 +1,155 @@
+#!/usr/bin/env python3
+import argparse
+import fcntl
+import hashlib
+import json
+import shutil
+import stat
+import subprocess
+import sys
+import tempfile
+import zipfile
+from pathlib import Path, PurePosixPath
+
+
+ROOT = Path(__file__).resolve().parent.parent
+VENDOR = ROOT / "Vendor"
+FRAMEWORK = VENDOR / "GhosttyKit.xcframework"
+MANIFEST = ROOT / "scripts/ghostty-artifact.json"
+NOTICES = ROOT / "docs/licenses/GhosttyKit-NOTICES.txt"
+
+
+def sha256(path):
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def files_in(directory):
+    if directory.is_symlink():
+        raise ValueError(f"Framework must be checkout-local: {directory}")
+    result = {}
+    for path in sorted(directory.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"Unexpected symlink: {path}")
+        if path.is_file():
+            result[path.relative_to(directory).as_posix()] = sha256(path)
+    return result
+
+
+def verify(directory, manifest):
+    if files_in(directory) != manifest["files"]:
+        raise ValueError("GhosttyKit differs from scripts/ghostty-artifact.json")
+
+
+def download(url, checksum, destination):
+    if not url.startswith("https://"):
+        raise ValueError("Artifact URLs must use HTTPS")
+    subprocess.run(
+        ["curl", "--fail", "--location", "--silent", "--show-error", "--proto", "=https",
+         "--proto-redir", "=https", "--retry", "2", "--connect-timeout", "15",
+         "--max-time", "300", "--output", str(destination), url],
+        check=True,
+    )
+    if sha256(destination) != checksum:
+        raise ValueError(f"SHA-256 mismatch: {url}")
+
+
+def unpack(archive_path, destination, manifest):
+    with zipfile.ZipFile(archive_path) as archive:
+        expected = {f"GhosttyKit.xcframework/{name}" for name in manifest["files"]}
+        entries = archive.infolist()
+        if len(entries) != len(expected) or {entry.filename for entry in entries} != expected:
+            raise ValueError("Archive contents differ from the pinned file list")
+        if sum(entry.file_size for entry in entries) > 2 * 1024**3:
+            raise ValueError("GhosttyKit archive exceeds 2 GiB")
+        for entry in entries:
+            name = PurePosixPath(entry.filename)
+            mode = entry.external_attr >> 16
+            if name.is_absolute() or ".." in name.parts or stat.S_ISLNK(mode):
+                raise ValueError(f"Unsafe archive entry: {entry.filename}")
+            target = destination.joinpath(*name.parts)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with archive.open(entry) as source, target.open("wb") as output:
+                shutil.copyfileobj(source, output)
+            target.chmod(0o644)
+    verify(destination / FRAMEWORK.name, manifest)
+
+
+def ensure(manifest):
+    try:
+        verify(FRAMEWORK, manifest)
+        print("GhosttyKit matches the pinned release")
+        return
+    except ValueError:
+        pass
+    with tempfile.TemporaryDirectory(prefix=".ghostty-download-", dir=VENDOR) as temporary:
+        staging = Path(temporary)
+        archive = staging / "GhosttyKit.zip"
+        print(f"Downloading GhosttyKit: {manifest['url']}", flush=True)
+        download(manifest["url"], manifest["sha256"], archive)
+        unpack(archive, staging, manifest)
+        previous = staging / "previous"
+        if FRAMEWORK.exists() or FRAMEWORK.is_symlink():
+            FRAMEWORK.rename(previous)
+        try:
+            (staging / FRAMEWORK.name).rename(FRAMEWORK)
+        except BaseException:
+            if previous.exists() or previous.is_symlink():
+                previous.rename(FRAMEWORK)
+            raise
+    print("Installed verified GhosttyKit release")
+
+
+def package(manifest, archive_path, url):
+    if not FRAMEWORK.is_dir() or FRAMEWORK.is_symlink():
+        raise ValueError("Build a checkout-local GhosttyKit first")
+    shutil.copyfile(NOTICES, FRAMEWORK / "NOTICES.txt")
+    for source in manifest["source_archives"]:
+        destination = FRAMEWORK / source["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        download(source["url"], source["sha256"], destination)
+    files = files_in(FRAMEWORK)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name in files:
+            entry = zipfile.ZipInfo(f"GhosttyKit.xcframework/{name}")
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = (stat.S_IFREG | 0o644) << 16
+            with (FRAMEWORK / name).open("rb") as source, archive.open(entry, "w") as output:
+                shutil.copyfileobj(source, output)
+    manifest.update(url=url, sha256=sha256(archive_path), files=files)
+    MANIFEST.write_text(json.dumps(manifest, indent=2) + "\n")
+    print(f"Packaged {archive_path}: {manifest['sha256']}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    commands = parser.add_subparsers(dest="command", required=True)
+    commands.add_parser("ensure")
+    commands.add_parser("verify")
+    packaging = commands.add_parser("package")
+    packaging.add_argument("archive", type=Path)
+    packaging.add_argument("url")
+    args = parser.parse_args()
+    VENDOR.mkdir(exist_ok=True)
+    with (VENDOR / ".ghostty-artifact.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        manifest = json.loads(MANIFEST.read_text())
+        if args.command == "ensure":
+            ensure(manifest)
+        elif args.command == "verify":
+            verify(FRAMEWORK, manifest)
+            print("GhosttyKit release checksums verified")
+        else:
+            package(manifest, args.archive, args.url)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, subprocess.CalledProcessError) as error:
+        print(f"GhosttyKit: {error}", file=sys.stderr)
+        sys.exit(1)

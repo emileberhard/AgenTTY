@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly zig_version="0.15.2"
+
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "GhosttyKit requires macOS." >&2
+  exit 1
+fi
+
+if [[ -n "${AGENTTY_GHOSTTY_ZIG_BIN:-}" ]]; then
+  zig_bin="$AGENTTY_GHOSTTY_ZIG_BIN"
+else
+  zig_bin=""
+  for candidate in \
+    /opt/homebrew/opt/zig@0.15/bin/zig \
+    /usr/local/opt/zig@0.15/bin/zig
+  do
+    if [[ -x "$candidate" ]]; then
+      zig_bin="$candidate"
+      break
+    fi
+  done
+
+  if [[ -z "$zig_bin" ]]; then
+    command -v brew >/dev/null 2>&1 || {
+      echo "GhosttyKit requires Homebrew's patched zig@0.15 keg." >&2
+      echo "Install Homebrew, then run: brew install zig@0.15" >&2
+      exit 1
+    }
+    echo "Installing Homebrew's patched Zig $zig_version for GhosttyKit..." >&2
+    brew install zig@0.15 >&2
+    zig_bin="$(brew --prefix zig@0.15)/bin/zig"
+  fi
+fi
+
+if [[ ! -x "$zig_bin" ]]; then
+  echo "Ghostty Zig executable is missing or not executable: $zig_bin" >&2
+  exit 1
+fi
+
+actual_version="$("$zig_bin" version)"
+if [[ "$actual_version" != "$zig_version" ]]; then
+  echo "GhosttyKit requires Zig $zig_version; found $actual_version at $zig_bin." >&2
+  echo "Install the compatible keg with: brew install zig@0.15" >&2
+  exit 1
+fi
+
+printf '%s\n' "$zig_bin"
