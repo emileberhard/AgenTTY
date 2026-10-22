@@ -53,7 +53,7 @@ jobs:
           bun install --frozen-lockfile
           npm version "$VERSION" --no-git-tag-version
           npm pack
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: npm-candidate
           path: tools/agentty-host/*.tgz
@@ -116,7 +116,7 @@ jobs:
       - run: just ios-cloud-archive
       - name: Preserve complete candidate
         run: tar -czf build/release-candidate.tar.gz -C build AgenTTY.xcarchive release-runtime
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: release-candidate
           path: build/release-candidate.tar.gz
