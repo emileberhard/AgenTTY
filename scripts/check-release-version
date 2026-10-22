@@ -44,7 +44,11 @@ parse = ->(value) { abort("Unexpected Apple version: #{value}") unless /\A\d+(?:
 requested = parse.call(version)
 newest_store = store.max_by(&parse)
 newest_beta = beta.max_by(&parse)
-abort("#{version} must exceed App Store version #{newest_store}") if newest_store && (requested <=> parse.call(newest_store)) <= 0
+if newest_store
+  comparison = requested <=> parse.call(newest_store)
+  abort("#{version} must not precede App Store version #{newest_store}") if comparison.negative?
+  abort("#{version} must exceed App Store version #{newest_store}") if comparison.zero? && !metadata
+end
 if metadata
   abort("Metadata must target the newest uploaded TestFlight version (#{newest_beta})") unless newest_beta && requested == parse.call(newest_beta)
 else

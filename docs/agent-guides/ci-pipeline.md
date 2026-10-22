@@ -92,8 +92,10 @@ Only missing local releases can be created; mismatches require a new patch.
 The tag is MARKETING_VERSION, the TestFlight version and the App Store record's
 version. `metadata.yml` is manual, runs on a version tag on main, takes no
 separate version input, and uploads text only. Its preflight requires that tag
-to be the newest uploaded TestFlight version and higher than existing store
-versions. No workflow submits for review.
+to be the newest uploaded TestFlight version and no lower than existing store
+versions. Metadata may reuse that version's existing App Store record; building
+or uploading an app still requires a version above every store and beta version.
+No workflow submits for review.
 Generated screenshots are ignored, and Fastlane refuses an explicitly requested
 screenshot upload when no reviewed PNGs exist. Existing store screenshots are
 preserved by default.
