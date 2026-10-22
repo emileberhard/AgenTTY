@@ -100,7 +100,10 @@ jobs:
           umask 077
           printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
           ./scripts/check-release-version "$MARKETING_VERSION"
-      - run: brew install just tuist/tuist/tuist@4.212.0
+      - run: |
+          brew tap tuist/tuist
+          brew trust --tap tuist/tuist
+          brew install just tuist/tuist/tuist@4.212.0
       - run: echo "$(brew --prefix tuist/tuist/tuist@4.212.0)/bin" >> "$GITHUB_PATH"
       - name: Build host runtime
         env:
