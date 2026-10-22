@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+operation="${1:?Use build, test, archive, or export}"
+case "$operation" in
+  build|test|archive)
+    tuist generate --no-open
+    ./scripts/install-release-package-lock --install
+    ;;
+  export) ;;
+  *) echo "Unknown operation: $operation" >&2; exit 2 ;;
+esac
+common=(-workspace AgenTTY.xcworkspace -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -jobs 4)
+case "$operation" in
+  build)
+    xcodebuild build "${common[@]}" -scheme AgenTTY-iOS-Dev -configuration Debug \
+      -destination 'generic/platform=iOS Simulator' ARCHS=arm64 CODE_SIGNING_ALLOWED=NO
+    ;;
+  test)
+    simulator_id="$(AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME=latest ./scripts/resolve-release-simulator)"
+    xcodebuild test "${common[@]}" -scheme AgenTTY-iOS-Tests -configuration Debug \
+      -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO
+    ;;
+  archive)
+    : "${MARKETING_VERSION:?Set MARKETING_VERSION to the release tag}"
+    ./scripts/check-build-identity
+    xcodebuild archive "${common[@]}" -scheme AgenTTY-iOS -configuration Release \
+      -destination 'generic/platform=iOS' -archivePath build/AgenTTY.xcarchive \
+      MARKETING_VERSION="$MARKETING_VERSION" CODE_SIGNING_ALLOWED=NO
+    ;;
+  export)
+    : "${APP_STORE_CONNECT_KEY_PATH:?Set APP_STORE_CONNECT_KEY_PATH}"
+    : "${APP_STORE_CONNECT_KEY_ID:?Set APP_STORE_CONNECT_KEY_ID}"
+    : "${APP_STORE_CONNECT_ISSUER_ID:?Set APP_STORE_CONNECT_ISSUER_ID}"
+    ./scripts/check-build-identity
+    xcodebuild -exportArchive -archivePath build/AgenTTY.xcarchive -exportPath build/export \
+      -exportOptionsPlist Config/ExportOptions.plist -allowProvisioningUpdates \
+      -authenticationKeyPath "$APP_STORE_CONNECT_KEY_PATH" \
+      -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID" -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+    ;;
+esac
+if [[ "$operation" != export ]]; then ./scripts/install-release-package-lock --check-installed; fi

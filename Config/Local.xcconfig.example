@@ -1,0 +1,10 @@
+DEVELOPMENT_TEAM = YOURTEAMID
+AGENTTY_BUNDLE_ID = org.yourname.Terminal
+AGENTTY_APP_GROUP = group.org.yourname.Terminal
+AGENTTY_CLOUDKIT_CONTAINER = iCloud.org.yourname.Terminal
+AGENTTY_KEYCHAIN_NAMESPACE = org.yourname.Terminal
+AGENTTY_UNLOCK_PRODUCT_ID = org.yourname.Terminal.lifetime_access
+AGENTTY_RELAY_URL = https:/$()/relay.yourdomain.example
+AGENTTY_ARTIFACT_URL = https:/$()/assets.yourdomain.example/host-runtime
+AGENTTY_SENTRY_DSN =
+AGENTTY_RELEASE_ARTIFACT_URL = https:/$()/github.com/emileberhard/AgenTTY/releases/download

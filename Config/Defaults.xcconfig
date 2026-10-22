@@ -1,0 +1,17 @@
+DEVELOPMENT_TEAM =
+AGENTTY_BUNDLE_ID = com.example.AgenTTY
+AGENTTY_APP_GROUP = group.com.example.AgenTTY
+AGENTTY_CLOUDKIT_CONTAINER = iCloud.com.example.AgenTTY
+AGENTTY_KEYCHAIN_NAMESPACE = com.example.AgenTTY
+AGENTTY_UNLOCK_PRODUCT_ID = com.example.AgenTTY.lifetime_access
+AGENTTY_RELAY_URL = https:/$()/relay.example.invalid
+AGENTTY_RELEASE_ARTIFACT_URL = https:/$()/github.com/emileberhard/AgenTTY/releases/download
+AGENTTY_ARTIFACT_URL = https:/$()/assets.example.invalid/host-runtime
+AGENTTY_SENTRY_DSN =
+AGENTTY_DEV_SIGN_STYLE = Automatic
+AGENTTY_RELEASE_SIGN_STYLE = Automatic
+AGENTTY_DEV_APP_PROFILE =
+AGENTTY_DEV_EXTENSION_PROFILE =
+AGENTTY_RELEASE_APP_PROFILE =
+AGENTTY_RELEASE_EXTENSION_PROFILE =
+#include? "Local.xcconfig"

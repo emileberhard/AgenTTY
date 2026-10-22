@@ -1,0 +1,198 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# ///
+"""
+Keep only high-signal diagnostics from verbose iOS build/install logs.
+"""
+
+import re
+import sys
+import os
+from pathlib import Path
+
+MAX_LINE_LEN = 320
+CONTEXT_BEFORE = 1
+CONTEXT_AFTER = 1
+SHOW_FAILED_FRONTEND_COMMAND = os.getenv(
+    "AGENTTY_FILTER_SHOW_FRONTEND_COMMAND",
+    os.getenv("AGENTTY_FILTER_SHOW_FRONTEND_COMMAND", "0"),
+).strip().lower() in {"1", "true", "yes", "on"}
+
+DIAGNOSTIC_WITH_LOCATION = re.compile(r"^.+:\d+:\d+: (error|warning|note):")
+DIAGNOSTIC_CAPTURE = re.compile(
+    r"^(?P<path>.+):(?P<line>\d+):(?P<col>\d+): (?P<level>error|warning|note):"
+)
+PLAIN_DIAGNOSTIC = re.compile(r"^(error|warning):")
+BUILD_MARKER = re.compile(r"^\*\* BUILD (FAILED|SUCCEEDED) \*\*$")
+FAILURE_COUNT = re.compile(r"^\([0-9]+ failures?\)$")
+TIMING_ROW = re.compile(r"^[A-Za-z0-9_./() +:-]+ \([0-9]+ tasks?\) \| [0-9.]+ seconds$")
+DEVICE_PROGRESS = re.compile(r"^[0-9]{2}:[0-9]{2}:[0-9]{2}\s")
+APP_INSTALL_DETAIL = re.compile(r"^•\s")
+SOURCE_CONTEXT_LINE = re.compile(r"^\s+\S")
+CARET_CONTEXT_LINE = re.compile(r"^\s*\^+~*$")
+LINKER_START = re.compile(r"^Undefined symbols for architecture .+:$")
+LINKER_BLOCK_LINE = re.compile(
+    r'^(?:\s*"[^"]+", referenced from:|'
+    r"\s+referenced from:|"
+    r"\s+\S.*\s+in\s+\S+\.(?:o|a)(?:\s|$|[:)])|"
+    r"\s+.*\(.+\.o\))"
+)
+LINKER_TRAILER = re.compile(r"^(?:ld: |clang: error: linker command failed|duplicate symbol )")
+
+KEEP_PREFIXES = (
+    "building (scheme:",
+    "retrying build (attempt",
+    "codesign keychain preflight complete",
+    "Build Timing Summary",
+    "The following build commands failed:",
+    "installing to iPhone",
+    "App installed:",
+    "launching ",
+    "app launched",
+    "build failed",
+    "xcodebuild log:",
+    "FATAL:",
+    "No connected iPhone found via devicectl.",
+    "Could not resolve device identifier.",
+    "Products dir not found:",
+    "No .app found in:",
+    "Multiple .app products found in:",
+    "Try passing --derived-data explicitly",
+    "If your scheme doesn't produce an iOS app",
+)
+
+in_failed_commands_block = False
+in_timing_block = False
+keep_next_after_failed_frontend = 0
+diagnostic_context_remaining = 0
+in_linker_block = False
+file_cache: dict[str, list[str] | None] = {}
+emitted_context: set[tuple[str, int]] = set()
+
+
+def truncate(line: str) -> str:
+    if len(line) <= MAX_LINE_LEN:
+        return line
+    return f"{line[:MAX_LINE_LEN - 15]}... [truncated]"
+
+
+def load_file_lines(path: str) -> list[str] | None:
+    if path in file_cache:
+        return file_cache[path]
+
+    try:
+        content = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        file_cache[path] = None
+        return None
+
+    lines = content.splitlines()
+    file_cache[path] = lines
+    return lines
+
+
+def build_source_context(path: str, line_no: int) -> list[str]:
+    key = (path, line_no)
+    if key in emitted_context:
+        return []
+    emitted_context.add(key)
+
+    lines = load_file_lines(path)
+    if lines is None or not lines:
+        return []
+    if line_no < 1 or line_no > len(lines):
+        return []
+
+    start = max(1, line_no - CONTEXT_BEFORE)
+    end = min(len(lines), line_no + CONTEXT_AFTER)
+
+    output = [f"context: {path}:{line_no}"]
+    for current in range(start, end + 1):
+        marker = ">" if current == line_no else " "
+        output.append(f"{marker}{current:5d} | {lines[current - 1]}")
+    return output
+
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    keep = False
+    extra_lines: list[str] = []
+
+    if diagnostic_context_remaining > 0:
+        if SOURCE_CONTEXT_LINE.match(line) or CARET_CONTEXT_LINE.match(line):
+            keep = True
+            diagnostic_context_remaining -= 1
+        elif line:
+            diagnostic_context_remaining = 0
+
+    if keep_next_after_failed_frontend > 0:
+        keep = True
+        keep_next_after_failed_frontend -= 1
+
+    if in_linker_block:
+        if not line.strip():
+            in_linker_block = False
+        elif LINKER_BLOCK_LINE.match(line) or LINKER_TRAILER.match(line):
+            keep = True
+        else:
+            in_linker_block = False
+
+    if in_failed_commands_block:
+        if line.startswith("\t") or FAILURE_COUNT.match(line):
+            keep = True
+            if FAILURE_COUNT.match(line):
+                in_failed_commands_block = False
+        elif line:
+            in_failed_commands_block = False
+
+    if in_timing_block:
+        if TIMING_ROW.match(line):
+            keep = True
+        elif line:
+            in_timing_block = False
+
+    if line == "The following build commands failed:":
+        keep = True
+        in_failed_commands_block = True
+
+    if line == "Build Timing Summary":
+        keep = True
+        in_timing_block = True
+
+    if line == "Failed frontend command:":
+        if SHOW_FAILED_FRONTEND_COMMAND:
+            keep = True
+            keep_next_after_failed_frontend = 1
+
+    if (
+        DIAGNOSTIC_WITH_LOCATION.match(line)
+        or PLAIN_DIAGNOSTIC.match(line)
+        or BUILD_MARKER.match(line)
+        or DEVICE_PROGRESS.match(line)
+        or APP_INSTALL_DETAIL.match(line)
+    ):
+        keep = True
+
+    if DIAGNOSTIC_WITH_LOCATION.match(line):
+        diagnostic_context_remaining = 2
+        match = DIAGNOSTIC_CAPTURE.match(line)
+        if match and match.group("level") == "error":
+            path = match.group("path")
+            line_no = int(match.group("line"))
+            extra_lines.extend(build_source_context(path, line_no))
+
+    if LINKER_START.match(line):
+        keep = True
+        in_linker_block = True
+
+    if LINKER_TRAILER.match(line):
+        keep = True
+
+    if line.startswith(KEEP_PREFIXES):
+        keep = True
+
+    if keep:
+        print(truncate(line))
+        for extra in extra_lines:
+            print(truncate(extra))

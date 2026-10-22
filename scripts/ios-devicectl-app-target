@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+bundle_id=""
+preferred_udid=""
+installed_device_name=""
+retries="5"
+retry_delay_seconds="1"
+mode="launch"
+device_type="iPhone"
+
+usage() {
+    cat <<'EOF' >&2
+Usage: ios-devicectl-app-target [options]
+
+Options:
+  --bundle-id <bundle-id>
+  --preferred-udid <udid>
+  --installed-device-name <name>
+  --retries <count>
+  --retry-delay-seconds <seconds>
+  --device-type <iphone|ipad>   (default: iphone)
+  --check-only
+EOF
+}
+
+while (($# > 0)); do
+    case "$1" in
+        --bundle-id)
+            bundle_id="${2:-}"
+            shift 2
+            ;;
+        --preferred-udid)
+            preferred_udid="${2:-}"
+            shift 2
+            ;;
+        --installed-device-name)
+            installed_device_name="${2:-}"
+            shift 2
+            ;;
+        --retries)
+            retries="${2:-}"
+            shift 2
+            ;;
+        --retry-delay-seconds)
+            retry_delay_seconds="${2:-}"
+            shift 2
+            ;;
+        --check-only)
+            mode="check"
+            shift
+            ;;
+        --device-type)
+            case "${2:-}" in
+                iphone) device_type="iPhone" ;;
+                ipad) device_type="iPad" ;;
+                *)
+                    echo "Unknown --device-type: ${2:-} (expected iphone|ipad)" >&2
+                    exit 2
+                    ;;
+            esac
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage
+            exit 2
+            ;;
+    esac
+done
+
+if [[ "$mode" == "launch" && -z "$bundle_id" ]]; then
+    echo "--bundle-id is required unless --check-only is used" >&2
+    usage
+    exit 2
+fi
+
+resolve_candidates() {
+    local json_path="$1"
+    python3 - "$json_path" "$preferred_udid" "$installed_device_name" "$device_type" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+json_path, preferred_udid, installed_device_name, device_type = sys.argv[1:]
+data = json.loads(Path(json_path).read_text())
+devices = data.get("result", {}).get("devices", [])
+candidates = []
+
+for device in devices:
+    hardware = device.get("hardwareProperties", {}) or {}
+    properties = device.get("deviceProperties", {}) or {}
+    identifier = device.get("identifier") or ""
+    if not identifier:
+        continue
+    if hardware.get("platform") != "iOS":
+        continue
+    if hardware.get("deviceType") != device_type:
+        continue
+
+    udid = hardware.get("udid", "") or ""
+    name = properties.get("name", "") or ""
+    score = 100
+
+    if preferred_udid and udid == preferred_udid:
+        score = 0
+    elif installed_device_name and name == installed_device_name:
+        score = 1
+    elif installed_device_name and installed_device_name.casefold() in name.casefold():
+        score = 2
+
+    candidates.append((score, name.casefold(), identifier, udid, name))
+
+candidates.sort()
+seen = set()
+for _, _, identifier, udid, name in candidates:
+    if identifier in seen:
+        continue
+    seen.add(identifier)
+    print("|".join([identifier, udid, name]))
+PY
+}
+
+probe_candidate() {
+    local device_token="$1"
+    xcrun devicectl device info apps --device "$device_token" >/dev/null 2>&1
+}
+
+launch_candidate() {
+    local device_token="$1"
+    xcrun devicectl device process launch \
+        --device "$device_token" \
+        --terminate-existing \
+        --activate \
+        "$bundle_id"
+}
+
+last_error=""
+
+for ((attempt = 1; attempt <= retries; attempt++)); do
+    devices_json="$(mktemp -t agentty-devicectl-target.XXXXXX.json)"
+    if ! xcrun devicectl list devices --json-output "$devices_json" --quiet >/dev/null 2>&1; then
+        rm -f "$devices_json"
+        last_error="failed to list devices with devicectl"
+        if (( attempt < retries )); then
+            sleep "$retry_delay_seconds"
+            continue
+        fi
+        break
+    fi
+
+    candidates=()
+    while IFS= read -r candidate; do
+        candidates+=("$candidate")
+    done < <(resolve_candidates "$devices_json")
+    rm -f "$devices_json"
+
+    if ((${#candidates[@]} == 0)); then
+        last_error="no $device_type candidates available for install/launch"
+        if (( attempt < retries )); then
+            sleep "$retry_delay_seconds"
+            continue
+        fi
+        break
+    fi
+
+    for candidate in "${candidates[@]}"; do
+        IFS='|' read -r device_identifier device_udid device_name <<<"$candidate"
+        target_name="${device_name:-$device_identifier}"
+
+        if probe_candidate "$device_identifier"; then
+            if [[ "$mode" == "check" ]]; then
+                echo "reachable $device_type target: $target_name"
+                exit 0
+            fi
+
+            echo "launch attempt $attempt/$retries on $target_name..."
+            if output="$(launch_candidate "$device_identifier" 2>&1)"; then
+                echo "app launched on $target_name"
+                exit 0
+            fi
+            last_error="$output"
+        else
+            last_error="device is listed but not reachable via devicectl: $target_name"
+        fi
+
+        if [[ -n "$device_udid" && "$device_udid" != "$device_identifier" ]]; then
+            if probe_candidate "$device_udid"; then
+                if [[ "$mode" == "check" ]]; then
+                    echo "reachable iPhone target: $target_name"
+                    exit 0
+                fi
+
+                echo "launch attempt $attempt/$retries on $target_name..."
+                if output="$(launch_candidate "$device_udid" 2>&1)"; then
+                    echo "app launched on $target_name"
+                    exit 0
+                fi
+                last_error="$output"
+            fi
+        fi
+    done
+
+    if (( attempt < retries )); then
+        sleep "$retry_delay_seconds"
+    fi
+done
+
+echo "$last_error" >&2
+if [[ "$mode" == "check" ]]; then
+    echo "Reconnect or unlock the $device_type so devicectl can reach it, or use \`just ios-build-host-dev-ota\` when direct install is unavailable." >&2
+fi
+exit 1

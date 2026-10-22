@@ -1,0 +1,432 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
+    pwd
+)"
+repo_root="$(
+    cd -- "$script_dir/.."
+    pwd
+)"
+
+workspace="$repo_root/AgenTTY.xcworkspace"
+scheme="AgenTTY-iOS-Dev"
+team_id="NNP2B278S6"
+expected_bundle_id="${AGENTTY_DEV_BUNDLE_ID:-dev.tuist.agentty.iOS.dev}"
+port="5443"
+ttl_seconds="300"
+disable_index_store="${AGENTTY_OTA_DISABLE_INDEX_STORE:-1}"
+disable_dsym="${AGENTTY_OTA_DISABLE_DSYM:-1}"
+refresh_provisioning="${AGENTTY_OTA_REFRESH_PROVISIONING:-0}"
+
+run_dir="/tmp/agentty-ota-dev"
+host_dir="$run_dir/site"
+archive_path="$run_dir/AgenTTY_iOS_Dev.xcarchive"
+export_path="$run_dir/export"
+export_options="$run_dir/ExportOptions.plist"
+archive_log="$run_dir/archive.log"
+export_log="$run_dir/export.log"
+server_script="/tmp/agentty-ota-https-server.py"
+server_session="agentty-ota-dev"
+cleanup_session="${server_session}-cleanup"
+ipa_name="AgenTTY_iOS_Dev.ipa"
+cert_path="$run_dir/ota.crt"
+key_path="$run_dir/ota.key"
+
+if [ -f "$HOME/configs/shared-env.sh" ]; then
+    # shellcheck disable=SC1090
+    source "$HOME/configs/shared-env.sh" >/dev/null 2>&1
+fi
+
+auth_key_path=""
+provisioning_args=()
+if [ "$refresh_provisioning" = "1" ]; then
+    : "${APP_STORE_CONNECT_ISSUER_ID:?Set APP_STORE_CONNECT_ISSUER_ID}"
+    : "${APP_STORE_CONNECT_KEY_ID:?Set APP_STORE_CONNECT_KEY_ID}"
+    : "${APP_STORE_CONNECT_KEY_PATH:?Set APP_STORE_CONNECT_KEY_PATH}"
+
+    auth_key_path="$(
+        python3 - <<'PY'
+import os
+print(os.path.expanduser(os.environ["APP_STORE_CONNECT_KEY_PATH"]))
+PY
+    )"
+
+    if [ ! -f "$auth_key_path" ]; then
+        echo "FATAL: App Store Connect key not found at $auth_key_path" >&2
+        exit 1
+    fi
+
+    provisioning_args=(
+        -allowProvisioningUpdates
+        -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+        -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID"
+        -authenticationKeyPath "$auth_key_path"
+    )
+fi
+
+if tmux has-session -t "$server_session" 2>/dev/null; then
+    tmux kill-session -t "$server_session"
+fi
+if tmux has-session -t "$cleanup_session" 2>/dev/null; then
+    tmux kill-session -t "$cleanup_session"
+fi
+
+rm -rf "$run_dir"
+mkdir -p "$host_dir"
+
+# Signing identities come from the canonical never-locked apple-signing keychain.
+"$HOME/configs/skills/apple-devops/scripts/ensure-signing-keychain"
+
+cat >"$export_options" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>release-testing</string>
+  <key>signingStyle</key>
+  <string>automatic</string>
+  <key>teamID</key>
+  <string>$team_id</string>
+  <key>stripSwiftSymbols</key>
+  <true/>
+  <key>thinning</key>
+  <string>&lt;none&gt;</string>
+</dict>
+</plist>
+PLIST
+
+echo "building ad-hoc archive for $scheme..."
+if [ "$refresh_provisioning" = "1" ]; then
+    echo "provisioning refresh: enabled"
+else
+    echo "provisioning refresh: disabled"
+fi
+archive_started_at="$(date +%s)"
+archive_cmd=(
+    xcodebuild
+    -workspace "$workspace"
+    -scheme "$scheme"
+    -configuration Release
+    -destination "generic/platform=iOS"
+    -archivePath "$archive_path"
+)
+if [ "$refresh_provisioning" = "1" ]; then
+    archive_cmd+=("${provisioning_args[@]}")
+fi
+if [ "$disable_index_store" = "1" ]; then
+    archive_cmd+=("COMPILER_INDEX_STORE_ENABLE=NO")
+fi
+if [ "$disable_dsym" = "1" ]; then
+    archive_cmd+=("DEBUG_INFORMATION_FORMAT=dwarf")
+fi
+archive_cmd+=(archive)
+if ! "${archive_cmd[@]}" >"$archive_log" 2>&1; then
+    echo "archive failed; tail of log:" >&2
+    tail -n 120 "$archive_log" >&2 || true
+    exit 1
+fi
+archive_duration="$(( $(date +%s) - archive_started_at ))"
+echo "archive completed in ${archive_duration}s"
+
+echo "exporting ad-hoc ipa..."
+export_started_at="$(date +%s)"
+export_cmd=(
+    xcodebuild
+    -exportArchive
+    -archivePath "$archive_path"
+    -exportPath "$export_path"
+    -exportOptionsPlist "$export_options"
+)
+if [ "$refresh_provisioning" = "1" ]; then
+    export_cmd+=("${provisioning_args[@]}")
+fi
+export_ok="no"
+if "${export_cmd[@]}" >"$export_log" 2>&1; then
+    export_ok="yes"
+fi
+
+# Auto-recover from common export failures
+if [ "$export_ok" = "no" ]; then
+    needs_retry="no"
+    retry_provisioning_args=()
+
+    if grep -q "No profiles for" "$export_log" 2>/dev/null; then
+        # Missing provisioning profile — retry with provisioning refresh if credentials available
+        if [ -n "${APP_STORE_CONNECT_ISSUER_ID:-}" ] && [ -n "${APP_STORE_CONNECT_KEY_ID:-}" ] && [ -n "${APP_STORE_CONNECT_KEY_PATH:-}" ]; then
+            echo "no provisioning profile found; retrying with provisioning refresh..."
+            if [ -z "$auth_key_path" ]; then
+                auth_key_path="$(python3 -c "import os; print(os.path.expanduser(os.environ['APP_STORE_CONNECT_KEY_PATH']))")"
+            fi
+            retry_provisioning_args=(
+                -allowProvisioningUpdates
+                -authenticationKeyIssuerID "$APP_STORE_CONNECT_ISSUER_ID"
+                -authenticationKeyID "$APP_STORE_CONNECT_KEY_ID"
+                -authenticationKeyPath "$auth_key_path"
+            )
+            needs_retry="yes"
+        fi
+    fi
+
+    if grep -q "Signing certificate is invalid\|certificate has been revoked" "$export_log" 2>/dev/null; then
+        # No valid distribution certificate — fall back to development export method
+        echo "no valid distribution certificate; falling back to development export method..."
+        sed -i '' 's|<string>release-testing</string>|<string>development</string>|' "$export_options"
+        needs_retry="yes"
+    fi
+
+    if [ "$needs_retry" = "yes" ]; then
+        rm -rf "$export_path"
+        mkdir -p "$export_path"
+        retry_cmd=(
+            xcodebuild
+            -exportArchive
+            -archivePath "$archive_path"
+            -exportPath "$export_path"
+            -exportOptionsPlist "$export_options"
+            "${retry_provisioning_args[@]}"
+        )
+        if "${retry_cmd[@]}" >"$export_log" 2>&1; then
+            export_ok="yes"
+        fi
+    fi
+
+    if [ "$export_ok" = "no" ]; then
+        echo "export failed; tail of log:" >&2
+        tail -n 120 "$export_log" >&2 || true
+        exit 1
+    fi
+fi
+export_duration="$(( $(date +%s) - export_started_at ))"
+echo "export completed in ${export_duration}s"
+
+ipa_path="$(find "$export_path" -maxdepth 1 -type f -name "*.ipa" | head -n1)"
+if [ -z "$ipa_path" ]; then
+    echo "FATAL: no IPA found in $export_path" >&2
+    exit 1
+fi
+cp -f "$ipa_path" "$host_dir/$ipa_name"
+
+ipa_meta="$(
+    python3 - "$ipa_path" <<'PY'
+import plistlib
+import zipfile
+import sys
+
+ipa_path = sys.argv[1]
+with zipfile.ZipFile(ipa_path) as zf:
+    info_path = next(n for n in zf.namelist() if n.startswith("Payload/") and n.endswith(".app/Info.plist"))
+    info = plistlib.loads(zf.read(info_path))
+print(info.get("CFBundleIdentifier", ""))
+print(info.get("CFBundleShortVersionString", ""))
+print(info.get("CFBundleVersion", ""))
+PY
+)"
+
+bundle_id="$(printf '%s\n' "$ipa_meta" | sed -n '1p')"
+marketing_version="$(printf '%s\n' "$ipa_meta" | sed -n '2p')"
+build_number="$(printf '%s\n' "$ipa_meta" | sed -n '3p')"
+
+if [ -z "$bundle_id" ] || [ -z "$marketing_version" ] || [ -z "$build_number" ]; then
+    echo "FATAL: failed reading IPA metadata" >&2
+    exit 1
+fi
+if [ "$bundle_id" != "$expected_bundle_id" ]; then
+    echo "FATAL: expected bundle id $expected_bundle_id but got $bundle_id" >&2
+    exit 1
+fi
+
+dns_name="$(tailscale status --json | jq -r '.Self.DNSName' | sed 's/\.$//')"
+if [ -z "$dns_name" ]; then
+    echo "FATAL: unable to resolve local tailscale DNS name" >&2
+    exit 1
+fi
+
+tailscale cert --cert-file "$cert_path" --key-file "$key_path" "$dns_name" >/dev/null
+
+manifest_url="https://$dns_name:$port/manifest.plist"
+install_url="$(
+    python3 - "$manifest_url" <<'PY'
+import sys
+import urllib.parse
+manifest = sys.argv[1]
+print("itms-services://?action=download-manifest&url=" + urllib.parse.quote(manifest, safe=""))
+PY
+)"
+short_url="https://$dns_name:$port/i"
+root_url="https://$dns_name:$port/"
+
+cat >"$host_dir/manifest.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>items</key>
+  <array>
+    <dict>
+      <key>assets</key>
+      <array>
+        <dict>
+          <key>kind</key>
+          <string>software-package</string>
+          <key>url</key>
+          <string>https://$dns_name:$port/$ipa_name</string>
+        </dict>
+      </array>
+      <key>metadata</key>
+      <dict>
+        <key>bundle-identifier</key>
+        <string>$bundle_id</string>
+        <key>bundle-version</key>
+        <string>$build_number</string>
+        <key>kind</key>
+        <string>software</string>
+        <key>title</key>
+        <string>AgenTTY DEV $marketing_version ($build_number)</string>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>
+PLIST
+
+cat >"$host_dir/index.html" <<HTML
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AgenTTY DEV OTA</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0;
+      font: 16px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+      background: #0a1018;
+      color: #e7edf6;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+      padding: 24px;
+    }
+    .card {
+      width: min(560px, 100%);
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-radius: 16px;
+      padding: 20px;
+      backdrop-filter: blur(6px);
+    }
+    h1 { font-size: 22px; margin: 0 0 12px; }
+    p { margin: 0 0 12px; color: #c4d0df; }
+    .row { margin-top: 16px; display: flex; gap: 10px; flex-wrap: wrap; }
+    a.button {
+      display: inline-block;
+      padding: 10px 14px;
+      border-radius: 10px;
+      text-decoration: none;
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      background: rgba(255, 255, 255, 0.09);
+      color: #f3f7ff;
+      font-weight: 600;
+    }
+    code {
+      word-break: break-all;
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.10);
+      border-radius: 8px;
+      padding: 2px 6px;
+    }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1>AgenTTY DEV OTA</h1>
+    <p>Tap install below from your iPhone on the Tailscale network.</p>
+    <div class="row">
+      <a class="button" href="$install_url">Install AgenTTY DEV</a>
+      <a class="button" href="$manifest_url">Open Manifest</a>
+    </div>
+    <p style="margin-top: 16px;">If install doesn’t open automatically, use this short link:</p>
+    <p><code>$short_url</code></p>
+  </main>
+</body>
+</html>
+HTML
+
+cat >"$server_script" <<'PY'
+import http.server
+import ssl
+import sys
+from urllib.parse import urlsplit
+
+root = sys.argv[1]
+port = int(sys.argv[2])
+cert = sys.argv[3]
+key = sys.argv[4]
+install_url = sys.argv[5]
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=root, **kwargs)
+
+    def _request_path(self) -> str:
+        return urlsplit(self.path).path
+
+    def _redirect_if_short_path(self) -> bool:
+        path = self._request_path()
+        if path.startswith("/i"):
+            self.send_response(302)
+            self.send_header("Location", install_url)
+            self.end_headers()
+            return True
+        return False
+
+    def do_GET(self):
+        if self._redirect_if_short_path():
+            return
+        super().do_GET()
+
+    def do_HEAD(self):
+        if self._redirect_if_short_path():
+            return
+        super().do_HEAD()
+
+httpd = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(certfile=cert, keyfile=key)
+httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+httpd.serve_forever()
+PY
+
+tmux new-session -d -s "$server_session" \
+    "python3 \"$server_script\" \"$host_dir\" \"$port\" \"$cert_path\" \"$key_path\" \"$install_url\""
+
+cleanup_cmd="sleep $ttl_seconds; tmux kill-session -t '$server_session' 2>/dev/null || true; rm -rf '$run_dir'; tmux kill-session -t '$cleanup_session' 2>/dev/null || true"
+tmux new-session -d -s "$cleanup_session" "bash -lc \"$cleanup_cmd\""
+
+ready="no"
+for _ in $(seq 1 30); do
+    if curl -fsS -I "$manifest_url" >/dev/null 2>&1; then
+        ready="yes"
+        break
+    fi
+    sleep 0.2
+done
+
+if [ "$ready" != "yes" ]; then
+    echo "FATAL: host did not become ready at $manifest_url" >&2
+    tmux capture-pane -pt "$server_session" | tail -n 60 >&2 || true
+    tmux kill-session -t "$server_session" 2>/dev/null || true
+    tmux kill-session -t "$cleanup_session" 2>/dev/null || true
+    exit 1
+fi
+
+expires_at="$(date -v+5M '+%Y-%m-%d %H:%M:%S %Z')"
+
+echo ""
+echo "install_url: $install_url"
+echo "short_url: $short_url"
+echo "expires_at: $expires_at"
