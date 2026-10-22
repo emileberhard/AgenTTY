@@ -6,7 +6,8 @@
 three Rust test suites, shell wrapper checks, pairing CLI type checks/tests/
 bundling, and unsigned iOS unit tests. It has no secrets or operator files.
 Actions are pinned by full SHA; workflows never use pull_request_target.
-Dependabot covers Actions, Cargo, npm and Bundler. Swift versions/revisions in
+Dependabot covers Actions, Cargo, Bun and Bundler. Weekly version updates are
+grouped and use a one-day cooldown. Swift versions/revisions in
 Project.swift and Package.resolved are updated together by a maintainer.
 
 `just ios-check` and `just ios-test` are public entry points. They fetch the

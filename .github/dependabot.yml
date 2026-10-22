@@ -4,23 +4,39 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      dependencies:
+        patterns: ["*"]
     cooldown:
       default-days: 1
   - package-ecosystem: cargo
     directories: [/services/backend, /tools/agentty-notify, /tools/agentty-host-connector]
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      dependencies:
+        patterns: ["*"]
     cooldown:
       default-days: 1
   - package-ecosystem: bundler
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      dependencies:
+        patterns: ["*"]
     cooldown:
       default-days: 1
   - package-ecosystem: bun
     directories: [/tools/agentty-host, /AppStoreScreenshots]
     schedule:
       interval: weekly
+    open-pull-requests-limit: 1
+    groups:
+      dependencies:
+        patterns: ["*"]
     cooldown:
       default-days: 1
