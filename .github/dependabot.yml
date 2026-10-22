@@ -18,7 +18,7 @@ updates:
       interval: weekly
     cooldown:
       default-days: 1
-  - package-ecosystem: npm
+  - package-ecosystem: bun
     directories: [/tools/agentty-host, /AppStoreScreenshots]
     schedule:
       interval: weekly
