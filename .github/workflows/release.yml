@@ -260,4 +260,4 @@ jobs:
         run: |
           node -e 'if (+process.versions.node.split(".")[0] < 22) process.exit(1)'
           npm install --global npm@11.6.2
-          npm publish package/*.tgz --provenance --access public --ignore-scripts
+          npm publish ./package/*.tgz --provenance --access public --ignore-scripts
