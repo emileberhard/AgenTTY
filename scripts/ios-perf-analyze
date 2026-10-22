@@ -1,0 +1,1313 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# ///
+"""Analyze xctrace diagnostics output and produce machine-readable and markdown summaries."""
+
+import argparse
+import json
+import math
+import re
+import statistics
+import subprocess
+import tempfile
+import time
+from collections import Counter, defaultdict
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+import xml.etree.ElementTree as ET
+
+
+XML_INVALID_RE = re.compile(r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]")
+EXPORT_ATTEMPTS_DEFAULT = 4
+EXPORT_TIMEOUT_SECONDS_DEFAULT = 120
+KEYBOARD_DESCRIPTION_TOKENS = (
+    "keybutton",
+    "spacebar",
+    "keyboard",
+    "dynamicbody<viewbodyaccessor<keybutton>",
+    "glassentryview",
+    "glassmaterialeffect",
+    "layout: dynamiclayoutcomputer<_hstacklayout>",
+)
+KEYBOARD_VIEW_TOKENS = ("keybutton", "glassmaterialeffect", "_hstacklayout", "geometryreader")
+KEYBOARD_ROOT_CAUSE_TOKENS = ("terminalinputrouter", "keyboardstate", "dictation", "external: time")
+
+
+@dataclass
+class ParsedTable:
+    schema: str
+    columns: list[str]
+    rows: list[dict[str, ET.Element]]
+    id_map: dict[str, ET.Element]
+
+
+@dataclass
+class TraceInfo:
+    path: Path
+    template: str
+    duration_seconds: float
+    start_date: str
+    end_date: str
+    available_schemas: list[str]
+
+
+def run_cmd(
+    cmd: list[str],
+    timeout_seconds: int | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, capture_output=True, timeout=timeout_seconds)
+
+
+def sanitize_xml(text: str) -> str:
+    return XML_INVALID_RE.sub("", text)
+
+
+def parse_xml(text: str) -> ET.Element:
+    return ET.fromstring(sanitize_xml(text))
+
+
+def export_toc(trace_path: Path, attempts: int, timeout_seconds: int) -> str:
+    return run_export_with_retry(
+        ["xcrun", "xctrace", "export", "--input", str(trace_path), "--toc"],
+        f"TOC for {trace_path}",
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def export_xpath(
+    trace_path: Path,
+    xpath: str,
+    attempts: int,
+    timeout_seconds: int,
+) -> str:
+    return run_export_with_retry(
+        ["xcrun", "xctrace", "export", "--input", str(trace_path), "--xpath", xpath],
+        f"{xpath} for {trace_path}",
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def extract_xml_payload(text: str) -> str:
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    xml_start = stripped.find("<?xml")
+    if xml_start == -1:
+        xml_start = stripped.find("<trace-query-result")
+    if xml_start == -1:
+        xml_start = stripped.find("<trace-toc")
+    if xml_start == -1:
+        return stripped
+    return stripped[xml_start:]
+
+
+def ensure_xml_complete(xml_text: str, context: str) -> None:
+    if not xml_text.strip():
+        raise RuntimeError(f"empty XML export for {context}")
+    parse_xml(xml_text)
+
+
+def run_export_with_retry(
+    cmd: list[str],
+    context: str,
+    attempts: int,
+    timeout_seconds: int,
+) -> str:
+    errors: list[str] = []
+    for attempt in range(1, attempts + 1):
+        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as handle:
+            output_path = Path(handle.name)
+
+        command = [*cmd, "--output", str(output_path)]
+        try:
+            result = run_cmd(command, timeout_seconds=timeout_seconds)
+
+            if result.returncode == 0:
+                if output_path.exists() and output_path.stat().st_size > 0:
+                    raw_xml = output_path.read_text(encoding="utf-8", errors="ignore")
+                else:
+                    raw_xml = result.stdout
+                xml_text = extract_xml_payload(raw_xml)
+                ensure_xml_complete(xml_text, context)
+                return xml_text
+
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            error_text = stderr or stdout or f"exit code {result.returncode}"
+            errors.append(f"attempt {attempt}: {error_text}")
+        except subprocess.TimeoutExpired:
+            errors.append(f"attempt {attempt}: timeout after {timeout_seconds}s")
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"attempt {attempt}: {error}")
+        finally:
+            output_path.unlink(missing_ok=True)
+
+        if attempt < attempts:
+            time.sleep(0.35 * attempt)
+
+    joined = " | ".join(errors)
+    raise RuntimeError(f"failed exporting {context}: {joined}")
+
+
+def resolve_ref(element: ET.Element, id_map: dict[str, ET.Element]) -> ET.Element:
+    resolved = element
+    visited: set[str] = set()
+    while "ref" in resolved.attrib:
+        ref_id = resolved.attrib["ref"]
+        if ref_id in visited:
+            break
+        visited.add(ref_id)
+        next_element = id_map.get(ref_id)
+        if next_element is None:
+            break
+        resolved = next_element
+    return resolved
+
+
+def element_fmt(element: ET.Element, id_map: dict[str, ET.Element]) -> str:
+    resolved = resolve_ref(element, id_map)
+    fmt = resolved.attrib.get("fmt")
+    if fmt:
+        return fmt
+    text = (resolved.text or "").strip()
+    if text:
+        return text
+    for child in resolved:
+        value = element_fmt(child, id_map)
+        if value:
+            return value
+    return ""
+
+
+def element_number(element: ET.Element, id_map: dict[str, ET.Element]) -> float | None:
+    resolved = resolve_ref(element, id_map)
+    text = (resolved.text or "").strip()
+    if text:
+        try:
+            if "." in text:
+                return float(text)
+            return float(int(text))
+        except ValueError:
+            pass
+    fmt = resolved.attrib.get("fmt", "")
+    if fmt.endswith("%"):
+        try:
+            return float(fmt.rstrip("%"))
+        except ValueError:
+            return None
+    return None
+
+
+def frame_name_matches_app(frame_name: str, binary_name: str, binary_path: str, process_name: str) -> bool:
+    if process_name in binary_name:
+        return True
+    if process_name in binary_path:
+        return True
+    if "AgenTTY" in binary_name or "AgenTTY" in binary_path:
+        return True
+    app_prefixes = (
+        "Terminal",
+        "Ghostty",
+        "Shell",
+        "Keyboard",
+        "KeyButton",
+        "Esma",
+    )
+    return frame_name.startswith(app_prefixes)
+
+
+def parse_table_nodes(xml_text: str) -> list[ParsedTable]:
+    root = parse_xml(xml_text)
+    nodes = root.findall("./node")
+    parsed_tables: list[ParsedTable] = []
+    for node in nodes:
+        schema = node.find("./schema")
+        if schema is None:
+            continue
+        schema_name = schema.attrib.get("name", "unknown")
+        columns = []
+        for col in schema.findall("./col"):
+            mnemonic = col.findtext("./mnemonic")
+            columns.append(mnemonic or "")
+        id_map: dict[str, ET.Element] = {}
+        for element in node.iter():
+            element_id = element.attrib.get("id")
+            if element_id:
+                id_map[element_id] = element
+        rows: list[dict[str, ET.Element]] = []
+        for row in node.findall("./row"):
+            row_data: dict[str, ET.Element] = {}
+            children = list(row)
+            for index, child in enumerate(children):
+                key = columns[index] if index < len(columns) and columns[index] else f"col_{index}"
+                row_data[key] = child
+            rows.append(row_data)
+        parsed_tables.append(ParsedTable(schema=schema_name, columns=columns, rows=rows, id_map=id_map))
+    return parsed_tables
+
+
+def row_text(row: dict[str, ET.Element], key: str, id_map: dict[str, ET.Element]) -> str:
+    value = row.get(key)
+    if value is None:
+        return ""
+    return element_fmt(value, id_map)
+
+
+def row_number(row: dict[str, ET.Element], key: str, id_map: dict[str, ET.Element]) -> float | None:
+    value = row.get(key)
+    if value is None:
+        return None
+    return element_number(value, id_map)
+
+
+def parse_trace_info(trace_path: Path, attempts: int, timeout_seconds: int) -> TraceInfo:
+    toc_text = export_toc(trace_path, attempts=attempts, timeout_seconds=timeout_seconds)
+    root = parse_xml(toc_text)
+    run = root.find("./run")
+    if run is None:
+        raise RuntimeError(f"missing run in TOC for {trace_path}")
+    summary = run.find("./info/summary")
+    template = summary.findtext("./template-name") if summary is not None else "unknown"
+    duration_raw = summary.findtext("./duration") if summary is not None else "0"
+    start_date = summary.findtext("./start-date") if summary is not None else ""
+    end_date = summary.findtext("./end-date") if summary is not None else ""
+    duration_seconds = float(duration_raw or "0")
+
+    schemas: list[str] = []
+    for table in run.findall("./data/table"):
+        schema_name = table.attrib.get("schema")
+        if schema_name:
+            schemas.append(schema_name)
+
+    return TraceInfo(
+        path=trace_path,
+        template=template or "unknown",
+        duration_seconds=duration_seconds,
+        start_date=start_date or "",
+        end_date=end_date or "",
+        available_schemas=sorted(set(schemas)),
+    )
+
+
+def ns_to_ms(value: float) -> float:
+    return value / 1_000_000.0
+
+
+def ns_to_seconds(value: float) -> float:
+    return value / 1_000_000_000.0
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    if len(values) == 1:
+        return values[0]
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * p
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    if lower == upper:
+        return ordered[lower]
+    blend = index - lower
+    return ordered[lower] * (1 - blend) + ordered[upper] * blend
+
+
+def analyze_time_profile(table: ParsedTable, process_name: str) -> dict:
+    total_weight_ns = 0.0
+    sample_count = 0
+    thread_weights: defaultdict[str, float] = defaultdict(float)
+    leaf_weights: defaultdict[str, float] = defaultdict(float)
+    app_frame_weights: defaultdict[str, float] = defaultdict(float)
+
+    for row in table.rows:
+        weight_element = row.get("weight")
+        backtrace_element = row.get("stack")
+        thread_element = row.get("thread")
+        if weight_element is None or backtrace_element is None or thread_element is None:
+            continue
+
+        weight = element_number(weight_element, table.id_map)
+        if weight is None:
+            continue
+
+        total_weight_ns += weight
+        sample_count += 1
+
+        thread_name = element_fmt(thread_element, table.id_map)
+        if thread_name:
+            thread_weights[thread_name] += weight
+
+        backtrace_resolved = resolve_ref(backtrace_element, table.id_map)
+        frames = [resolve_ref(frame, table.id_map) for frame in backtrace_resolved.findall("./frame")]
+        if not frames:
+            continue
+
+        leaf_frame = frames[0].attrib.get("name", "")
+        if leaf_frame:
+            leaf_weights[leaf_frame] += weight
+
+        for frame in frames:
+            frame_name = frame.attrib.get("name", "")
+            binary = frame.find("./binary")
+            binary_name = ""
+            binary_path = ""
+            if binary is not None:
+                binary_resolved = resolve_ref(binary, table.id_map)
+                binary_name = binary_resolved.attrib.get("name", "")
+                binary_path = binary_resolved.attrib.get("path", "")
+
+            if frame_name_matches_app(frame_name, binary_name, binary_path, process_name):
+                app_frame_weights[frame_name] += weight
+                break
+
+    top_threads = [
+        {
+            "thread": name,
+            "weight_ms": round(ns_to_ms(weight), 3),
+            "share_percent": round((weight / total_weight_ns) * 100, 2) if total_weight_ns > 0 else 0.0,
+        }
+        for name, weight in sorted(thread_weights.items(), key=lambda item: item[1], reverse=True)[:8]
+    ]
+
+    top_leaf_frames = [
+        {
+            "frame": frame,
+            "weight_ms": round(ns_to_ms(weight), 3),
+            "share_percent": round((weight / total_weight_ns) * 100, 2) if total_weight_ns > 0 else 0.0,
+        }
+        for frame, weight in sorted(leaf_weights.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+
+    top_app_frames = [
+        {
+            "frame": frame,
+            "weight_ms": round(ns_to_ms(weight), 3),
+            "share_percent": round((weight / total_weight_ns) * 100, 2) if total_weight_ns > 0 else 0.0,
+        }
+        for frame, weight in sorted(app_frame_weights.items(), key=lambda item: item[1], reverse=True)[:10]
+    ]
+
+    return {
+        "samples": sample_count,
+        "total_weight_ms": round(ns_to_ms(total_weight_ns), 3),
+        "top_threads": top_threads,
+        "top_leaf_frames": top_leaf_frames,
+        "top_app_frames": top_app_frames,
+    }
+
+
+def analyze_hitches(table: ParsedTable) -> dict:
+    durations_ns: list[float] = []
+    narratives: Counter[str] = Counter()
+    process_counts: Counter[str] = Counter()
+    swap_ids: set[int] = set()
+
+    for row in table.rows:
+        duration = row_number(row, "duration", table.id_map)
+        if duration is not None:
+            durations_ns.append(duration)
+        narrative = row_text(row, "narrative-description", table.id_map)
+        if narrative:
+            narratives[narrative] += 1
+        process_name = row_text(row, "process", table.id_map)
+        if process_name:
+            process_counts[process_name] += 1
+        swap_id = row_number(row, "swap-id", table.id_map)
+        if swap_id is not None:
+            swap_ids.add(int(swap_id))
+
+    max_ns = max(durations_ns) if durations_ns else 0.0
+    mean_ns = statistics.fmean(durations_ns) if durations_ns else 0.0
+
+    return {
+        "count": len(durations_ns),
+        "max_ms": round(ns_to_ms(max_ns), 3),
+        "mean_ms": round(ns_to_ms(mean_ns), 3),
+        "p95_ms": round(ns_to_ms(percentile(durations_ns, 0.95)), 3),
+        "top_narratives": [{"issue": issue, "count": count} for issue, count in narratives.most_common(6)],
+        "top_processes": [{"process": name, "count": count} for name, count in process_counts.most_common(6)],
+        "swap_ids": sorted(swap_ids),
+    }
+
+
+def summarize_duration_dimension(
+    durations_by_value: dict[str, list[float]],
+    label_key: str,
+    limit: int,
+) -> list[dict]:
+    rows: list[dict] = []
+    for value, durations in durations_by_value.items():
+        if not durations:
+            continue
+        total_duration_ns = sum(durations)
+        rows.append(
+            {
+                label_key: value,
+                "count": len(durations),
+                "total_duration_ms": round(ns_to_ms(total_duration_ns), 3),
+                "p95_duration_ms": round(ns_to_ms(percentile(durations, 0.95)), 3),
+                "max_duration_ms": round(ns_to_ms(max(durations)), 3),
+            }
+        )
+    rows.sort(key=lambda row: (row["total_duration_ms"], row["count"]), reverse=True)
+    return rows[:limit]
+
+
+def truncate_label(value: str, maximum: int = 280) -> str:
+    if len(value) <= maximum:
+        return value
+    return f"{value[: maximum - 1]}…"
+
+
+def analyze_swiftui_updates(table: ParsedTable, source_schema: str) -> dict:
+    durations_ns: list[float] = []
+    update_type_counts: Counter[str] = Counter()
+    category_counts: Counter[str] = Counter()
+    durations_by_description: defaultdict[str, list[float]] = defaultdict(list)
+    durations_by_view_name: defaultdict[str, list[float]] = defaultdict(list)
+    durations_by_module: defaultdict[str, list[float]] = defaultdict(list)
+    durations_by_root_cause: defaultdict[str, list[float]] = defaultdict(list)
+    slowest_updates: list[dict] = []
+
+    for row in table.rows:
+        duration = row_number(row, "duration", table.id_map)
+        if duration is not None:
+            durations_ns.append(duration)
+
+        update_type = row_text(row, "update-type", table.id_map)
+        if update_type:
+            update_type_counts[update_type] += 1
+
+        category = row_text(row, "category", table.id_map)
+        if category:
+            category_counts[category] += 1
+
+        description = row_text(row, "description", table.id_map) or "<unknown>"
+        view_name = row_text(row, "view-name", table.id_map) or "<unknown>"
+        module = row_text(row, "module", table.id_map) or "<unknown>"
+        root_causes = row_text(row, "root-causes", table.id_map) or "<none>"
+        severity = row_text(row, "severity", table.id_map) or "<unknown>"
+        start_ns = row_number(row, "start", table.id_map) or 0.0
+
+        if duration is not None:
+            durations_by_description[description].append(duration)
+            durations_by_view_name[view_name].append(duration)
+            durations_by_module[module].append(duration)
+            durations_by_root_cause[root_causes].append(duration)
+            slowest_updates.append(
+                {
+                    "start_ms": round(ns_to_ms(start_ns), 3),
+                    "duration_ms": round(ns_to_ms(duration), 3),
+                    "description": truncate_label(description),
+                    "view_name": truncate_label(view_name),
+                    "module": truncate_label(module),
+                    "root_causes": truncate_label(root_causes),
+                    "severity": severity,
+                    "update_type": update_type or "<unknown>",
+                    "category": category or "<unknown>",
+                }
+            )
+
+    total_duration_ns = sum(durations_ns)
+    mean_duration_ms = round(ns_to_ms(statistics.fmean(durations_ns)), 3) if durations_ns else 0.0
+    p95_duration_ms = round(ns_to_ms(percentile(durations_ns, 0.95)), 3)
+    p99_duration_ms = round(ns_to_ms(percentile(durations_ns, 0.99)), 3)
+    max_duration_ms = round(ns_to_ms(max(durations_ns)), 3) if durations_ns else 0.0
+    slowest_updates.sort(key=lambda item: item["duration_ms"], reverse=True)
+
+    return {
+        "source_schema": source_schema,
+        "count": len(table.rows),
+        "total_duration_ms": round(ns_to_ms(total_duration_ns), 3),
+        "p95_duration_ms": p95_duration_ms,
+        "top_update_types": [{"update_type": name, "count": count} for name, count in update_type_counts.most_common(8)],
+        "top_categories": [{"category": name, "count": count} for name, count in category_counts.most_common(8)],
+        "duration_summary_ms": {
+            "mean": mean_duration_ms,
+            "p95": p95_duration_ms,
+            "p99": p99_duration_ms,
+            "max": max_duration_ms,
+        },
+        "top_descriptions": summarize_duration_dimension(durations_by_description, "description", limit=15),
+        "top_view_names": summarize_duration_dimension(durations_by_view_name, "view_name", limit=12),
+        "top_modules": summarize_duration_dimension(durations_by_module, "module", limit=8),
+        "top_root_causes": summarize_duration_dimension(durations_by_root_cause, "root_causes", limit=10),
+        "slowest_updates": slowest_updates[:12],
+    }
+
+
+def matches_any_keyword(text: str, keywords: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in keywords)
+
+
+def summarize_keyboard_hotspots(swiftui_updates: dict) -> dict:
+    top_descriptions = swiftui_updates.get("top_descriptions", [])
+    top_view_names = swiftui_updates.get("top_view_names", [])
+    top_root_causes = swiftui_updates.get("top_root_causes", [])
+
+    keyboard_descriptions = [
+        item for item in top_descriptions
+        if matches_any_keyword(str(item.get("description", "")), KEYBOARD_DESCRIPTION_TOKENS)
+    ]
+    keyboard_views = [
+        item for item in top_view_names
+        if matches_any_keyword(str(item.get("view_name", "")), KEYBOARD_VIEW_TOKENS)
+    ]
+    keyboard_root_causes = [
+        item for item in top_root_causes
+        if matches_any_keyword(str(item.get("root_causes", "")), KEYBOARD_ROOT_CAUSE_TOKENS)
+    ]
+    router_root_causes = [
+        item for item in keyboard_root_causes
+        if "terminalinputrouter" in str(item.get("root_causes", "")).lower()
+        or "keyboardstate" in str(item.get("root_causes", "")).lower()
+    ]
+
+    return {
+        "description_total_duration_ms": round(sum(item.get("total_duration_ms", 0) for item in keyboard_descriptions), 3),
+        "view_total_duration_ms": round(sum(item.get("total_duration_ms", 0) for item in keyboard_views), 3),
+        "root_cause_total_duration_ms": round(sum(item.get("total_duration_ms", 0) for item in keyboard_root_causes), 3),
+        "top_descriptions": keyboard_descriptions[:8],
+        "top_view_names": keyboard_views[:8],
+        "top_root_causes": keyboard_root_causes[:8],
+        "router_root_causes": router_root_causes[:5],
+    }
+
+
+def analyze_hitch_detail_table(table: ParsedTable, hitch_swap_ids: set[int]) -> dict:
+    durations_ns: list[float] = []
+    offscreen_passes: list[float] = []
+    frame_color_counts: Counter[str] = Counter()
+    frame_color_durations: defaultdict[str, float] = defaultdict(float)
+    containment_counts: Counter[int] = Counter()
+    swap_durations: defaultdict[int, list[float]] = defaultdict(list)
+    swap_labels: dict[int, str] = {}
+    linked_count = 0
+
+    for row in table.rows:
+        duration = row_number(row, "duration", table.id_map)
+        if duration is None:
+            continue
+        durations_ns.append(duration)
+
+        frame_color = row_text(row, "frame-color", table.id_map) or "<unknown>"
+        frame_color_counts[frame_color] += 1
+        frame_color_durations[frame_color] += duration
+
+        containment_level = row_number(row, "containment-level", table.id_map)
+        if containment_level is not None:
+            containment_counts[int(containment_level)] += 1
+
+        swap_id_number = row_number(row, "swap-id", table.id_map)
+        if swap_id_number is not None:
+            swap_id = int(swap_id_number)
+            swap_durations[swap_id].append(duration)
+            if swap_id in hitch_swap_ids:
+                linked_count += 1
+            label = row_text(row, "label", table.id_map)
+            if label:
+                swap_labels[swap_id] = label
+
+        offscreen = row_number(row, "offscreen-passes", table.id_map)
+        if offscreen is not None:
+            offscreen_passes.append(offscreen)
+
+    duration_total_ns = sum(durations_ns)
+    duration_max_ns = max(durations_ns) if durations_ns else 0.0
+    duration_mean_ns = statistics.fmean(durations_ns) if durations_ns else 0.0
+    duration_p95_ns = percentile(durations_ns, 0.95)
+    hitch_linked_share_percent = round((linked_count / len(durations_ns)) * 100, 2) if durations_ns else 0.0
+
+    frame_colors = [
+        {
+            "frame_color": frame_color,
+            "count": count,
+            "total_duration_ms": round(ns_to_ms(frame_color_durations[frame_color]), 3),
+        }
+        for frame_color, count in frame_color_counts.most_common()
+    ]
+
+    top_swap_ids: list[dict] = []
+    for swap_id, values in sorted(
+        swap_durations.items(),
+        key=lambda item: max(item[1]) if item[1] else 0,
+        reverse=True,
+    )[:10]:
+        top_swap_ids.append(
+            {
+                "swap_id": swap_id,
+                "label": swap_labels.get(swap_id, ""),
+                "count": len(values),
+                "max_duration_ms": round(ns_to_ms(max(values)), 3),
+                "p95_duration_ms": round(ns_to_ms(percentile(values, 0.95)), 3),
+            }
+        )
+
+    result = {
+        "count": len(durations_ns),
+        "hitch_linked_count": linked_count,
+        "hitch_linked_share_percent": hitch_linked_share_percent,
+        "duration_ms": {
+            "total": round(ns_to_ms(duration_total_ns), 3),
+            "mean": round(ns_to_ms(duration_mean_ns), 3),
+            "p95": round(ns_to_ms(duration_p95_ns), 3),
+            "max": round(ns_to_ms(duration_max_ns), 3),
+        },
+        "frame_colors": frame_colors,
+        "containment_levels": [
+            {"level": level, "count": count}
+            for level, count in sorted(containment_counts.items(), key=lambda item: item[0])
+        ],
+        "top_swap_ids": top_swap_ids,
+    }
+
+    if offscreen_passes:
+        result["offscreen_passes"] = {
+            "samples": len(offscreen_passes),
+            "mean": round(statistics.fmean(offscreen_passes), 2),
+            "p95": round(percentile(offscreen_passes, 0.95), 2),
+            "max": round(max(offscreen_passes), 2),
+            "over_120_count": sum(1 for value in offscreen_passes if value >= 120),
+            "over_200_count": sum(1 for value in offscreen_passes if value >= 200),
+        }
+
+    return result
+
+
+def analyze_activity_monitor(table: ParsedTable, process_name: str) -> dict:
+    cpu_percent_values: list[float] = []
+    cpu_time_ns_values: list[float] = []
+    memory_values: list[float] = []
+    thread_counts: list[float] = []
+
+    for row in table.rows:
+        process_value = element_fmt(row.get("process", ET.Element("missing")), table.id_map)
+        if process_name not in process_value:
+            continue
+
+        cpu_percent = element_number(row.get("cpu-percent", ET.Element("missing")), table.id_map)
+        if cpu_percent is not None:
+            cpu_percent_values.append(cpu_percent)
+
+        cpu_time_ns = element_number(row.get("cpu-total", ET.Element("missing")), table.id_map)
+        if cpu_time_ns is not None:
+            cpu_time_ns_values.append(cpu_time_ns)
+
+        memory_bytes = element_number(row.get("memory-physical-footprint", ET.Element("missing")), table.id_map)
+        if memory_bytes is not None:
+            memory_values.append(memory_bytes)
+
+        threads = element_number(row.get("thread-count", ET.Element("missing")), table.id_map)
+        if threads is not None:
+            thread_counts.append(threads)
+
+    cpu_time_total_ns = 0.0
+    if cpu_time_ns_values:
+        cpu_time_total_ns = (
+            max(cpu_time_ns_values) - min(cpu_time_ns_values)
+            if len(cpu_time_ns_values) > 1
+            else cpu_time_ns_values[0]
+        )
+
+    return {
+        "samples": len(cpu_percent_values),
+        "cpu_percent_avg": round(statistics.fmean(cpu_percent_values), 3) if cpu_percent_values else 0.0,
+        "cpu_percent_peak": round(max(cpu_percent_values), 3) if cpu_percent_values else 0.0,
+        "cpu_time_total_ms": round(ns_to_ms(cpu_time_total_ns), 3),
+        "memory_avg_mb": round((statistics.fmean(memory_values) / (1024 * 1024)), 3) if memory_values else 0.0,
+        "memory_peak_mb": round((max(memory_values) / (1024 * 1024)), 3) if memory_values else 0.0,
+        "threads_peak": int(max(thread_counts)) if thread_counts else 0,
+    }
+
+
+def analyze_signposts(tables: list[ParsedTable], subsystem_filter: str) -> dict:
+    events_by_name: Counter[str] = Counter()
+    event_type_by_name: defaultdict[str, Counter[str]] = defaultdict(Counter)
+    interval_starts: dict[tuple[str, str], float] = {}
+    interval_durations: defaultdict[str, list[float]] = defaultdict(list)
+
+    for table in tables:
+        for row in table.rows:
+            subsystem = element_fmt(row.get("subsystem", ET.Element("missing")), table.id_map)
+            if subsystem != subsystem_filter:
+                continue
+
+            signpost_name = element_fmt(row.get("name", ET.Element("missing")), table.id_map) or "(unnamed)"
+            event_type = element_fmt(row.get("event-type", ET.Element("missing")), table.id_map) or "Unknown"
+            identifier = element_fmt(row.get("identifier", ET.Element("missing")), table.id_map)
+            time_ns = element_number(row.get("time", ET.Element("missing")), table.id_map) or 0.0
+
+            events_by_name[signpost_name] += 1
+            event_type_by_name[signpost_name][event_type] += 1
+
+            key = (identifier, signpost_name)
+            normalized_event_type = event_type.lower()
+            if normalized_event_type.startswith("begin"):
+                interval_starts[key] = time_ns
+            elif normalized_event_type.startswith("end"):
+                start_ns = interval_starts.pop(key, None)
+                if start_ns is not None and time_ns >= start_ns:
+                    interval_durations[signpost_name].append(time_ns - start_ns)
+
+    interval_stats = []
+    for name, durations in interval_durations.items():
+        interval_stats.append(
+            {
+                "name": name,
+                "count": len(durations),
+                "mean_ms": round(ns_to_ms(statistics.fmean(durations)), 3) if durations else 0.0,
+                "p95_ms": round(ns_to_ms(percentile(durations, 0.95)), 3),
+                "max_ms": round(ns_to_ms(max(durations)), 3) if durations else 0.0,
+            }
+        )
+
+    interval_stats.sort(key=lambda item: item["max_ms"], reverse=True)
+
+    return {
+        "total_events": sum(events_by_name.values()),
+        "by_name": [
+            {
+                "name": name,
+                "count": count,
+                "event_types": dict(event_type_by_name[name]),
+            }
+            for name, count in events_by_name.most_common(20)
+        ],
+        "intervals": interval_stats[:20],
+    }
+
+
+def derive_findings(analyses: dict[str, dict]) -> list[str]:
+    findings: list[str] = []
+
+    hitches = analyses.get("hitches")
+    if hitches and hitches.get("count", 0) > 0:
+        findings.append(
+            f"animation hitches detected: {hitches['count']} (max {hitches['max_ms']} ms, p95 {hitches['p95_ms']} ms)"
+        )
+        top_narratives = hitches.get("top_narratives", [])
+        if top_narratives:
+            top_issue = top_narratives[0]["issue"]
+            findings.append(f"top hitch issue: {top_issue}")
+            if "offscreen passes" in top_issue.lower():
+                findings.append("likely source: heavy offscreen compositing in layered rendering path")
+
+    hitches_renders = analyses.get("hitches_renders")
+    if hitches_renders:
+        render_summary = hitches_renders.get("duration_ms", {})
+        offscreen = hitches_renders.get("offscreen_passes")
+        findings.append(
+            "hitch render slices: "
+            f"p95 {render_summary.get('p95', 0)} ms, max {render_summary.get('max', 0)} ms"
+        )
+        if offscreen:
+            findings.append(
+                "hitch offscreen passes: "
+                f"p95 {offscreen.get('p95', 0)}, max {offscreen.get('max', 0)} "
+                f"(>=200 count {offscreen.get('over_200_count', 0)})"
+            )
+
+    time_profile = analyses.get("time_profile")
+    if time_profile:
+        top_threads = time_profile.get("top_threads", [])
+        if len(top_threads) >= 3:
+            findings.append(
+                "cpu split across main/renderer/network event-loop threads; rendering and IO are both active under load"
+            )
+
+        app_frames = time_profile.get("top_app_frames", [])
+        leaf_frames = time_profile.get("top_leaf_frames", [])
+        hotspot = select_hotspot_frame(app_frames, leaf_frames)
+        if hotspot is not None:
+            top_frame = hotspot["frame"]
+            findings.append(f"top app CPU hotspot: {top_frame} ({hotspot['share_percent']}% weighted samples)")
+            lowered = top_frame.lower()
+            if "renderer" in lowered or "render" in lowered:
+                findings.append("likely source: renderer/frame-composition path during terminal draws")
+            if "aes" in lowered or "ssh" in lowered:
+                findings.append("likely source: SSH decrypt/packet processing path")
+            if "url_wrap" in lowered or "match_at" in lowered:
+                findings.append("likely source: terminal text wrap/regex matching in glyph layout pipeline")
+
+    activity = analyses.get("activity_monitor")
+    if activity and activity.get("samples", 0) > 0:
+        findings.append(
+            f"activity monitor: CPU avg {activity['cpu_percent_avg']}%, peak {activity['cpu_percent_peak']}%, memory peak {activity['memory_peak_mb']} MB"
+        )
+
+    swiftui = analyses.get("swiftui_updates")
+    if swiftui and swiftui.get("count", 0) > 0:
+        findings.append(
+            f"swiftui updates captured: {swiftui['count']} updates (p95 {swiftui['p95_duration_ms']} ms)"
+        )
+        top_description = swiftui.get("top_descriptions", [])
+        if top_description:
+            top_item = top_description[0]
+            findings.append(
+                "top swiftui update contributor: "
+                f"{top_item['description']} ({top_item['total_duration_ms']} ms total)"
+            )
+        top_root_cause = swiftui.get("top_root_causes", [])
+        if top_root_cause:
+            top_item = top_root_cause[0]
+            findings.append(
+                "top swiftui root cause: "
+                f"{top_item['root_causes']} ({top_item['total_duration_ms']} ms total)"
+            )
+
+    keyboard_hotspots = analyses.get("keyboard_hotspots")
+    if keyboard_hotspots:
+        top_descriptions = keyboard_hotspots.get("top_descriptions", [])
+        if top_descriptions:
+            top_item = top_descriptions[0]
+            findings.append(
+                "keyboard hotspot description: "
+                f"{top_item['description']} ({top_item['total_duration_ms']} ms total)"
+            )
+        top_root_causes = keyboard_hotspots.get("top_root_causes", [])
+        if top_root_causes:
+            top_item = top_root_causes[0]
+            findings.append(
+                "keyboard-related root cause: "
+                f"{truncate_label(top_item['root_causes'], 180)} ({top_item['total_duration_ms']} ms total)"
+            )
+        router_root_causes = keyboard_hotspots.get("router_root_causes", [])
+        if router_root_causes:
+            findings.append(
+                "keyboard observable invalidations include TerminalInputRouter/KeyboardState roots "
+                f"({router_root_causes[0]['total_duration_ms']} ms top matched total)"
+            )
+
+    signposts = analyses.get("signposts")
+    if signposts and signposts.get("total_events", 0) > 0:
+        findings.append(f"app signposts captured: {signposts['total_events']} events")
+        intervals = signposts.get("intervals", [])
+        if intervals:
+            slowest = intervals[0]
+            findings.append(
+                f"slowest signpost interval: {slowest['name']} max {slowest['max_ms']} ms (p95 {slowest['p95_ms']} ms)"
+            )
+
+    if not findings:
+        findings.append("no actionable perf findings from exported tables (trace may be empty or schema unsupported)")
+
+    return findings
+
+
+def is_bootstrap_frame(frame_name: str) -> bool:
+    lowered = frame_name.lower()
+    generic_prefixes = (
+        "static agenttyiosapp.$main()",
+        "__debug_main_executable_dylib_entry_point",
+        "static app.main()",
+        "runapp<",
+        "uiapplicationmain",
+        "start",
+    )
+    return any(lowered.startswith(prefix) for prefix in generic_prefixes)
+
+
+def select_hotspot_frame(app_frames: list[dict], leaf_frames: list[dict]) -> dict | None:
+    for frame in app_frames:
+        if not is_bootstrap_frame(str(frame.get("frame", ""))):
+            return frame
+
+    for frame in leaf_frames:
+        name = str(frame.get("frame", ""))
+        if any(token in name.lower() for token in ("renderer", "ssh", "aes", "url_wrap", "match_at", "terminal")):
+            return frame
+
+    return app_frames[0] if app_frames else None
+
+
+def export_schema_tables(
+    trace_path: Path,
+    schema: str,
+    attempts: int,
+    timeout_seconds: int,
+) -> list[ParsedTable]:
+    xpath = f'/trace-toc/run/data/table[@schema="{schema}"]'
+    xml = export_xpath(
+        trace_path,
+        xpath,
+        attempts=attempts,
+        timeout_seconds=timeout_seconds,
+    )
+    return parse_table_nodes(xml)
+
+
+def export_schema_tables_with_fallback(
+    trace_path: Path,
+    available_schemas: set[str],
+    candidate_schemas: list[str],
+    attempts: int,
+    timeout_seconds: int,
+) -> tuple[str | None, list[ParsedTable], list[str]]:
+    warnings: list[str] = []
+    for schema in candidate_schemas:
+        if schema not in available_schemas:
+            continue
+        try:
+            tables = export_schema_tables(
+                trace_path=trace_path,
+                schema=schema,
+                attempts=attempts,
+                timeout_seconds=timeout_seconds,
+            )
+        except Exception as error:  # noqa: BLE001
+            warnings.append(f"{schema}: {error}")
+            continue
+        if tables:
+            if schema != candidate_schemas[0]:
+                warnings.append(f"used fallback schema {schema} (preferred {candidate_schemas[0]} unavailable)")
+            return schema, tables, warnings
+    return None, [], warnings
+
+
+def analyze_trace(
+    trace_info: TraceInfo,
+    process_name: str,
+    export_attempts: int,
+    export_timeout_seconds: int,
+) -> dict:
+    analyses: dict[str, dict] = {}
+    errors: list[str] = []
+    parse_warnings: list[str] = []
+    available_schemas = set(trace_info.available_schemas)
+
+    if "time-profile" in available_schemas:
+        try:
+            tables = export_schema_tables(
+                trace_info.path,
+                "time-profile",
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if tables:
+                analyses["time_profile"] = analyze_time_profile(tables[0], process_name)
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"time-profile: {error}")
+
+    hitch_swap_ids: set[int] = set()
+    if "hitches" in available_schemas:
+        try:
+            tables = export_schema_tables(
+                trace_info.path,
+                "hitches",
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if tables:
+                analyses["hitches"] = analyze_hitches(tables[0])
+                hitch_swap_ids = set(analyses["hitches"].get("swap_ids", []))
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"hitches: {error}")
+
+    swiftui_source_schema, swiftui_tables, swiftui_warnings = export_schema_tables_with_fallback(
+        trace_path=trace_info.path,
+        available_schemas=available_schemas,
+        candidate_schemas=["swiftui-updates", "SwiftUIFilteredUpdates"],
+        attempts=export_attempts,
+        timeout_seconds=export_timeout_seconds,
+    )
+    parse_warnings.extend(swiftui_warnings)
+    if swiftui_source_schema is not None:
+        try:
+            analyses["swiftui_updates"] = analyze_swiftui_updates(
+                swiftui_tables[0],
+                source_schema=swiftui_source_schema,
+            )
+            analyses["keyboard_hotspots"] = summarize_keyboard_hotspots(analyses["swiftui_updates"])
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"{swiftui_source_schema}: {error}")
+
+    if "SwiftUIFilteredUpdates" in available_schemas and swiftui_source_schema != "SwiftUIFilteredUpdates":
+        try:
+            filtered_tables = export_schema_tables(
+                trace_info.path,
+                "SwiftUIFilteredUpdates",
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if filtered_tables:
+                analyses["swiftui_filtered_updates"] = analyze_swiftui_updates(
+                    filtered_tables[0],
+                    source_schema="SwiftUIFilteredUpdates",
+                )
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"SwiftUIFilteredUpdates: {error}")
+
+    if "activity-monitor-process-live" in available_schemas:
+        try:
+            tables = export_schema_tables(
+                trace_info.path,
+                "activity-monitor-process-live",
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if tables:
+                analyses["activity_monitor"] = analyze_activity_monitor(tables[0], process_name)
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"activity-monitor-process-live: {error}")
+
+    for schema_name, analysis_key in [
+        ("hitches-renders", "hitches_renders"),
+        ("hitches-gpu", "hitches_gpu"),
+        ("hitches-updates", "hitches_updates"),
+    ]:
+        if schema_name not in available_schemas:
+            continue
+        try:
+            tables = export_schema_tables(
+                trace_info.path,
+                schema_name,
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if tables:
+                analyses[analysis_key] = analyze_hitch_detail_table(
+                    tables[0],
+                    hitch_swap_ids=hitch_swap_ids,
+                )
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"{schema_name}: {error}")
+
+    if "os-signpost" in available_schemas:
+        try:
+            tables = export_schema_tables(
+                trace_info.path,
+                "os-signpost",
+                attempts=export_attempts,
+                timeout_seconds=export_timeout_seconds,
+            )
+            if tables:
+                signpost_data = analyze_signposts(tables, subsystem_filter="dev.tuist.agentty")
+                if signpost_data.get("total_events", 0) > 0:
+                    analyses["signposts"] = signpost_data
+        except Exception as error:  # noqa: BLE001
+            errors.append(f"os-signpost: {error}")
+
+    findings = derive_findings(analyses)
+
+    return {
+        "trace": str(trace_info.path),
+        "template": trace_info.template,
+        "duration_seconds": trace_info.duration_seconds,
+        "start_date": trace_info.start_date,
+        "end_date": trace_info.end_date,
+        "available_schemas": trace_info.available_schemas,
+        "analyses": analyses,
+        "findings": findings,
+        "errors": errors,
+        "parse_warnings": parse_warnings,
+    }
+
+
+def render_markdown(summary: dict) -> str:
+    lines: list[str] = []
+    lines.append("# iOS Performance Diagnostics Summary")
+    lines.append("")
+    lines.append(f"- generated_at: {summary['generated_at']}")
+    lines.append(f"- run_dir: {summary['run_dir']}")
+    lines.append(f"- process_name: {summary['process_name']}")
+    lines.append("")
+
+    lines.append("## Overall Findings")
+    for finding in summary["overall_findings"]:
+        lines.append(f"- {finding}")
+    lines.append("")
+
+    lines.append("## Per Trace")
+    for trace in summary["traces"]:
+        lines.append(f"### {trace['template']}")
+        lines.append(f"- trace: {trace['trace']}")
+        lines.append(f"- duration_seconds: {trace['duration_seconds']}")
+        if trace["findings"]:
+            lines.append("- findings:")
+            for finding in trace["findings"]:
+                lines.append(f"  - {finding}")
+        if trace["errors"]:
+            lines.append("- parse_errors:")
+            for error in trace["errors"]:
+                lines.append(f"  - {error}")
+        if trace.get("parse_warnings"):
+            lines.append("- parse_warnings:")
+            for warning in trace["parse_warnings"]:
+                lines.append(f"  - {warning}")
+
+        analyses = trace.get("analyses", {})
+        swiftui = analyses.get("swiftui_updates")
+        if swiftui:
+            lines.append("- swiftui_deep_breakdown:")
+            lines.append(f"  - source_schema: {swiftui.get('source_schema', 'unknown')}")
+            duration_summary = swiftui.get("duration_summary_ms", {})
+            lines.append(
+                "  - duration_ms mean/p95/p99/max: "
+                f"{duration_summary.get('mean', 0)}/{duration_summary.get('p95', 0)}/"
+                f"{duration_summary.get('p99', 0)}/{duration_summary.get('max', 0)}"
+            )
+            top_descriptions = swiftui.get("top_descriptions", [])
+            if top_descriptions:
+                top_item = top_descriptions[0]
+                lines.append(
+                    "  - top_description: "
+                    f"{top_item['description']} (total {top_item['total_duration_ms']} ms)"
+                )
+            top_root_causes = swiftui.get("top_root_causes", [])
+            if top_root_causes:
+                top_item = top_root_causes[0]
+                lines.append(
+                    "  - top_root_cause: "
+                    f"{top_item['root_causes']} (total {top_item['total_duration_ms']} ms)"
+                )
+
+        keyboard_hotspots = analyses.get("keyboard_hotspots")
+        if keyboard_hotspots:
+            lines.append("- keyboard_hotspots:")
+            lines.append(
+                "  - description/view/root totals (ms): "
+                f"{keyboard_hotspots.get('description_total_duration_ms', 0)}/"
+                f"{keyboard_hotspots.get('view_total_duration_ms', 0)}/"
+                f"{keyboard_hotspots.get('root_cause_total_duration_ms', 0)}"
+            )
+            top_descriptions = keyboard_hotspots.get("top_descriptions", [])
+            if top_descriptions:
+                top_item = top_descriptions[0]
+                lines.append(
+                    "  - top_keyboard_description: "
+                    f"{top_item['description']} (total {top_item['total_duration_ms']} ms)"
+                )
+            router_root_causes = keyboard_hotspots.get("router_root_causes", [])
+            if router_root_causes:
+                top_item = router_root_causes[0]
+                lines.append(
+                    "  - top_router_root_cause: "
+                    f"{truncate_label(top_item['root_causes'], 180)} (total {top_item['total_duration_ms']} ms)"
+                )
+
+        for key, label in [
+            ("hitches_renders", "hitches_renders"),
+            ("hitches_gpu", "hitches_gpu"),
+            ("hitches_updates", "hitches_updates"),
+        ]:
+            hitch_detail = analyses.get(key)
+            if not hitch_detail:
+                continue
+            duration_ms = hitch_detail.get("duration_ms", {})
+            lines.append(f"- {label}:")
+            lines.append(
+                "  - duration_ms total/p95/max: "
+                f"{duration_ms.get('total', 0)}/{duration_ms.get('p95', 0)}/{duration_ms.get('max', 0)}"
+            )
+            lines.append(
+                "  - hitch_linked_count/share: "
+                f"{hitch_detail.get('hitch_linked_count', 0)}/{hitch_detail.get('hitch_linked_share_percent', 0)}%"
+            )
+            offscreen = hitch_detail.get("offscreen_passes")
+            if offscreen:
+                lines.append(
+                    "  - offscreen mean/p95/max: "
+                    f"{offscreen.get('mean', 0)}/{offscreen.get('p95', 0)}/{offscreen.get('max', 0)}"
+                )
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def collect_traces(run_dir: Path) -> list[Path]:
+    direct_traces = sorted(path for path in run_dir.glob("*.trace") if path.is_dir())
+    nested_traces = sorted(path for path in run_dir.glob("**/*.trace") if path.is_dir())
+    merged = list(dict.fromkeys([*direct_traces, *nested_traces]))
+    return merged
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Analyze xctrace outputs for AgenTTY perf diagnostics")
+    parser.add_argument("--run-dir", required=True, type=Path)
+    parser.add_argument("--process-name", default="AgenTTY_iOS_Dev")
+    parser.add_argument("--output-json", type=Path)
+    parser.add_argument("--output-markdown", type=Path)
+    parser.add_argument("--export-attempts", type=int, default=EXPORT_ATTEMPTS_DEFAULT)
+    parser.add_argument("--export-timeout-seconds", type=int, default=EXPORT_TIMEOUT_SECONDS_DEFAULT)
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    run_dir = args.run_dir.expanduser().resolve()
+    if not run_dir.exists():
+        raise SystemExit(f"run directory does not exist: {run_dir}")
+
+    trace_paths = collect_traces(run_dir)
+    if not trace_paths:
+        raise SystemExit(f"no .trace bundles found in {run_dir}")
+
+    trace_summaries: list[dict] = []
+    all_findings: list[str] = []
+
+    for trace_path in trace_paths:
+        try:
+            info = parse_trace_info(
+                trace_path,
+                attempts=args.export_attempts,
+                timeout_seconds=args.export_timeout_seconds,
+            )
+            trace_summary = analyze_trace(
+                info,
+                process_name=args.process_name,
+                export_attempts=args.export_attempts,
+                export_timeout_seconds=args.export_timeout_seconds,
+            )
+            trace_summaries.append(trace_summary)
+            all_findings.extend(f"[{info.template}] {item}" for item in trace_summary["findings"])
+        except Exception as error:  # noqa: BLE001
+            trace_summaries.append(
+                {
+                    "trace": str(trace_path),
+                    "template": "unknown",
+                    "duration_seconds": 0,
+                    "start_date": "",
+                    "end_date": "",
+                    "available_schemas": [],
+                    "analyses": {},
+                    "findings": ["trace could not be exported or parsed"],
+                    "errors": [str(error)],
+                    "parse_warnings": [],
+                }
+            )
+            all_findings.append(f"[{trace_path.name}] trace export/parse failure: {error}")
+
+    if not all_findings:
+        all_findings.append("no findings captured")
+
+    generated_at = datetime.now().astimezone().isoformat(timespec="seconds")
+    summary = {
+        "generated_at": generated_at,
+        "run_dir": str(run_dir),
+        "process_name": args.process_name,
+        "trace_count": len(trace_summaries),
+        "overall_findings": all_findings,
+        "traces": trace_summaries,
+    }
+
+    output_json = args.output_json or run_dir / "summary.json"
+    output_markdown = args.output_markdown or run_dir / "summary.md"
+
+    output_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    output_markdown.write_text(render_markdown(summary), encoding="utf-8")
+
+    print(json.dumps({
+        "summary_json": str(output_json),
+        "summary_markdown": str(output_markdown),
+        "trace_count": len(trace_summaries),
+    }, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

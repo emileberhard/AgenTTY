@@ -1,0 +1,735 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.14"
+# ///
+"""Capture Apple Instruments diagnostics and analyze results programmatically."""
+
+import argparse
+import json
+import shlex
+import shutil
+import socket
+import subprocess
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+import re
+import xml.etree.ElementTree as ET
+
+
+DEFAULT_TEMPLATES = [
+    "Time Profiler",
+    "Animation Hitches",
+    "SwiftUI",
+    "Activity Monitor",
+]
+DEFAULT_REMOTE_SSH_OPTIONS = [
+    "BatchMode=yes",
+    "ConnectTimeout=12",
+]
+XML_INVALID_RE = re.compile(r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]")
+
+
+@dataclass
+class Device:
+    name: str
+    identifier: str
+    udid: str
+    platform: str
+    reality: str
+    pairing_state: str
+    hostname: str
+
+
+def run_cmd(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(cmd, text=True, capture_output=True, cwd=cwd)
+
+
+def ensure_success(result: subprocess.CompletedProcess[str], cmd: list[str], context: str) -> None:
+    if result.returncode == 0:
+        return
+    command_str = shlex.join(cmd)
+    stdout = result.stdout.strip()
+    stderr = result.stderr.strip()
+    raise RuntimeError(
+        f"{context} failed\ncommand: {command_str}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    )
+
+
+def sanitize_xml(text: str) -> str:
+    return XML_INVALID_RE.sub("", text)
+
+
+def inspect_trace_summary(trace_path: Path) -> dict:
+    command = ["xcrun", "xctrace", "export", "--input", str(trace_path), "--toc"]
+    result = run_cmd(command)
+    if result.returncode != 0:
+        return {"error": "toc export failed"}
+
+    try:
+        root = ET.fromstring(sanitize_xml(result.stdout))
+        run = root.find("./run")
+        if run is None:
+            return {"error": "missing run node"}
+        summary = run.find("./info/summary")
+        if summary is None:
+            return {"error": "missing summary node"}
+        duration_raw = summary.findtext("./duration", default="0")
+        return {
+            "duration_seconds": float(duration_raw or "0"),
+            "start_date": summary.findtext("./start-date", default=""),
+            "end_date": summary.findtext("./end-date", default=""),
+        }
+    except Exception as error:  # noqa: BLE001
+        return {"error": f"toc parse failed: {error}"}
+
+
+def log(message: str) -> None:
+    print(f"[ios-perf-suite] {message}", flush=True)
+
+
+def slugify(value: str) -> str:
+    safe = []
+    for character in value.lower():
+        if character.isalnum():
+            safe.append(character)
+            continue
+        safe.append("-")
+    slug = "".join(safe)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug.strip("-") or "trace"
+
+
+def normalize_template_args(template_args: list[str] | None, templates_csv: str | None) -> list[str]:
+    templates: list[str] = []
+    if template_args:
+        templates.extend(item.strip() for item in template_args if item.strip())
+    if templates_csv:
+        templates.extend(item.strip() for item in templates_csv.split(",") if item.strip())
+    if templates:
+        return templates
+    return list(DEFAULT_TEMPLATES)
+
+
+def list_local_devices() -> list[Device]:
+    temp_file = Path("/tmp") / f"agentty-devicectl-{datetime.now().strftime('%Y%m%d%H%M%S')}.json"
+    try:
+        result = run_cmd(["xcrun", "devicectl", "list", "devices", "--json-output", str(temp_file)])
+        ensure_success(result, ["xcrun", "devicectl", "list", "devices"], "devicectl list devices")
+        payload = json.loads(temp_file.read_text(encoding="utf-8"))
+    finally:
+        temp_file.unlink(missing_ok=True)
+
+    devices: list[Device] = []
+    for raw in payload.get("result", {}).get("devices", []):
+        hardware = raw.get("hardwareProperties", {})
+        connection = raw.get("connectionProperties", {})
+        device_props = raw.get("deviceProperties", {})
+
+        devices.append(
+            Device(
+                name=device_props.get("name", ""),
+                identifier=raw.get("identifier", ""),
+                udid=hardware.get("udid", ""),
+                platform=hardware.get("platform", ""),
+                reality=hardware.get("reality", ""),
+                pairing_state=connection.get("pairingState", ""),
+                hostname=(connection.get("potentialHostnames", [""]) or [""])[0],
+            )
+        )
+    return devices
+
+
+def select_device(devices: list[Device], selector: str | None) -> Device | None:
+    eligible = [
+        device
+        for device in devices
+        if device.platform == "iOS"
+        and device.reality == "physical"
+        and device.pairing_state == "paired"
+    ]
+    if not eligible:
+        return None
+
+    if not selector:
+        return eligible[0]
+
+    lowered_selector = selector.lower()
+    for device in eligible:
+        candidates = [device.name, device.identifier, device.udid, device.hostname]
+        if any(lowered_selector in candidate.lower() for candidate in candidates if candidate):
+            return device
+    return None
+
+
+def is_local_host(host: str) -> bool:
+    normalized = host.strip().lower()
+    local_aliases = {
+        "localhost",
+        "127.0.0.1",
+        socket.gethostname().lower(),
+        socket.gethostname().split(".")[0].lower(),
+        os.environ.get("AGENTTY_LOCAL_TERMINAL_HOST", ""),
+        os.environ.get("AGENTTY_LOCAL_TERMINAL_HOST_LAN", ""),
+    }
+    return normalized in {alias for alias in local_aliases if alias}
+
+
+def run_on_terminal_host(host: str, user: str, cmd: list[str], check: bool = True) -> subprocess.CompletedProcess[str]:
+    if is_local_host(host):
+        result = run_cmd(cmd)
+    else:
+        result = run_cmd(["ssh", f"{user}@{host}", shlex.join(cmd)])
+
+    if check:
+        ensure_success(result, cmd, f"terminal host command on {host}")
+    return result
+
+
+def infer_remote_identity_file(remote_host: str, explicit_identity_file: Path | None) -> Path | None:
+    if explicit_identity_file is not None:
+        return explicit_identity_file.expanduser().resolve()
+    return None
+
+
+def build_ssh_cmd(
+    identity_file: Path | None,
+    options: list[str],
+    target: str,
+    remote_command: str,
+) -> list[str]:
+    command = ["ssh"]
+    if identity_file is not None:
+        command.extend(["-i", str(identity_file)])
+    for option in options:
+        command.extend(["-o", option])
+    command.extend([target, remote_command])
+    return command
+
+
+def build_scp_cmd(
+    identity_file: Path | None,
+    options: list[str],
+    args: list[str],
+) -> list[str]:
+    command = ["scp"]
+    if identity_file is not None:
+        command.extend(["-i", str(identity_file)])
+    for option in options:
+        command.extend(["-o", option])
+    command.extend(args)
+    return command
+
+
+def run_hybrid_workload(host: str, user: str, session: str, duration_seconds: int) -> None:
+    iterations = max(duration_seconds * 22, 220)
+    delay_seconds = 0.035
+    payload = (
+        "python3 -c \"import time; "
+        f"[print(f'[agentty-perf] line {{i:04d}} url=https://example.com/{{i}}/abcdefghijklmnopqrstuvwxyz') "
+        f"or time.sleep({delay_seconds}) for i in range({iterations})]\""
+    )
+
+    has_session = run_on_terminal_host(host, user, ["tmux", "-u", "has-session", "-t", session], check=False)
+    if has_session.returncode != 0:
+        run_on_terminal_host(host, user, ["tmux", "-u", "new-session", "-d", "-s", session])
+
+    run_on_terminal_host(host, user, ["tmux", "-u", "send-keys", "-t", f"{session}:0", "C-c"])
+    run_on_terminal_host(host, user, ["tmux", "-u", "send-keys", "-t", f"{session}:0", payload, "C-m"])
+
+
+def launch_app(device: Device, bundle_id: str) -> None:
+    command = [
+        "xcrun",
+        "devicectl",
+        "device",
+        "process",
+        "launch",
+        "--device",
+        device.identifier,
+        "--terminate-existing",
+        "--activate",
+        bundle_id,
+    ]
+    result = run_cmd(command)
+    ensure_success(result, command, "launch app")
+
+
+def record_trace(
+    template: str,
+    device: Device,
+    process_name: str,
+    duration_seconds: int,
+    trace_path: Path,
+    log_path: Path,
+    capture_mode: str,
+    minimum_trace_duration_ratio: float,
+) -> dict:
+    device_target = device.udid or device.identifier or device.name
+
+    capture_attempts_by_mode = {
+        "attach-only": [
+            {"label": "attach", "args": ["--attach", process_name]},
+        ],
+        "all-processes-only": [
+            {"label": "all-processes", "args": ["--all-processes"]},
+        ],
+        "attach-then-all": [
+            {"label": "attach", "args": ["--attach", process_name]},
+            {"label": "all-processes", "args": ["--all-processes"]},
+        ],
+    }
+    attempts = capture_attempts_by_mode[capture_mode]
+    minimum_accepted_duration = max(0.0, duration_seconds * minimum_trace_duration_ratio)
+
+    for attempt in attempts:
+        if trace_path.exists():
+            if trace_path.is_dir():
+                shutil.rmtree(trace_path)
+            else:
+                trace_path.unlink(missing_ok=True)
+
+        command = [
+            "xcrun",
+            "xctrace",
+            "record",
+            "--template",
+            template,
+            "--device",
+            device_target,
+            *attempt["args"],
+            "--time-limit",
+            f"{duration_seconds}s",
+            "--output",
+            str(trace_path),
+        ]
+        result = run_cmd(command)
+        command_header = f"$ {shlex.join(command)}\n\n"
+        with log_path.open("a", encoding="utf-8") as handle:
+            handle.write(command_header)
+            handle.write(result.stdout)
+            handle.write(result.stderr)
+            handle.write("\n")
+        if result.returncode == 0:
+            trace_summary = inspect_trace_summary(trace_path)
+            trace_duration_seconds = trace_summary.get("duration_seconds")
+            if isinstance(trace_duration_seconds, float):
+                duration_too_short = trace_duration_seconds < minimum_accepted_duration
+            else:
+                duration_too_short = False
+
+            trace_size_bytes = 0
+            if trace_path.exists():
+                trace_size_bytes = sum(
+                    path.stat().st_size
+                    for path in trace_path.rglob("*")
+                    if path.is_file()
+                )
+
+            if duration_too_short:
+                with log_path.open("a", encoding="utf-8") as handle:
+                    handle.write(
+                        "capture validation warning: "
+                        f"trace duration {trace_duration_seconds:.3f}s below threshold "
+                        f"{minimum_accepted_duration:.3f}s; trying next mode\n"
+                    )
+                continue
+
+            return {
+                "success": True,
+                "mode": attempt["label"],
+                "log": str(log_path),
+                "trace": str(trace_path),
+                "trace_duration_seconds": trace_summary.get("duration_seconds"),
+                "trace_start_date": trace_summary.get("start_date"),
+                "trace_end_date": trace_summary.get("end_date"),
+                "trace_summary_error": trace_summary.get("error"),
+                "trace_size_bytes": trace_size_bytes,
+            }
+
+    return {
+        "success": False,
+        "mode": "failed",
+        "log": str(log_path),
+        "trace": str(trace_path),
+        "trace_duration_seconds": None,
+        "trace_start_date": "",
+        "trace_end_date": "",
+        "trace_summary_error": "all capture attempts failed or failed validation",
+        "trace_size_bytes": 0,
+    }
+
+
+def start_ui_driver_process(
+    ui_driver_command: str | None,
+    ui_driver_script: Path,
+    duration_seconds: int,
+    device: Device,
+    bundle_id: str,
+) -> subprocess.Popen[str] | None:
+    if ui_driver_command:
+        rendered = ui_driver_command.format(
+            duration_seconds=duration_seconds,
+            device_name=device.name,
+            device_identifier=device.identifier,
+            bundle_id=bundle_id,
+        )
+        return subprocess.Popen(rendered, shell=True, text=True)  # noqa: S602
+
+    if ui_driver_script.exists():
+        return subprocess.Popen(
+            [
+                str(ui_driver_script),
+                "--duration-seconds",
+                str(duration_seconds),
+                "--device",
+                device.identifier,
+                "--bundle-id",
+                bundle_id,
+            ],
+            text=True,
+        )
+
+    return None
+
+
+def stop_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
+def run_analyzer(script_path: Path, run_dir: Path, process_name: str) -> None:
+    command = [str(script_path), "--run-dir", str(run_dir), "--process-name", process_name]
+    result = run_cmd(command)
+    ensure_success(result, command, "analyzer")
+    if result.stdout.strip():
+        print(result.stdout.strip())
+
+
+def run_remote_capture(args: argparse.Namespace, output_dir: Path, templates: list[str]) -> int:
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    remote_root = f"/tmp/agentty-perf-suite-{timestamp}"
+    remote_scripts_dir = f"{remote_root}/scripts"
+    remote_run_dir = f"{remote_root}/{output_dir.name}"
+    remote_target = f"{args.remote_user}@{args.remote_host}"
+    remote_identity_file = infer_remote_identity_file(args.remote_host, args.remote_identity_file)
+    remote_ssh_options: list[str] = list(args.remote_ssh_options or [])
+
+    local_scripts_dir = Path(__file__).resolve().parent
+    local_suite_script = local_scripts_dir / "ios-perf-suite"
+    local_analyze_script = local_scripts_dir / "ios-perf-analyze"
+    local_ui_driver_script = args.ui_driver_script.expanduser().resolve() if args.ui_driver_script else None
+    remote_ui_driver_script = (
+        f"{remote_scripts_dir}/{local_ui_driver_script.name}"
+        if local_ui_driver_script is not None and local_ui_driver_script.exists()
+        else None
+    )
+
+    if remote_identity_file is not None:
+        log(f"using remote SSH identity file: {remote_identity_file}")
+
+    mkdir_result = run_cmd(
+        build_ssh_cmd(
+            remote_identity_file,
+            remote_ssh_options,
+            remote_target,
+            f"mkdir -p {shlex.quote(remote_scripts_dir)}",
+        )
+    )
+    ensure_success(mkdir_result, ["ssh", remote_target, "mkdir -p"], "create remote scripts directory")
+
+    copy_sources = [str(local_suite_script), str(local_analyze_script)]
+    if local_ui_driver_script is not None and local_ui_driver_script.exists():
+        copy_sources.append(str(local_ui_driver_script))
+    copy_result = run_cmd(build_scp_cmd(
+        remote_identity_file,
+        remote_ssh_options,
+        [*copy_sources, f"{remote_target}:{remote_scripts_dir}/"],
+    ))
+    ensure_success(copy_result, ["scp", "scripts"], "copy suite scripts to remote host")
+
+    remote_command: list[str] = [
+        f"{remote_scripts_dir}/ios-perf-suite",
+        "--host",
+        "local",
+        "--output-dir",
+        remote_run_dir,
+        "--duration-seconds",
+        str(args.duration_seconds),
+        "--bundle-id",
+        args.bundle_id,
+        "--process-name",
+        args.process_name,
+        "--workload",
+        args.workload,
+        "--capture-mode",
+        args.capture_mode,
+        "--minimum-trace-duration-ratio",
+        str(args.minimum_trace_duration_ratio),
+        "--ui-fallback",
+        args.ui_fallback,
+        "--terminal-host",
+        args.terminal_host,
+        "--terminal-user",
+        args.terminal_user,
+        "--terminal-tmux-session",
+        args.terminal_tmux_session,
+        "--_remote-inner",
+    ]
+
+    if args.device:
+        remote_command.extend(["--device", args.device])
+
+    if args.skip_analysis:
+        remote_command.append("--skip-analysis")
+
+    if args.ui_driver_command:
+        remote_command.extend(["--ui-driver-command", args.ui_driver_command])
+
+    if remote_ui_driver_script is not None:
+        remote_command.extend(["--ui-driver-script", remote_ui_driver_script])
+
+    for template in templates:
+        remote_command.extend(["--template", template])
+
+    remote_shell = (
+        f"chmod +x {shlex.quote(remote_scripts_dir)}/ios-perf-suite "
+        f"{shlex.quote(remote_scripts_dir)}/ios-perf-analyze"
+    )
+    if remote_ui_driver_script is not None:
+        remote_shell += f" {shlex.quote(remote_ui_driver_script)}"
+    remote_shell += " && "
+    remote_shell += (
+        f"{shlex.join(remote_command)}"
+    )
+    run_result = run_cmd(build_ssh_cmd(remote_identity_file, remote_ssh_options, remote_target, remote_shell))
+    ensure_success(run_result, ["ssh", remote_target, "ios-perf-suite"], "remote capture")
+
+    output_dir.parent.mkdir(parents=True, exist_ok=True)
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+
+    pull_result = run_cmd(
+        build_scp_cmd(
+            remote_identity_file,
+            remote_ssh_options,
+            ["-r", f"{remote_target}:{remote_run_dir}", str(output_dir.parent)],
+        )
+    )
+    ensure_success(pull_result, ["scp", "-r", remote_run_dir], "pull remote run directory")
+
+    cleanup_result = run_cmd(
+        build_ssh_cmd(
+            remote_identity_file,
+            remote_ssh_options,
+            remote_target,
+            f"rm -rf {shlex.quote(remote_root)}",
+        )
+    )
+    if cleanup_result.returncode != 0:
+        log("remote cleanup failed; leaving temp files on remote host")
+
+    if not args.skip_analysis:
+        run_analyzer(local_analyze_script, output_dir, args.process_name)
+
+    log(f"remote diagnostics copied to {output_dir}")
+    return 0
+
+
+def run_local_capture(args: argparse.Namespace, output_dir: Path, templates: list[str]) -> int:
+    devices = list_local_devices()
+    selected = select_device(devices, args.device)
+    if selected is None:
+        raise SystemExit("no connected paired physical iOS device found for local capture")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    trace_dir = output_dir / "traces"
+    log_dir = output_dir / "logs"
+    trace_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    log(
+        f"capturing on device '{selected.name}' ({selected.identifier}) with templates: {', '.join(templates)}"
+    )
+
+    metadata: dict = {
+        "generated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "host": socket.gethostname(),
+        "device": {
+            "name": selected.name,
+            "identifier": selected.identifier,
+            "udid": selected.udid,
+        },
+        "bundle_id": args.bundle_id,
+        "process_name": args.process_name,
+        "duration_seconds": args.duration_seconds,
+        "templates": templates,
+        "workload": args.workload,
+        "capture_mode": args.capture_mode,
+        "minimum_trace_duration_ratio": args.minimum_trace_duration_ratio,
+        "captures": [],
+    }
+
+    ui_driver_script = args.ui_driver_script.expanduser().resolve() if args.ui_driver_script else Path("")
+
+    for index, template in enumerate(templates, start=1):
+        slug = slugify(template)
+        trace_path = trace_dir / f"{index:02d}-{slug}.trace"
+        capture_log_path = log_dir / f"{index:02d}-{slug}.capture.log"
+
+        log(f"starting template: {template}")
+
+        try:
+            launch_app(selected, args.bundle_id)
+        except Exception as error:  # noqa: BLE001
+            log(f"launch warning before '{template}': {error}")
+
+        driver_mode = args.workload
+        ui_process: subprocess.Popen[str] | None = None
+
+        if args.workload == "ui":
+            ui_process = start_ui_driver_process(
+                ui_driver_command=args.ui_driver_command,
+                ui_driver_script=ui_driver_script,
+                duration_seconds=args.duration_seconds,
+                device=selected,
+                bundle_id=args.bundle_id,
+            )
+            if ui_process is None:
+                if args.ui_fallback == "hybrid":
+                    driver_mode = "hybrid"
+                else:
+                    driver_mode = "manual"
+
+        if driver_mode == "hybrid":
+            try:
+                run_hybrid_workload(
+                    host=args.terminal_host,
+                    user=args.terminal_user,
+                    session=args.terminal_tmux_session,
+                    duration_seconds=args.duration_seconds,
+                )
+                log("hybrid workload triggered (tmux output flood)")
+            except Exception as error:  # noqa: BLE001
+                log(f"hybrid workload warning: {error}")
+
+        if driver_mode == "manual":
+            log(
+                "manual workload: perform rapid scrolls, shell swipes, and spacebar long-press shell switcher interactions now"
+            )
+
+        capture = record_trace(
+            template=template,
+            device=selected,
+            process_name=args.process_name,
+            duration_seconds=args.duration_seconds,
+            trace_path=trace_path,
+            log_path=capture_log_path,
+            capture_mode=args.capture_mode,
+            minimum_trace_duration_ratio=args.minimum_trace_duration_ratio,
+        )
+
+        if ui_process is not None:
+            stop_process(ui_process)
+
+        capture["template"] = template
+        capture["driver_mode"] = driver_mode
+        metadata["captures"].append(capture)
+
+        if capture["success"]:
+            log(f"template completed: {template}")
+        else:
+            log(f"template failed: {template} (see {capture['log']})")
+
+    metadata_path = output_dir / "metadata.json"
+    metadata_path.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+
+    if not args.skip_analysis:
+        analyzer_path = Path(__file__).resolve().with_name("ios-perf-analyze")
+        run_analyzer(analyzer_path, output_dir, args.process_name)
+
+    log(f"run completed: {output_dir}")
+    return 0
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Capture and analyze iOS Instruments diagnostics")
+    parser.add_argument("--host", choices=["auto", "local", "macbook"], default="auto")
+    parser.add_argument("--device")
+    parser.add_argument("--duration-seconds", type=int, default=45)
+    parser.add_argument("--bundle-id", default="dev.tuist.agentty.iOS.dev")
+    parser.add_argument("--process-name", default="AgenTTY_iOS_Dev")
+    parser.add_argument("--template", action="append", dest="template_args")
+    parser.add_argument("--templates")
+    parser.add_argument("--output-dir", type=Path)
+
+    parser.add_argument("--workload", choices=["ui", "hybrid", "manual"], default="ui")
+    parser.add_argument("--ui-fallback", choices=["hybrid", "manual"], default="hybrid")
+    parser.add_argument("--ui-driver-command")
+    parser.add_argument("--ui-driver-script", type=Path)
+    parser.add_argument(
+        "--capture-mode",
+        choices=["attach-only", "attach-then-all", "all-processes-only"],
+        default="attach-then-all",
+    )
+    parser.add_argument("--minimum-trace-duration-ratio", type=float, default=0.6)
+
+    parser.add_argument("--terminal-host", default=os.environ.get("AGENTTY_TERMINAL_HOST", "localhost"))
+    parser.add_argument("--terminal-user", default=os.environ.get("AGENTTY_TERMINAL_USER", os.environ.get("USER", "")))
+    parser.add_argument("--terminal-tmux-session", default="agentty-main")
+
+    parser.add_argument("--remote-host", default=os.environ.get("AGENTTY_REMOTE_CAPTURE_HOST", "localhost"))
+    parser.add_argument("--remote-user", default=os.environ.get("AGENTTY_REMOTE_CAPTURE_USER", os.environ.get("USER", "")))
+    parser.add_argument("--remote-identity-file", type=Path)
+    parser.add_argument(
+        "--remote-ssh-option",
+        action="append",
+        dest="remote_ssh_options",
+        default=list(DEFAULT_REMOTE_SSH_OPTIONS),
+    )
+
+    parser.add_argument("--skip-analysis", action="store_true")
+    parser.add_argument("--_remote-inner", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    if args.minimum_trace_duration_ratio < 0:
+        raise SystemExit("--minimum-trace-duration-ratio must be >= 0")
+    templates = normalize_template_args(args.template_args, args.templates)
+
+    timestamp = datetime.now().astimezone().strftime("%Y%m%d-%H%M%S")
+    output_dir = (
+        args.output_dir.expanduser().resolve()
+        if args.output_dir
+        else (Path.cwd() / "perf-traces" / "runs" / timestamp)
+    )
+
+    if args.host == "auto" and not args._remote_inner:
+        try:
+            local_devices = list_local_devices()
+            local_selected = select_device(local_devices, args.device)
+            selected_host = "local" if local_selected is not None else "macbook"
+        except Exception as error:  # noqa: BLE001
+            log(f"local device discovery failed; defaulting to remote host ({error})")
+            selected_host = "macbook"
+    else:
+        selected_host = args.host
+
+    if selected_host == "macbook" and not args._remote_inner:
+        log(f"no local device selected; delegating capture to {args.remote_host}")
+        return run_remote_capture(args, output_dir, templates)
+
+    return run_local_capture(args, output_dir, templates)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
