@@ -406,8 +406,16 @@ enum AgenTTYSSHPrivateKeyParser {
             let primeP = try privateReader.readStringData()
             let primeQ = try privateReader.readStringData()
 
+            let unsignedModulus = strippedMPInt(modulus)
+            guard let leadingByte = unsignedModulus.first else {
+                throw AgenTTYSSHKeyMaterialError.invalidPrivateKeyFormat
+            }
+            guard unsignedModulus.count * 8 - leadingByte.leadingZeroBitCount >= minimumRSAKeySizeInBits else {
+                throw AgenTTYSSHKeyMaterialError.rsaKeyTooSmall
+            }
+
             guard let rsaKey = try? _RSA.Signing.PrivateKey(
-                n: strippedMPInt(modulus),
+                n: unsignedModulus,
                 e: strippedMPInt(publicExponent),
                 d: strippedMPInt(privateExponent),
                 p: strippedMPInt(primeP),

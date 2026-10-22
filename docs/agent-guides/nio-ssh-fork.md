@@ -77,7 +77,9 @@ The swift-crypto 4.5.2 pin fixes
 a double-free when malformed RSA public keys fail to decode. SwiftASN1 serializes
 SSH modulus/exponent values as PKCS#1 DER for the explicit legacy initializer.
 This preserves the 1024–16384-bit host-key bounds while private imports retain
-their separate minimum. The focused RSA suite includes a 1024-bit round trip.
+their separate minimum. OpenSSH private imports check the modulus before the
+component initializer so weak keys retain the actionable size error.
+The focused RSA suite includes a 1024-bit round trip.
 
 ## Simulator build verification
 
