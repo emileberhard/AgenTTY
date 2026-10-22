@@ -1,0 +1,53 @@
+if [ -f "$HOME/.bashrc" ]; then
+  . "$HOME/.bashrc"
+elif [ -f "$HOME/.bash_profile" ]; then
+  . "$HOME/.bash_profile"
+fi
+
+_agentty_prioritize_bin() {
+  local agentty_status=$?
+  local agentty_bin="$HOME/.agentty/bin"
+  case "$PATH" in
+    "$agentty_bin"|"$agentty_bin":*) return "$agentty_status" ;;
+  esac
+  local remaining="$PATH:"
+  local rebuilt=""
+  local entry
+
+  while [ -n "$remaining" ]; do
+    entry="${remaining%%:*}"
+    remaining="${remaining#*:}"
+    if [ "$entry" != "$agentty_bin" ]; then
+      rebuilt="${rebuilt:+$rebuilt:}$entry"
+    fi
+  done
+
+  PATH="$agentty_bin${rebuilt:+:$rebuilt}"
+  export PATH
+  hash -r 2>/dev/null || true
+  return "$agentty_status"
+}
+
+case "$(declare -p PROMPT_COMMAND 2>/dev/null)" in
+  declare\ -a\ PROMPT_COMMAND=*)
+    _agentty_prompt_hook_found=false
+    for _agentty_prompt_command in "${PROMPT_COMMAND[@]}"; do
+      if [ "$_agentty_prompt_command" = _agentty_prioritize_bin ]; then
+        _agentty_prompt_hook_found=true
+        break
+      fi
+    done
+    if [ "$_agentty_prompt_hook_found" = false ]; then
+      PROMPT_COMMAND+=(_agentty_prioritize_bin)
+    fi
+    unset _agentty_prompt_command _agentty_prompt_hook_found
+    ;;
+  *)
+    case ";${PROMPT_COMMAND:-};" in
+      *';_agentty_prioritize_bin;'*) ;;
+      *) PROMPT_COMMAND="${PROMPT_COMMAND:+$PROMPT_COMMAND;}_agentty_prioritize_bin" ;;
+    esac
+    ;;
+esac
+
+_agentty_prioritize_bin
