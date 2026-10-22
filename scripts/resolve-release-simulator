@@ -2,7 +2,8 @@
 set -euo pipefail
 
 runtime_version="${AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME:-27.0}"
-device_name="${AGENTTY_RELEASE_IOS_SIMULATOR_DEVICE:-iPhone 17 Pro}"
+device_name="${AGENTTY_RELEASE_IOS_SIMULATOR_DEVICE:-}"
+if [[ -z "$device_name" && "$runtime_version" != latest ]]; then device_name="iPhone 17 Pro"; fi
 runtime_identifier="com.apple.CoreSimulator.SimRuntime.iOS-${runtime_version//./-}"
 
 devices_json="$(mktemp -t agentty-release-simulators.XXXXXX.json)"
@@ -17,11 +18,22 @@ from pathlib import Path
 path, runtime_identifier, runtime_version, device_name = sys.argv[1:]
 devices_by_runtime = json.loads(Path(path).read_text(encoding="utf-8")).get("devices", {})
 if runtime_version == "latest":
-    available = [key for key, devices in devices_by_runtime.items() if key.startswith("com.apple.CoreSimulator.SimRuntime.iOS-") and any(device.get("isAvailable", True) and device.get("name") == device_name for device in devices)]
+    available = {
+        runtime: [
+            device for device in devices
+            if device.get("isAvailable", True)
+            and (device.get("name") == device_name if device_name else device.get("name", "").startswith("iPhone"))
+        ]
+        for runtime, devices in devices_by_runtime.items()
+        if runtime.startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+    }
+    available = {runtime: devices for runtime, devices in available.items() if devices}
     if not available:
-        raise SystemExit(f"FATAL: no installed iOS runtime has an available {device_name}")
+        raise SystemExit(f"FATAL: no installed iOS runtime has an available {device_name or 'iPhone'}")
     runtime_identifier = max(available, key=lambda key: tuple(map(int, key.rsplit("iOS-", 1)[1].split("-"))))
-    runtime_version = runtime_identifier.rsplit("iOS-", 1)[1].replace("-", ".")
+    device = min(available[runtime_identifier], key=lambda device: (device["name"], device["udid"]))
+    print(device["udid"])
+    raise SystemExit(0)
 
 if runtime_identifier not in devices_by_runtime:
     raise SystemExit(

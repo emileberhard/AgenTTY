@@ -14,7 +14,7 @@ reviewed GhosttyKit artifact, generate the workspace, install the canonical
 package lock, and call the repo-owned build script. TestFlight uses Xcode 27.1;
 select the matching developer directory explicitly. Never weaken strict
 concurrency to make a new toolchain compile. Public simulator tests select the
-newest installed iOS runtime with an available iPhone 17 Pro; the maintainer
+newest installed iOS runtime with an available iPhone; the maintainer
 release preflight keeps its explicit local runtime contract.
 
 ## Hosted release
