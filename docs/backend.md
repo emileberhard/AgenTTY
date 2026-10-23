@@ -89,6 +89,23 @@ not evidence of a ring, answer, or connected audio.
 
 SQLite stores devices, relay sessions, relay hosts, connector credentials, SSH relay sessions, analytics users/events, and validation-failure diagnostics. Analytics validation diagnostics intentionally avoid raw hostnames, usernames, candidate addresses, and raw error text.
 
+### Startup retention
+
+Pairing cleanup deletes expired connector bootstrap tokens before deleting
+pairing sessions older than the 24-hour retention window. Bootstrap token
+expiry is bounded by its pairing session expiry; live tokens are preserved.
+Foreign-key enforcement stays enabled, so an unexpected dependent row fails
+rather than silently orphaning data. Startup errors identify each retention
+operation separately.
+
+Startup retention remains required: an integrity failure or inability to
+redact sensitive analytics context must be fixed before serving traffic.
+Ignoring these errors would hide broken storage guarantees and allow sensitive
+context to outlive its retention policy. The October 2026 outage was an ordering
+bug on valid rows, repaired without weakening this contract or migrating the
+schema. Reusing the existing expired-token cleanup also covers pairing API
+calls that perform retention while the service is running.
+
 ## Surface Live Activity Transport
 
 Set `AGENTTY_BACKEND_SURFACE_TOKEN` in the operator-owned deployment and give the

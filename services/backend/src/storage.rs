@@ -347,11 +347,16 @@ impl Database {
             .context("failed to initialize analytics schema")?;
 
         connection
+            .call(|connection| expire_stale_pairing_sessions(connection, current_epoch_seconds()))
+            .await
+            .context("failed to expire stale pairing sessions")?;
+        connection
+            .call(|connection| prune_ingest_failures(connection, current_epoch_seconds()))
+            .await
+            .context("failed to prune analytics ingest failures")?;
+        connection
             .call(|connection| {
-                let now = current_epoch_seconds();
-                expire_stale_pairing_sessions(connection, now)?;
-                prune_ingest_failures(connection, now)?;
-                redact_expired_sensitive_event_context(connection, now)
+                redact_expired_sensitive_event_context(connection, current_epoch_seconds())
             })
             .await
             .context("failed to redact expired analytics sensitive context")?;
@@ -2534,6 +2539,7 @@ fn expire_stale_pairing_sessions(
     connection: &rusqlite::Connection,
     now: i64,
 ) -> rusqlite::Result<()> {
+    delete_expired_connector_bootstrap_tokens(connection, now)?;
     connection.execute(
         r#"
         UPDATE pairing_sessions

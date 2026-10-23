@@ -2845,6 +2845,74 @@ async fn real_http_analytics_ingest_accepts_mixed_case_uuid_device_ids() {
 }
 
 #[tokio::test]
+async fn reopening_database_prunes_expired_pairing_with_unconsumed_bootstrap() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("backend.sqlite3");
+    let database = Database::open(path.clone()).await.unwrap();
+    database
+        .ensure_device_identity(
+            "device".to_owned(),
+            "secret".to_owned(),
+            MAIN_BUNDLE_ID.to_owned(),
+            PushEnvironment::Production,
+        )
+        .await
+        .unwrap();
+    let mut sessions = Vec::new();
+    for _ in 0..2 {
+        let pairing = database.create_pairing_session().await.unwrap();
+        database
+            .claim_pairing_session(
+                pairing.pairing_code,
+                "device".to_owned(),
+                "ssh-ed25519 test".to_owned(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        database
+            .issue_connector_bootstrap_token(pairing.session_id.clone(), pairing.host_token)
+            .await
+            .unwrap()
+            .unwrap();
+        sessions.push(pairing.session_id);
+    }
+    drop(database);
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection.execute("PRAGMA foreign_keys = ON", []).unwrap();
+    connection.execute(
+        "UPDATE connector_bootstrap_tokens SET expires_at_epoch_seconds = unixepoch() - 86401 WHERE session_id = ?",
+        [&sessions[0]],
+    ).unwrap();
+    connection.execute(
+        "UPDATE pairing_sessions SET status = 'failed', expires_at_epoch_seconds = unixepoch() - 86401 WHERE session_id = ?",
+        [&sessions[0]],
+    ).unwrap();
+    let database = Database::open(path).await.unwrap();
+    for table in ["pairing_sessions", "connector_bootstrap_tokens"] {
+        let retained: Vec<String> = connection
+            .prepare(&format!("SELECT session_id FROM {table}"))
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(retained, vec![sessions[1].clone()]);
+    }
+    assert!(
+        connection
+            .prepare("PRAGMA foreign_key_check")
+            .unwrap()
+            .query([])
+            .unwrap()
+            .next()
+            .unwrap()
+            .is_none()
+    );
+    drop(database);
+}
+
+#[tokio::test]
 async fn reopening_database_normalizes_legacy_device_ids_across_tables() {
     let database_path = NamedTempFile::new()
         .unwrap()
