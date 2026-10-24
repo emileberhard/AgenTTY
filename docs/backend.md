@@ -63,7 +63,7 @@ Public app/helper endpoints include:
 - `POST /v1/analytics/events`
 - `GET /healthz`
 
-Internal companion-client endpoints require env-configured bearer tokens.
+Internal companion-client endpoints accept only RemoteCoder and PingBooks, using env-configured bearer tokens.
 They include:
 
 - `POST /v1/internal/alert`
@@ -106,115 +106,6 @@ bug on valid rows, repaired without weakening this contract or migrating the
 schema. Reusing the existing expired-token cleanup also covers pairing API
 calls that perform retention while the service is running.
 
-## Surface Live Activity Transport
-
-Set `AGENTTY_BACKEND_SURFACE_TOKEN` in the operator-owned deployment and give the
-same secret only to the Surface publisher. This caller can send only Live
-Activities for `emileberhard.Surface` and copies whose bundle ID appends one or
-more ASCII digits, such as `emileberhard.Surface2`; it cannot send alerts,
-location or VoIP pushes. Other suffixes are rejected. Signing credentials stay
-in this backend. The APNs key must authorize each bundle ID. Broadcast capability
-is a separate prerequisite for channels.
-
-The existing `/v1/internal/live-activity` endpoint retains its update/end request
-and response. New typed lifecycle operations use:
-
-- `POST /v1/internal/live-activity/dispatch`
-- `POST /v1/internal/live-activity/channels`
-
-All request types reject unknown fields. Dispatch bodies are bounded at 16 KiB;
-channel management bodies at 4 KiB. These are broker admission policies.
-Invalid JSON, invalid lifecycle fields or failed admission return HTTP 400;
-missing authentication returns 401 and unauthorized bundle/push type returns
-403. No APNs request occurs in these cases.
-
-A start uses this shape:
-
-```json
-{
-  "bundle_id": "emileberhard.Surface",
-  "push_environment": "development",
-  "priority": 10,
-  "expiration": 0,
-  "message": {
-    "event": "start",
-    "device_token": "<hex push-to-start token>",
-    "timestamp": 1791979000,
-    "content_state": {"<full Surface state>": "..."},
-    "attributes_type": "SurfaceAttributes",
-    "attributes": {"activityID": "<exact logical identity>"},
-    "alert": {"title": "Work session", "body": "Started"},
-    "update_route": {"kind": "token"}
-  }
-}
-```
-
-A channel start replaces `update_route` with
-`{"kind":"channel","channel_id":"<APNs channel ID>"}`. The channel must already
-exist in that environment. The broker emits `input-push-token: 1` or
-`input-push-channel`, never both. Start requires attributes and an alert;
-dismissal is permitted only on end.
-
-Update and end messages contain `event`, `timestamp`, `content_state` and
-`target`, where target is `{"kind":"device","device_token":"<hex activity
-update token>"}` or `{"kind":"channel","channel_id":"<APNs channel ID>"}`.
-Both accept optional positive `stale_date` and optional `alert` with title/body
-and optional subtitle. End also accepts optional positive `dismissal_date`.
-Every push carries the full content state. `priority` is required and must be
-5 or 10; `expiration` is required and must be zero or positive Unix seconds.
-
-The broker measures the encoded state plus start attributes against its 4,096
-byte admission policy, and the complete uncompressed APNs body against 4,096
-bytes for device-token delivery or 5,120 bytes for broadcast. Apple’s actual
-ActivityKit combined-data measurement still requires device validation.
-Device tokens must contain hexadecimal byte pairs, at most 2,048 bytes. Channel IDs must be
-standard base64, nonempty and at most 1,024 bytes; the broker does not assume a
-particular APNs-generated identifier length.
-
-Channel requests contain `bundle_id`, `push_environment` and `operation`:
-
-```json
-{"kind":"create","message_storage_policy":1}
-```
-
-or `{"kind":"delete","channel_id":"<APNs channel ID>"}`. Storage policy 0
-means No Message Storage and requires expiration 0 when publishing. Policy 1
-means Most Recent Message Stored, with lower publishing budget and retention
-of up to eight hours. A successful creation returns the new channel ID. The
-broker does not persist it, attach devices or choose when to delete it.
-Deletion does not prove that stored messages stopped delivering.
-
-Once an authenticated request is admitted, HTTP 200 carries a transport outcome:
-
-- `{"outcome":"accepted","apns_id":"...","channel_id":"..."}`;
-  `channel_id` appears only after channel creation, and IDs may otherwise be absent.
-- `{"outcome":"rejected","apns_status":400,"apns_reason":"...","failure_class":"..."}`;
-  the APNs ID and reason are optional when absent from the response. A valid
-  APNs `Retry-After` header adds `retry_after_seconds`, a nonnegative integer.
-  Delta seconds and HTTP dates are supported; missing or malformed headers
-  omit the field. APNs does not promise this header. The caller owns retry
-  timing and may apply a longer delay.
-- `{"outcome":"unknown","reason":"transport_failed_after_dispatch"}`.
-- `{"outcome":"not_sent","reason":"provider_authentication_failed","failure_class":"authorization"}`.
-
-Failures are classified by APNs reason as `content`, `authorization`, `route`,
-`throttled`, `transient` or `unknown`. HTTP status alone never invalidates a token
-or channel. Requests that may have reached APNs are unknown after a network
-failure; only failures before request execution are not sent. Successful channel
-creation without a valid returned ID is unknown and may have leaked a channel.
-APNs acceptance is not evidence of device display.
-
-The new transport disables HTTP-library retries and redirects, dispatches once,
-and bounds APNs error bodies. It never automatically retries ambiguous starts or
-channel creation. Surface owns bounded retries, current-revision ordering,
-observation, leases, tombstones and channel cleanup. Existing companion sender
-behavior stays unchanged.
-
-These mechanics follow Apple’s current [ActivityKit push contract](https://developer.apple.com/documentation/activitykit/starting-and-updating-live-activities-with-activitykit-push-notifications),
-[channel management contract](https://developer.apple.com/documentation/usernotifications/sending-channel-management-requests-to-apns),
-[broadcast request contract](https://developer.apple.com/documentation/usernotifications/sending-broadcast-push-notification-requests-to-apns)
-and [APNs error reasons](https://developer.apple.com/documentation/usernotifications/handling-error-responses-from-apns).
-
 ## Public Relay Admission and Resource Ownership
 
 The relay owns admission, quotas, durable state and hosted bandwidth. SSH authentication and host-key verification remain end to end between the app and sshd. A relay grant never replaces an SSH key.
@@ -241,13 +132,13 @@ Dictation accepts complete PCM WAV files, with one format chunk followed by one 
 
 Each dictation identity has a 1,800-second weekly allowance shared by its devices. Legacy devices retain that individual allowance in addition to their shared pool. SQLite immediate transactions reserve identity and operator allowances together. Operator reservations remain charged on provider failure, cancellation and ambiguous outcomes, so retries and restarts cannot reset spending ceilings; only the individual's allowance is refunded after an explicit provider failure. Existing weekly usage seeds the operator ledger during migration. Weeks reset Monday at 00:00 UTC; daily spend and bandwidth reset at 00:00 UTC. The ledgers persist across process restarts.
 
-The HTTP owner caps public traffic at 600 requests/minute and provisioning at 60/minute, with 32 requests in flight and 120 authenticated requests/minute per device. Only requests bearing a valid companion credential bypass the public request pool. Most JSON bodies are limited to 256 KiB; the typed companion Live Activity endpoints keep their smaller limits. WebSockets are capped at 128, with 64 KiB SSH messages/frames; control sockets accept only heartbeat/close messages and cap frames at 125 bytes. Heartbeats are limited to 64 per socket per minute, probes to 15 seconds, and empty/unsupported data messages close the socket. Relay sessions are capped at 32 total and four per host, and each queued direction remains limited to 256 KiB. Bandwidth is reserved before forwarding each binary message, with a 256-byte minimum charge per message to bound tiny-frame processing as well as bulk transfer. A ceiling closes the affected tunnel with `relay_bandwidth_limit` and prevents new issuance until reset. New apps advertise `x-agentty-resource-errors: 1`, receive typed `429` errors and stop automatic reconnect on resource-limit failures. Older clients receive an authentication rejection for an exhausted relay pool; their existing single identity-repair attempt then stops reconnect, instead of polling a permanent limit every eight seconds. Direct SSH remains available.
+The HTTP owner caps public traffic at 600 requests/minute and provisioning at 60/minute, with 32 requests in flight and 120 authenticated requests/minute per device. Only requests bearing a valid companion credential bypass the public request pool. Most JSON bodies are limited to 256 KiB. WebSockets are capped at 128, with 64 KiB SSH messages/frames; control sockets accept only heartbeat/close messages and cap frames at 125 bytes. Heartbeats are limited to 64 per socket per minute, probes to 15 seconds, and empty/unsupported data messages close the socket. Relay sessions are capped at 32 total and four per host, and each queued direction remains limited to 256 KiB. Bandwidth is reserved before forwarding each binary message, with a 256-byte minimum charge per message to bound tiny-frame processing as well as bulk transfer. A ceiling closes the affected tunnel with `relay_bandwidth_limit` and prevents new issuance until reset. New apps advertise `x-agentty-resource-errors: 1`, receive typed `429` errors and stop automatic reconnect on resource-limit failures. Older clients receive an authentication rejection for an exhausted relay pool; their existing single identity-repair attempt then stops reconnect, instead of polling a permanent limit every eight seconds. Direct SSH remains available.
 
 Anonymous QR creation is necessary before an app claims the code. It cannot authorize hosted traffic by itself. Pairing rows expire after ten minutes, remain inspectable for 24 hours and are capped at 4,096. Hosts are capped at 4,096 and grants at 32 per device. Devices are capped at 10,000 and relay credentials at 512 per device. With `AGENTTY_BACKEND_REQUIRE_HOST_ADOPTION_PROOF=true`, existing-host adoption requires either the device's existing grant or proof of the connector ID and secret already installed on that host; guessing `machine_id` and username cannot replace credentials. This switch defaults off during the backend-first cutover because installed pairing helpers cannot send proof. Turn it on immediately after the 2.12.0 tag has published the matching helper. The interim compatibility policy still relies on the random, private machine ID. The pairing helper reads proof only from its local connector config and sends it only to that config's relay origin.
 
 Analytics authenticates before validating or writing durable diagnostics. Failure records retain at most 10,000 rows for 14 days, with bounded diagnostic fields. Normal analytics and existing device/grant data are preserved. The SQLite owner enforces a 512 MiB file cap and reports capacity failures for operator action; a database already exceeding that cap fails startup rather than silently growing. There were no historical traffic-byte counters to size bandwidth from. The initial dictation ceilings were checked against production aggregate weekly usage; no credentials or audio were exported.
 
-The internal RemoteCoder/Surface APNs contracts, topics and payloads are unchanged. Their configured tokens must be at least 32 characters, are compared in constant time, and remain in the operator credential store. Public requests cannot select provider upstream URLs. Internal failures return generic errors without stack traces or credentials.
+The internal RemoteCoder and PingBooks APNs contracts, topics and payloads remain caller-scoped. Their configured tokens must be at least 32 characters, are compared in constant time, and remain in the operator credential store. Public requests cannot select provider upstream URLs. Internal failures return generic errors without stack traces or credentials.
 
 ### Deployment and Remaining Acceptance
 

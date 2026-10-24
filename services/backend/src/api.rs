@@ -14,9 +14,6 @@ use tokio::sync::mpsc;
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::AppState;
-use crate::activity_transport::{
-    ActivityChannelRequest, ActivityDispatchRequest, ActivityTransportResponse,
-};
 use crate::apns::{ApnsPushRequest, PushSendSuccess, PushSender};
 use crate::build_info;
 use crate::config::InternalClientSettings;
@@ -98,14 +95,6 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/notify", post(notify))
         .route("/v1/internal/alert", post(internal_alert))
         .route("/v1/internal/live-activity", post(internal_live_activity))
-        .route(
-            "/v1/internal/live-activity/dispatch",
-            post(dispatch_live_activity).layer(DefaultBodyLimit::max(16 * 1024)),
-        )
-        .route(
-            "/v1/internal/live-activity/channels",
-            post(manage_live_activity_channel).layer(DefaultBodyLimit::max(4 * 1024)),
-        )
         .route("/v1/internal/location", post(internal_location))
         .route("/v1/internal/voip", post(internal_voip))
         .layer(DefaultBodyLimit::max(256 * 1024))
@@ -1476,66 +1465,6 @@ async fn internal_live_activity(
     .await?;
 
     Ok(Json(result))
-}
-
-async fn dispatch_live_activity(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Result<Json<ActivityDispatchRequest>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<ActivityTransportResponse>, ApiError> {
-    let Json(request) = request.map_err(|error| ApiError::bad_request(error.body_text()))?;
-    let caller = authenticate_internal_caller(&state, &headers, PushType::LiveActivity)?;
-    if !caller.caller.allows_topic(request.bundle_id.as_str()) {
-        return Err(ApiError::forbidden(
-            "Caller not allowed to send to this topic.",
-        ));
-    }
-    let prepared = request.prepare().map_err(ApiError::bad_request)?;
-    tracing::info!(
-        caller = caller.caller.as_str(),
-        bundle_id = request.bundle_id.as_str(),
-        environment = request.push_environment.as_str(),
-        "activity transport dispatch"
-    );
-    let response = state.push_sender.send_activity(prepared).await;
-    tracing::info!(
-        caller = caller.caller.as_str(),
-        bundle_id = request.bundle_id.as_str(),
-        environment = request.push_environment.as_str(),
-        outcome = response.outcome_name(),
-        "activity transport result"
-    );
-    Ok(Json(response))
-}
-
-async fn manage_live_activity_channel(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    request: Result<Json<ActivityChannelRequest>, axum::extract::rejection::JsonRejection>,
-) -> Result<Json<ActivityTransportResponse>, ApiError> {
-    let Json(request) = request.map_err(|error| ApiError::bad_request(error.body_text()))?;
-    let caller = authenticate_internal_caller(&state, &headers, PushType::LiveActivity)?;
-    if !caller.caller.allows_topic(request.bundle_id.as_str()) {
-        return Err(ApiError::forbidden(
-            "Caller not allowed to manage channels for this topic.",
-        ));
-    }
-    let prepared = request.prepare().map_err(ApiError::bad_request)?;
-    tracing::info!(
-        caller = caller.caller.as_str(),
-        bundle_id = request.bundle_id.as_str(),
-        environment = request.push_environment.as_str(),
-        "activity channel transport dispatch"
-    );
-    let response = state.push_sender.send_activity(prepared).await;
-    tracing::info!(
-        caller = caller.caller.as_str(),
-        bundle_id = request.bundle_id.as_str(),
-        environment = request.push_environment.as_str(),
-        outcome = response.outcome_name(),
-        "activity channel transport result"
-    );
-    Ok(Json(response))
 }
 
 async fn internal_location(

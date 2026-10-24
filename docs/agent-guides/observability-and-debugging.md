@@ -108,13 +108,6 @@ so their connection history is only visible in device logs and Sentry). Host-con
 logs on each SSH host: `~/.agentty/logs/host-connector.{stdout,stderr}.log` where the
 connector is operator-managed.
 
-Surface lifecycle and channel transport records contain the scoped caller,
-bundle, environment and explicit outcome (`accepted`, `rejected`, `unknown` or
-`not_sent`). They omit bearer tokens, device tokens, channel IDs and payload
-content. Surface owns the persistent lifecycle receipts and APNs reason details;
-the broker owns no activity state. Accepted transport does not prove device
-display. The strict request and response contracts are in `../backend.md`.
-
 ## Host load matters
 
 A heavily loaded or swapping host slows `sshd` handshakes past the app's 5s connect

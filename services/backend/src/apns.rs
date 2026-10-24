@@ -10,10 +10,6 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::activity_transport::{
-    ActivityTransportResponse, ApnsFailureClass, PreparedActivityRequest, classify_apns_reason,
-    validate_channel_id,
-};
 use crate::config::InternalCaller;
 use crate::config::Settings;
 use crate::error::PushSendError;
@@ -196,13 +192,10 @@ pub trait PushSender: Send + Sync {
         &self,
         request: ApnsPushRequest,
     ) -> std::result::Result<PushSendSuccess, PushSendError>;
-
-    async fn send_activity(&self, request: PreparedActivityRequest) -> ActivityTransportResponse;
 }
 
 pub struct ApnsPushSender {
     client: Client,
-    activity_client: Client,
     key_id: String,
     team_id: String,
     encoding_key: Arc<EncodingKey>,
@@ -227,16 +220,9 @@ impl ApnsPushSender {
             .timeout(std::time::Duration::from_secs(10))
             .build()
             .context("failed to build APNs HTTP client")?;
-        let activity_client = Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .retry(reqwest::retry::never())
-            .build()
-            .context("failed to build APNs activity HTTP client")?;
 
         Ok(Self {
             client,
-            activity_client,
             key_id: settings.apns_key_id.clone(),
             team_id: settings.apns_team_id.clone(),
             encoding_key: Arc::new(
@@ -297,94 +283,6 @@ impl ApnsPushSender {
 
 #[async_trait]
 impl PushSender for ApnsPushSender {
-    async fn send_activity(&self, request: PreparedActivityRequest) -> ActivityTransportResponse {
-        let token = match self.auth_token() {
-            Ok(token) => token,
-            Err(_) => {
-                return ActivityTransportResponse::NotSent {
-                    reason: "provider_authentication_failed",
-                    failure_class: ApnsFailureClass::Authorization,
-                };
-            }
-        };
-        let mut builder = self
-            .activity_client
-            .request(request.method, request.url)
-            .version(reqwest::Version::HTTP_2)
-            .header("authorization", format!("bearer {token}"));
-        for (name, value) in request.headers {
-            builder = builder.header(name, value);
-        }
-        if let Some(body) = request.body {
-            builder = builder
-                .header("content-type", "application/json")
-                .body(body);
-        }
-        let http_request = match builder.build() {
-            Ok(value) => value,
-            Err(_) => {
-                return ActivityTransportResponse::NotSent {
-                    reason: "request_construction_failed",
-                    failure_class: ApnsFailureClass::Content,
-                };
-            }
-        };
-        let response = match self.activity_client.execute(http_request).await {
-            Ok(value) => value,
-            Err(_) => {
-                return ActivityTransportResponse::Unknown {
-                    reason: "transport_failed_after_dispatch",
-                };
-            }
-        };
-        let status = response.status();
-        let apns_id = ["apns-request-id", "apns-id", "apns-unique-id"]
-            .into_iter()
-            .find_map(|name| {
-                response
-                    .headers()
-                    .get(name)
-                    .and_then(|value| value.to_str().ok())
-            })
-            .map(str::to_owned);
-        if status == request.expected_status {
-            let channel_id = if request.creates_channel {
-                let Some(value) = response
-                    .headers()
-                    .get("apns-channel-id")
-                    .and_then(|value| value.to_str().ok())
-                    .filter(|value| validate_channel_id(value).is_ok())
-                else {
-                    return ActivityTransportResponse::Unknown {
-                        reason: "accepted_channel_without_valid_identifier",
-                    };
-                };
-                Some(value.to_owned())
-            } else {
-                None
-            };
-            return ActivityTransportResponse::Accepted {
-                apns_id,
-                channel_id,
-            };
-        }
-        if status.is_success() || status.is_redirection() {
-            return ActivityTransportResponse::Unknown {
-                reason: "unexpected_apns_response_status",
-            };
-        }
-        let retry_after_seconds = parse_retry_after(response.headers(), SystemTime::now());
-        let apns_reason = bounded_apns_reason(response).await;
-        let failure_class = classify_apns_reason(apns_reason.as_deref());
-        ActivityTransportResponse::Rejected {
-            apns_status: status.as_u16(),
-            apns_id,
-            apns_reason,
-            retry_after_seconds,
-            failure_class,
-        }
-    }
-
     async fn send(
         &self,
         request: ApnsPushRequest,
@@ -628,11 +526,7 @@ fn parse_apns_reason(detail: &str) -> Option<String> {
         .and_then(|body| body.reason)
 }
 
-pub(crate) fn build_alert_object(
-    title: &str,
-    body: &str,
-    subtitle: Option<&str>,
-) -> Map<String, Value> {
+fn build_alert_object(title: &str, body: &str, subtitle: Option<&str>) -> Map<String, Value> {
     let mut alert = Map::new();
     alert.insert("title".to_owned(), Value::String(title.to_owned()));
     alert.insert("body".to_owned(), Value::String(body.to_owned()));
@@ -640,89 +534,6 @@ pub(crate) fn build_alert_object(
         alert.insert("subtitle".to_owned(), Value::String(subtitle.to_owned()));
     }
     alert
-}
-
-async fn bounded_apns_reason(mut response: reqwest::Response) -> Option<String> {
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await.ok()? {
-        if bytes.len() + chunk.len() > 4096 {
-            return None;
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    let body: ApnsErrorBody = serde_json::from_slice(&bytes).ok()?;
-    body.reason.filter(|value| value.len() <= 128)
-}
-
-fn parse_retry_after(headers: &reqwest::header::HeaderMap, received_at: SystemTime) -> Option<u64> {
-    let mut values = headers.get_all(reqwest::header::RETRY_AFTER).iter();
-    let value = values.next()?;
-    if values.next().is_some() {
-        return None;
-    }
-    let value = value.to_str().ok()?.trim();
-    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return value.parse().ok();
-    }
-    let deadline = httpdate::parse_http_date(value).ok()?;
-    let delay = match deadline.duration_since(received_at) {
-        Ok(delay) => delay,
-        Err(_) => return Some(0),
-    };
-    delay
-        .as_secs()
-        .checked_add(u64::from(delay.subsec_nanos() != 0))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
-
-    use super::{UNIX_EPOCH, parse_retry_after};
-
-    #[test]
-    fn retry_after_preserves_delta_seconds_and_absence() {
-        let received_at = UNIX_EPOCH + Duration::from_secs(60);
-        assert_eq!(parse_retry_after(&HeaderMap::new(), received_at), None);
-        for (value, expected) in [
-            ("60", Some(60)),
-            ("0", Some(0)),
-            (" 120 ", Some(120)),
-            ("", None),
-            ("-1", None),
-            ("+1", None),
-            ("1.5", None),
-            ("not a date", None),
-            ("18446744073709551616", None),
-        ] {
-            let mut headers = HeaderMap::new();
-            headers.insert(RETRY_AFTER, HeaderValue::from_static(value));
-            assert_eq!(parse_retry_after(&headers, received_at), expected);
-        }
-        let mut headers = HeaderMap::new();
-        headers.append(RETRY_AFTER, HeaderValue::from_static("60"));
-        headers.append(RETRY_AFTER, HeaderValue::from_static("120"));
-        assert_eq!(parse_retry_after(&headers, received_at), None);
-    }
-
-    #[test]
-    fn retry_after_http_date_honors_deadline_with_fractional_seconds() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            RETRY_AFTER,
-            HeaderValue::from_static("Thu, 01 Jan 1970 00:02:00 GMT"),
-        );
-        for (received_at, expected) in [
-            (UNIX_EPOCH + Duration::from_secs(60), Some(60)),
-            (UNIX_EPOCH + Duration::new(60, 1), Some(60)),
-            (UNIX_EPOCH + Duration::from_secs(120), Some(0)),
-            (UNIX_EPOCH + Duration::from_secs(121), Some(0)),
-        ] {
-            assert_eq!(parse_retry_after(&headers, received_at), expected);
-        }
-    }
 }
 
 fn log_optional_value(value: Option<&str>) -> String {

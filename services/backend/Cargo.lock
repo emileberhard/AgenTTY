@@ -13,7 +13,6 @@ dependencies = [
  "futures-util",
  "hex",
  "http",
- "httpdate",
  "jsonwebtoken",
  "openssl",
  "rand 0.8.7",

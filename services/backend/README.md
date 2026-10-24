@@ -4,10 +4,6 @@ Minimal self-hosted Rust backend for AgenTTY notifications, pairing control, rel
 
 See `../../docs/backend.md` for deployment contracts and host-runtime publishing notes.
 
-Surface uses the scoped `AGENTTY_BACKEND_SURFACE_TOKEN` caller for typed Live
-Activity lifecycle dispatch and APNs channel management. The broker owns only
-APNs transport; Surface owns activity state, action policy and channel cleanup.
-
 ## Run
 
 ```bash

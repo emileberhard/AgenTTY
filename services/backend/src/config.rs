@@ -9,7 +9,6 @@ use crate::models::PushType;
 // distributed; they only exist to keep the live App Store rollout on the existing backend state.
 const LEGACY_DATABASE_PATH_DEFAULT: &str = "~/.agentty/notify-relay.sqlite3";
 const BACKEND_DATABASE_PATH_DEFAULT: &str = "~/.agentty/backend.sqlite3";
-const SURFACE_BUNDLE_ID: &str = "emileberhard.Surface";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -71,8 +70,6 @@ pub struct AnalyticsAlertSettings {
 pub enum InternalCaller {
     RemoteCoder,
     PingBooks,
-    Esmalib,
-    Surface,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -85,13 +82,8 @@ pub struct InternalCallerSpec {
 }
 
 impl InternalCaller {
-    pub fn all() -> [Self; 4] {
-        [
-            Self::RemoteCoder,
-            Self::PingBooks,
-            Self::Esmalib,
-            Self::Surface,
-        ]
+    pub fn all() -> [Self; 2] {
+        [Self::RemoteCoder, Self::PingBooks]
     }
 
     pub fn spec(self) -> InternalCallerSpec {
@@ -115,24 +107,6 @@ impl InternalCaller {
                 allowed_push_types: &[PushType::Alert],
                 allowed_topics: &["emileberhard.PingBooks"],
             },
-            Self::Esmalib => InternalCallerSpec {
-                env_key: "AGENTTY_BACKEND_ESMALIB_TOKEN",
-                legacy_env_key: Some("AGENTTY_NOTIFY_RELAY_ESMALIB_TOKEN"),
-                name: "esmalib",
-                allowed_push_types: &[PushType::Alert],
-                allowed_topics: &[
-                    "emileberhard.RemoteCoder",
-                    "dev.tuist.EsmaTerm.iOS",
-                    "dev.tuist.EsmaTerm.iOS.dev",
-                ],
-            },
-            Self::Surface => InternalCallerSpec {
-                env_key: "AGENTTY_BACKEND_SURFACE_TOKEN",
-                legacy_env_key: None,
-                name: "surface",
-                allowed_push_types: &[PushType::LiveActivity],
-                allowed_topics: &[SURFACE_BUNDLE_ID],
-            },
         }
     }
 
@@ -146,10 +120,6 @@ impl InternalCaller {
 
     pub fn allows_topic(self, topic: &str) -> bool {
         self.spec().allowed_topics.contains(&topic)
-            || (self == Self::Surface
-                && topic.strip_prefix(SURFACE_BUNDLE_ID).is_some_and(|suffix| {
-                    !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
-                }))
     }
 }
 

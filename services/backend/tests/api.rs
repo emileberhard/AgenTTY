@@ -10,7 +10,6 @@ use tempfile::NamedTempFile;
 use tower::ServiceExt;
 
 use agentty_backend::AppState;
-use agentty_backend::activity_transport::{ActivityTransportResponse, PreparedActivityRequest};
 use agentty_backend::api::build_router;
 use agentty_backend::apns::{ApnsPushRequest, PushSendSuccess, PushSender};
 use agentty_backend::build_info;
@@ -44,8 +43,6 @@ enum FakePushOutcome {
 struct FakePushSender {
     calls: Arc<Mutex<Vec<ApnsPushRequest>>>,
     outcome: Arc<Mutex<FakePushOutcome>>,
-    activity_calls: Arc<Mutex<Vec<PreparedActivityRequest>>>,
-    activity_outcome: Arc<Mutex<ActivityTransportResponse>>,
 }
 
 impl Default for FakePushSender {
@@ -53,11 +50,6 @@ impl Default for FakePushSender {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
             outcome: Arc::new(Mutex::new(FakePushOutcome::Success)),
-            activity_calls: Arc::new(Mutex::new(Vec::new())),
-            activity_outcome: Arc::new(Mutex::new(ActivityTransportResponse::Accepted {
-                apns_id: Some("apns-activity-id".to_owned()),
-                channel_id: None,
-            })),
         }
     }
 }
@@ -97,17 +89,6 @@ impl DictationTranscriber for FakeDictationTranscriber {
 
 #[async_trait]
 impl PushSender for FakePushSender {
-    async fn send_activity(&self, request: PreparedActivityRequest) -> ActivityTransportResponse {
-        self.activity_calls
-            .lock()
-            .expect("activity call lock poisoned")
-            .push(request);
-        self.activity_outcome
-            .lock()
-            .expect("activity outcome lock poisoned")
-            .clone()
-    }
-
     async fn send(
         &self,
         request: ApnsPushRequest,
@@ -3729,218 +3710,7 @@ fn default_internal_clients() -> Vec<InternalClientSettings> {
             caller: InternalCaller::PingBooks,
             token: "token-pingbooks".to_owned(),
         },
-        InternalClientSettings {
-            caller: InternalCaller::Esmalib,
-            token: "token-esmalib".to_owned(),
-        },
     ]
-}
-
-fn surface_transport_clients() -> Vec<InternalClientSettings> {
-    vec![InternalClientSettings {
-        caller: InternalCaller::Surface,
-        token: "token-surface".to_owned(),
-    }]
-}
-
-fn surface_start_body() -> Value {
-    serde_json::json!({
-        "bundle_id": "emileberhard.Surface", "push_environment": "development",
-        "priority": 10, "expiration": 0,
-        "message": {
-            "event": "start", "device_token": "abcdef0123456789", "timestamp": 100,
-            "content_state": {"r": 1}, "attributes_type": "SurfaceAttributes",
-            "attributes": {"activityID": "work-1"},
-            "alert": {"title": "Work session", "body": "Started"},
-            "update_route": {"kind": "token"}
-        }
-    })
-}
-
-#[tokio::test]
-async fn lifecycle_transport_requires_scoped_caller_and_bundle() {
-    let (app, sender) = make_app(surface_transport_clients()).await;
-    let response = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/internal/live-activity/dispatch",
-            surface_start_body(),
-            None,
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    let mut body = surface_start_body();
-    body["bundle_id"] = serde_json::json!("emileberhard.RemoteCoder");
-    let response = app
-        .clone()
-        .oneshot(json_request(
-            "/v1/internal/live-activity/dispatch",
-            body,
-            Some("Bearer token-surface".to_owned()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    let response = app.oneshot(json_request(
-        "/v1/internal/live-activity/channels",
-        serde_json::json!({"bundle_id": "emileberhard.RemoteCoder", "push_environment": "development",
-            "operation": {"kind": "delete", "channel_id": "d29yay0x"}}),
-        Some("Bearer token-surface".to_owned()),
-    )).await.unwrap();
-    assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(sender.activity_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn surface_transport_scopes_dispatch_and_channels_to_numbered_app_copies() {
-    for (bundle_id, expected_status) in [
-        ("emileberhard.Surface", StatusCode::OK),
-        ("emileberhard.Surface2", StatusCode::OK),
-        ("emileberhard.Surface3", StatusCode::OK),
-        ("emileberhard.Surface12", StatusCode::OK),
-        ("emileberhard.Surface0", StatusCode::OK),
-        ("emileberhard.Surface01", StatusCode::OK),
-        ("emileberhard.SurfaceX", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface2X", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface.2", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface-2", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface２", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface٢", StatusCode::FORBIDDEN),
-        (
-            "emileberhard.Surface2.LiveActivities",
-            StatusCode::FORBIDDEN,
-        ),
-        ("emileberhard.surface2", StatusCode::FORBIDDEN),
-        ("other.emileberhard.Surface2", StatusCode::FORBIDDEN),
-        ("emileberhard.Surface2 ", StatusCode::FORBIDDEN),
-    ] {
-        let (app, sender) = make_app(surface_transport_clients()).await;
-        let mut dispatch = surface_start_body();
-        dispatch["bundle_id"] = serde_json::json!(bundle_id);
-        for (path, body) in [
-            ("/v1/internal/live-activity/dispatch", dispatch),
-            (
-                "/v1/internal/live-activity/channels",
-                serde_json::json!({
-                    "bundle_id": bundle_id, "push_environment": "development",
-                    "operation": {"kind": "create", "message_storage_policy": 1}
-                }),
-            ),
-            (
-                "/v1/internal/live-activity/channels",
-                serde_json::json!({
-                    "bundle_id": bundle_id, "push_environment": "development",
-                    "operation": {"kind": "delete", "channel_id": "d29yay0x"}
-                }),
-            ),
-        ] {
-            let response = app
-                .clone()
-                .oneshot(json_request(
-                    path,
-                    body,
-                    Some("Bearer token-surface".to_owned()),
-                ))
-                .await
-                .unwrap();
-            assert_eq!(response.status(), expected_status, "{path}: {bundle_id}");
-        }
-        let calls = sender.activity_calls.lock().unwrap();
-        if expected_status == StatusCode::OK {
-            assert_eq!(calls.len(), 3);
-            assert!(
-                calls[0]
-                    .headers
-                    .contains(&("apns-topic", format!("{bundle_id}.push-type.liveactivity")))
-            );
-            assert!(
-                calls[1]
-                    .url
-                    .contains(&format!("/apps/{bundle_id}/channels"))
-            );
-            assert!(
-                calls[2]
-                    .url
-                    .contains(&format!("/apps/{bundle_id}/channels"))
-            );
-        } else {
-            assert!(calls.is_empty(), "{bundle_id}");
-        }
-    }
-}
-
-#[tokio::test]
-async fn lifecycle_transport_admits_start_and_preserves_unknown_without_retry() {
-    let (app, sender) = make_app(surface_transport_clients()).await;
-    *sender.activity_outcome.lock().unwrap() = ActivityTransportResponse::Unknown {
-        reason: "transport_failed_after_dispatch",
-    };
-    let response = app
-        .oneshot(json_request(
-            "/v1/internal/live-activity/dispatch",
-            surface_start_body(),
-            Some("Bearer token-surface".to_owned()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_json(response).await;
-    assert_eq!(body["outcome"], "unknown");
-    assert_eq!(body["reason"], "transport_failed_after_dispatch");
-    assert_eq!(sender.activity_calls.lock().unwrap().len(), 1);
-    assert!(sender.calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn lifecycle_transport_rejects_bad_lifecycle_before_dispatch() {
-    let (app, sender) = make_app(surface_transport_clients()).await;
-    for (key, value) in [
-        ("priority", serde_json::json!(1)),
-        ("expiration", serde_json::json!(-1)),
-    ] {
-        let mut body = surface_start_body();
-        body[key] = value;
-        let response = app
-            .clone()
-            .oneshot(json_request(
-                "/v1/internal/live-activity/dispatch",
-                body,
-                Some("Bearer token-surface".to_owned()),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-    let mut body = surface_start_body();
-    body["message"].as_object_mut().unwrap().remove("alert");
-    let response = app
-        .oneshot(json_request(
-            "/v1/internal/live-activity/dispatch",
-            body,
-            Some("Bearer token-surface".to_owned()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(sender.activity_calls.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn channel_creation_returns_apns_channel_identifier() {
-    let (app, sender) = make_app(surface_transport_clients()).await;
-    *sender.activity_outcome.lock().unwrap() = ActivityTransportResponse::Accepted {
-        apns_id: Some("request-1".to_owned()),
-        channel_id: Some("d29yay0x".to_owned()),
-    };
-    let response = app.oneshot(json_request(
-        "/v1/internal/live-activity/channels",
-        serde_json::json!({"bundle_id": "emileberhard.Surface", "push_environment": "development",
-            "operation": {"kind": "create", "message_storage_policy": 1}}),
-        Some("Bearer token-surface".to_owned()),
-    )).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response_json(response).await["channel_id"], "d29yay0x");
 }
 
 #[tokio::test]

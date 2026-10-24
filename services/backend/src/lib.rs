@@ -1,6 +1,5 @@
 #![forbid(unsafe_code)]
 
-pub mod activity_transport;
 pub mod admission;
 pub mod api;
 pub mod apns;
