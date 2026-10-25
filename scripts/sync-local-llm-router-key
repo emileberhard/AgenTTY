@@ -20,8 +20,7 @@ path = Path("AgenTTY/Resources/AgenTTYLocalSecrets.json")
 config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 origin = config.get("llmRouter", {}).get("origin")
 if not origin:
-    print("No local router origin; developer AI remains unconfigured.")
-    sys.exit(0)
+    sys.exit(f"FATAL: {os.environ['KEY_FILE']} exists, but {path} has no llmRouter.origin. Add the router origin there.")
 key = Path(os.environ["KEY_FILE"]).read_text(encoding="utf-8").strip()
 router = {
     "origin": origin,

@@ -71,6 +71,7 @@ you own and do not distribute these development builds publicly. Main builds
 exclude that resource and both compile flags.
 
 For the maintainer's existing router, `scripts/sync-local-llm-router-key` copies
-a local key if present and otherwise succeeds without AI configuration.
+a local key if present and otherwise succeeds without AI configuration. A local
+key without `llmRouter.origin` fails the build instead of shipping without AI.
 Generated screenshots and Apple device bezels are ignored; review synthetic
 artwork locally before any explicit App Store upload.
