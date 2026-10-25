@@ -4,6 +4,7 @@
 #   just ios-build-install-dev-ipad      Build + install dev app to iPad + auto-launch
 #   just ios-build-install-exp           Build + install exp app to iPhone + auto-launch (side-by-side variant)
 #   just ios-build-install-main          Build + install main app to iPhone + auto-launch (only when explicitly requested)
+#   AGENTTY_IPHONE_UDID=<udid>           Check, install and launch the iPhone recipes on exactly that iPhone
 #   just ios-build-host-dev-ota          Build dev ad-hoc IPA + host tailnet OTA link for 5 minutes
 #   just screenshots                     Capture, frame, compose, and validate App Store screenshots
 #   just ios-perf-suite [args...]        Run programmatic iPhone Instruments diagnostics suite
@@ -47,7 +48,7 @@ ghostty_commit := "48dca2e9814b64d606350d0cf4720b01bcd8c4d4"
 ghostty_version := `python3 -c 'import json; print(json.load(open("scripts/ghostty-artifact.json"))["version"])'`
 libxev_repo := env_var_or_default("AGENTTY_LIBXEV_REPO", "https://github.com/mitchellh/libxev.git")
 libxev_commit := "7bf2b2f9027a1862c7422b64cc4e53901f4f19ff"
-preferred_launch_udid := env_var_or_default("AGENTTY_PREFERRED_LAUNCH_UDID", "")
+iphone_udid := env_var_or_default("AGENTTY_IPHONE_UDID", "")
 delivery := "direct"
 build_only := "false"
 
@@ -678,7 +679,7 @@ ios-deliver-dev $app_path:
     PY
     )"
     delivery_args=(--app-path "$app_path" --expected-app-sha256 "$expected" --delivery direct --launch)
-    if [ -n "{{ preferred_launch_udid }}" ]; then delivery_args+=(--device "{{ preferred_launch_udid }}"); fi
+    if [ -n "{{ iphone_udid }}" ]; then delivery_args+=(--device "{{ iphone_udid }}"); fi
     "$HOME/configs/skills/apple-devops/scripts/ios-deliver-app" "${delivery_args[@]}"
 
 # Build + install dev app to iPhone (no xcframework rebuild)
@@ -692,8 +693,8 @@ ios-build-install-dev: _validate-ios-dev-delivery _sync-local-llm-router-key _en
         mkdir -p "$(dirname "$artifact_root")"
         build_args+=(--build-only --artifact-output "$artifact_root")
     else
-        ./scripts/ios-devicectl-app-target --check-only --preferred-udid "{{ preferred_launch_udid }}"
-        if [ -n "{{ preferred_launch_udid }}" ]; then build_args+=(--device "{{ preferred_launch_udid }}"); fi
+        ./scripts/ios-devicectl-app-target --check-only --udid "{{ iphone_udid }}"
+        if [ -n "{{ iphone_udid }}" ]; then build_args+=(--device "{{ iphone_udid }}"); fi
     fi
     install_log_raw="$(mktemp -t agentty-ios-build-install-dev.raw.XXXXXX)"
     install_log_filtered="$(mktemp -t agentty-ios-build-install-dev.filtered.XXXXXX)"
@@ -737,7 +738,7 @@ ios-build-install-dev: _validate-ios-dev-delivery _sync-local-llm-router-key _en
     device_name="$(sed -n 's/^installing to iPhone: //p' "$install_log_raw" | tail -n1)"
     launch_args=(
         --bundle-id dev.tuist.agentty.iOS.dev
-        --preferred-udid "{{ preferred_launch_udid }}"
+        --udid "{{ iphone_udid }}"
     )
     if [ -n "$device_name" ]; then
         launch_args+=(--installed-device-name "$device_name")
@@ -758,7 +759,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
             --workspace "{{ workspace }}"
             --scheme "AgenTTY-iOS"
         )
-        if [ -n "{{ preferred_launch_udid }}" ]; then install_cmd+=(--device "{{ preferred_launch_udid }}"); fi
+        if [ -n "{{ iphone_udid }}" ]; then install_cmd+=(--device "{{ iphone_udid }}"); fi
 
         if [ "$skip_build_flag" = "yes" ]; then
             install_cmd+=(--skip-build)
@@ -777,7 +778,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
         "${install_cmd[@]}"
     }
 
-    ./scripts/ios-devicectl-app-target --check-only --preferred-udid "{{ preferred_launch_udid }}"
+    ./scripts/ios-devicectl-app-target --check-only --udid "{{ iphone_udid }}"
     install_log_raw="$(mktemp -t agentty-ios-build-install-main.raw.XXXXXX)"
     install_log_filtered="$(mktemp -t agentty-ios-build-install-main.filtered.XXXXXX)"
     install_log_extra="$(mktemp -t agentty-ios-build-install-main.extra.XXXXXX)"
@@ -790,7 +791,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
         if grep -Fq "A coordinated app install already exists for [dev.tuist.agentty.iOS/" "$install_log_raw"; then
             echo "main install is blocked by an existing App Store/TestFlight copy; uninstalling it and retrying once"
             xcrun devicectl device uninstall app \
-                --device "{{ preferred_launch_udid }}" \
+                --device "{{ iphone_udid }}" \
                 dev.tuist.agentty.iOS
 
             : > "$install_log_raw"
@@ -819,7 +820,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
     device_name="$(sed -n 's/^installing to iPhone: //p' "$install_log_raw" | tail -n1)"
     launch_args=(
         --bundle-id dev.tuist.agentty.iOS
-        --preferred-udid "{{ preferred_launch_udid }}"
+        --udid "{{ iphone_udid }}"
     )
     if [ -n "$device_name" ]; then
         launch_args+=(--installed-device-name "$device_name")
@@ -882,13 +883,13 @@ ios-build-install-dev-ipad: _sync-local-llm-router-key _ensure-latest-host-runti
 ios-build-install-exp: _sync-local-llm-router-key _ensure-latest-host-runtime-published _ensure-xcframework _ensure-project _ensure-signing-keychain
     #!/bin/bash
     set -euo pipefail
-    ./scripts/ios-devicectl-app-target --check-only --preferred-udid "{{ preferred_launch_udid }}"
+    ./scripts/ios-devicectl-app-target --check-only --udid "{{ iphone_udid }}"
     install_log_raw="$(mktemp -t agentty-ios-build-install-exp.raw.XXXXXX)"
     install_log_filtered="$(mktemp -t agentty-ios-build-install-exp.filtered.XXXXXX)"
     install_log_extra="$(mktemp -t agentty-ios-build-install-exp.extra.XXXXXX)"
     trap 'rm -f "$install_log_raw" "$install_log_filtered" "$install_log_extra"' EXIT
     install_args=(--workspace "{{ workspace }}" --scheme "AgenTTY-iOS-Exp" --allow-provisioning-updates)
-    if [ -n "{{ preferred_launch_udid }}" ]; then install_args+=(--device "{{ preferred_launch_udid }}"); fi
+    if [ -n "{{ iphone_udid }}" ]; then install_args+=(--device "{{ iphone_udid }}"); fi
     set +e
     "$HOME/configs/skills/swift-development/scripts/ios-install-device" \
         "${install_args[@]}" \
@@ -915,7 +916,7 @@ ios-build-install-exp: _sync-local-llm-router-key _ensure-latest-host-runtime-pu
     device_name="$(sed -n 's/^installing to iPhone: //p' "$install_log_raw" | tail -n1)"
     launch_args=(
         --bundle-id dev.tuist.agentty.iOS.exp
-        --preferred-udid "{{ preferred_launch_udid }}"
+        --udid "{{ iphone_udid }}"
     )
     if [ -n "$device_name" ]; then
         launch_args+=(--installed-device-name "$device_name")

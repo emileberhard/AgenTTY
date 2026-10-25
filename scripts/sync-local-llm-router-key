@@ -3,24 +3,31 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+secrets="AgenTTY/Resources/AgenTTYLocalSecrets.json"
+main_secrets="$(git rev-parse --path-format=absolute --git-common-dir)/../$secrets"
+if [[ ! -e "$secrets" && -s "$main_secrets" ]]; then
+    install -m 600 "$main_secrets" "$secrets"
+    echo "Copied local secrets from the main checkout"
+fi
+
 key_file="$HOME/.config/llm-router/agentty-ios.key"
 if [[ ! -s "$key_file" ]]; then
     echo "No local router key; developer AI remains unconfigured."
     exit 0
 fi
 
-KEY_FILE="$key_file" python3 <<'PY'
+KEY_FILE="$key_file" SECRETS="$secrets" python3 <<'PY'
 import base64
 import json
 import os
 import sys
 from pathlib import Path
 
-path = Path("AgenTTY/Resources/AgenTTYLocalSecrets.json")
+path = Path(os.environ["SECRETS"])
 config = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 origin = config.get("llmRouter", {}).get("origin")
 if not origin:
-    sys.exit(f"FATAL: {os.environ['KEY_FILE']} exists, but {path} has no llmRouter.origin. Add the router origin there.")
+    sys.exit(f"FATAL: {os.environ['KEY_FILE']} exists, but {path} has no llmRouter.origin. Set it there; a worktree without the file copies the main checkout's.")
 key = Path(os.environ["KEY_FILE"]).read_text(encoding="utf-8").strip()
 router = {
     "origin": origin,

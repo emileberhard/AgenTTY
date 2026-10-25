@@ -2,7 +2,7 @@
 set -euo pipefail
 
 bundle_id=""
-preferred_udid=""
+udid=""
 installed_device_name=""
 retries="5"
 retry_delay_seconds="1"
@@ -15,7 +15,7 @@ Usage: ios-devicectl-app-target [options]
 
 Options:
   --bundle-id <bundle-id>
-  --preferred-udid <udid>
+  --udid <udid>                 (only this device)
   --installed-device-name <name>
   --retries <count>
   --retry-delay-seconds <seconds>
@@ -30,8 +30,8 @@ while (($# > 0)); do
             bundle_id="${2:-}"
             shift 2
             ;;
-        --preferred-udid)
-            preferred_udid="${2:-}"
+        --udid)
+            udid="${2:-}"
             shift 2
             ;;
         --installed-device-name)
@@ -81,12 +81,12 @@ fi
 
 resolve_candidates() {
     local json_path="$1"
-    python3 - "$json_path" "$preferred_udid" "$installed_device_name" "$device_type" <<'PY'
+    python3 - "$json_path" "$udid" "$installed_device_name" "$device_type" "$mode" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-json_path, preferred_udid, installed_device_name, device_type = sys.argv[1:]
+json_path, required_udid, installed_device_name, device_type, mode = sys.argv[1:]
 data = json.loads(Path(json_path).read_text())
 devices = data.get("result", {}).get("devices", [])
 candidates = []
@@ -104,14 +104,19 @@ for device in devices:
 
     udid = hardware.get("udid", "") or ""
     name = properties.get("name", "") or ""
-    score = 100
 
-    if preferred_udid and udid == preferred_udid:
+    if required_udid:
+        if udid.casefold() != required_udid.casefold():
+            continue
         score = 0
     elif installed_device_name and name == installed_device_name:
         score = 1
     elif installed_device_name and installed_device_name.casefold() in name.casefold():
         score = 2
+    elif mode == "launch" and installed_device_name:
+        continue
+    else:
+        score = 100
 
     candidates.append((score, name.casefold(), identifier, udid, name))
 
@@ -160,7 +165,7 @@ for ((attempt = 1; attempt <= retries; attempt++)); do
     rm -f "$devices_json"
 
     if ((${#candidates[@]} == 0)); then
-        last_error="no $device_type candidates available for install/launch"
+        last_error="no matching $device_type is connected${udid:+ (UDID $udid)}"
         if (( attempt < retries )); then
             sleep "$retry_delay_seconds"
             continue
