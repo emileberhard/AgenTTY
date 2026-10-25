@@ -693,6 +693,7 @@ ios-build-install-dev: _validate-ios-dev-delivery _sync-local-llm-router-key _en
         build_args+=(--build-only --artifact-output "$artifact_root")
     else
         ./scripts/ios-devicectl-app-target --check-only --preferred-udid "{{ preferred_launch_udid }}"
+        if [ -n "{{ preferred_launch_udid }}" ]; then build_args+=(--device "{{ preferred_launch_udid }}"); fi
     fi
     install_log_raw="$(mktemp -t agentty-ios-build-install-dev.raw.XXXXXX)"
     install_log_filtered="$(mktemp -t agentty-ios-build-install-dev.filtered.XXXXXX)"
@@ -757,6 +758,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
             --workspace "{{ workspace }}"
             --scheme "AgenTTY-iOS"
         )
+        if [ -n "{{ preferred_launch_udid }}" ]; then install_cmd+=(--device "{{ preferred_launch_udid }}"); fi
 
         if [ "$skip_build_flag" = "yes" ]; then
             install_cmd+=(--skip-build)
@@ -885,11 +887,11 @@ ios-build-install-exp: _sync-local-llm-router-key _ensure-latest-host-runtime-pu
     install_log_filtered="$(mktemp -t agentty-ios-build-install-exp.filtered.XXXXXX)"
     install_log_extra="$(mktemp -t agentty-ios-build-install-exp.extra.XXXXXX)"
     trap 'rm -f "$install_log_raw" "$install_log_filtered" "$install_log_extra"' EXIT
+    install_args=(--workspace "{{ workspace }}" --scheme "AgenTTY-iOS-Exp" --allow-provisioning-updates)
+    if [ -n "{{ preferred_launch_udid }}" ]; then install_args+=(--device "{{ preferred_launch_udid }}"); fi
     set +e
     "$HOME/configs/skills/swift-development/scripts/ios-install-device" \
-        --workspace "{{ workspace }}" \
-        --scheme "AgenTTY-iOS-Exp" \
-        --allow-provisioning-updates \
+        "${install_args[@]}" \
         -- -verbose -showBuildTimingSummary \
         2>&1 | tee "$install_log_raw" | "{{ xcode_log_filter }}" | tee "$install_log_filtered"
     install_exit=${PIPESTATUS[0]}
