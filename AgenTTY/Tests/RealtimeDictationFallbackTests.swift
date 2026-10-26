@@ -23,6 +23,25 @@ struct RealtimeDictationFallbackTests {
     }
 
     @Test
+    func relayRecoversOnlyWhenTheUploadNeverStarted() {
+        let underlying = URLError(.networkConnectionLost)
+        let relay = AgenTTYDictation.Backend.relayMAITranscribe2
+        #expect(AgenTTYRealtimeDictation.recoversWithBatch(after: RealtimeDictationError.connectionFailed(underlying), backend: relay))
+        for error in [
+            RealtimeDictationError.streamFailed(underlying),
+            .commitFailed(underlying),
+            .streamEnded,
+            .finalizationTimedOut,
+        ] {
+            #expect(!AgenTTYRealtimeDictation.recoversWithBatch(after: error, backend: relay))
+        }
+        #expect(AgenTTYRealtimeDictation.recoversWithBatch(
+            after: RealtimeDictationError.finalizationTimedOut,
+            backend: .direct(.azureMAITranscribe2)
+        ))
+    }
+
+    @Test
     func usesBatchResultWhenFinalCommitNeverCompletes() async throws {
         let dictation = RealtimeDictation(session: UnfinalizedRealtimeSession())
         dictation.append(Data(repeating: 0, count: 320))

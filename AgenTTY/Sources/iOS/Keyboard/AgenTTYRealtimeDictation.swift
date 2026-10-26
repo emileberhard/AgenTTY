@@ -23,12 +23,18 @@ nonisolated enum AgenTTYRealtimeDictation {
         customVocabulary: [String]
     ) async throws -> AgenTTYDictationOutput {
         try await transcribe(dictation: dictation, modelID: backend.libraryIdentifier) { error in
-            guard let recording else { throw error }
+            guard let recording, recoversWithBatch(after: error, backend: backend) else { throw error }
             let engine = try await AgenTTYBatchTranscription.engine(for: backend.model)
             let audio = try await recording.transcriptionAudio(maximumByteCount: engine.maximumAudioByteCount)
             let request = TranscriptionRequest(audio: audio, languageHints: languageHints, customVocabulary: customVocabulary)
             return AgenTTYDictationOutput(text: try await engine.transcribe(request).text, model: backend.batchLibraryIdentifier, kind: .providerOutput, contextWasUsed: false)
         }
+    }
+
+    static func recoversWithBatch(after error: any Error, backend: AgenTTYDictation.Backend) -> Bool {
+        guard case .relayMAITranscribe2 = backend else { return true }
+        if case RealtimeDictationError.connectionFailed(_) = error { return true }
+        return false
     }
 
     static func transcribe(
