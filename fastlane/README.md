@@ -29,7 +29,7 @@ Create AgenTTY app in App Store Connect and Developer Portal
 [bundle exec] fastlane ios metadata
 ```
 
-Upload App Store metadata and screenshots
+Upload App Store metadata, and screenshots unless skip_screenshots:true
 
 ### ios install_ios_profiles
 
