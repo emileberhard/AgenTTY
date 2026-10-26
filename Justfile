@@ -1137,6 +1137,9 @@ maintainer-testflight version run_id:
     ghp run download "{{ run_id }}" --repo "$GITHUB_REPOSITORY" --name release-candidate --dir build
     tar -xzf build/release-candidate.tar.gz -C build release-runtime
     (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
+    export BUNDLE_PATH="${BUNDLE_PATH:-$HOME/Library/Caches/agentty-fastlane-bundle}"
+    bundle _4.0.16_ install --quiet
+    bundle _4.0.16_ clean
     bundle _4.0.16_ exec fastlane ios beta version:"{{ version }}"
     ./scripts/release-notes "{{ version }}" > build/release-notes.md
     ghp release create "{{ version }}" --draft --verify-tag --title "{{ version }}" --notes-file build/release-notes.md
