@@ -1,3 +1,10 @@
+Dictation
+• Faster voice dictation: audio uploads while you speak, so your text arrives moments after you stop
+• Includes 10 minutes of dictation a month during the free trial and 120 minutes a month with lifetime access
+
+Shortcuts
+• Run SSH commands from Shortcuts, in the background or in a new shell
+
 Keyboard
 • Redesigned symbols layer that mirrors the native iOS keyboard — every shell character is now available, including : ; < > \ ` + %
 • Hide or restore the keyboard with the new floating chevron button, with a smooth native-style slide — or switch to the system keyboard in Settings
@@ -14,3 +21,4 @@ Stability
 • Fixed a crash when hiding the keyboard
 • Fixed two rare server-side tmux crashes that could close every shell at once
 • A calmer in-terminal reconnect screen while AgenTTY restores your connection
+• Security updates for third-party components, with acknowledgements in Settings
