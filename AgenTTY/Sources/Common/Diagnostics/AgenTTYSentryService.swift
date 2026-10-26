@@ -54,7 +54,9 @@ nonisolated enum AgenTTYSentryService {
         breadcrumb.message = message
         breadcrumb.category = category
         breadcrumb.level = sentryLevel(for: level)
-        breadcrumb.data = data
+        for (key, value) in data {
+            breadcrumb.setData(value: value, key: key)
+        }
         SentrySDK.addBreadcrumb(breadcrumb)
 #endif
     }
