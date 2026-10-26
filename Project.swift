@@ -130,8 +130,8 @@ let project = Project(
         .package(url: "https://github.com/apple/swift-nio.git", .exact("2.104.0")),
         .package(url: "https://github.com/emileberhard/swift-nio-ssh.git", .revision("ee3fd9f859d446c4f35ff768d9d79da864ae5e97")),
         .package(url: "https://github.com/apple/swift-crypto.git", .exact("4.5.2")),
-        .package(url: "https://github.com/getsentry/sentry-cocoa.git", .exact("9.9.0")),
-        .package(url: "https://github.com/huggingface/AnyLanguageModel.git", .exact("1.0.0")),
+        .package(url: "https://github.com/getsentry/sentry-cocoa.git", .exact("9.31.0")),
+        .package(url: "https://github.com/huggingface/AnyLanguageModel.git", .exact("1.1.0")),
         .package(url: "https://github.com/emileberhard/SpeechKit.git", .revision("d5e03d9701bb324fefc40edd42d0291ac2b618ab")),
     ],
     settings: .settings(configurations: [
