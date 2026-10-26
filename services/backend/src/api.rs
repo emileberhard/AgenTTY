@@ -58,7 +58,7 @@ const MAX_DICTATION_STREAM_BODY_BYTES: usize =
 const DICTATION_STREAM_RESERVATION_SECONDS: i64 = 30;
 const DICTATION_STREAM_IDLE: Duration = Duration::from_secs(30);
 const DICTATION_STREAM_DEADLINE: Duration = Duration::from_secs(15 * 60);
-const DICTATION_UPSTREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const DICTATION_UPSTREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(45);
 const MAX_DICTATION_DEFINITION_BYTES: usize = 8 * 1024;
 const CONNECTOR_CONTROL_PROBE_HEADER: &str = "x-agentty-probe";
 const CONNECTOR_CONTROL_PROBE_VALUE: &str = "connector-control";
@@ -1668,7 +1668,12 @@ async fn relay_dictation_stream(
         Ok(()) => tokio::time::timeout(DICTATION_UPSTREAM_RESPONSE_TIMEOUT, &mut upstream.0)
             .await
             .ok(),
-        Err(FeedError::UpstreamClosed) => Some((&mut upstream.0).await),
+        Err(FeedError::UpstreamClosed) => {
+            tokio::time::timeout(DICTATION_UPSTREAM_RESPONSE_TIMEOUT, &mut upstream.0)
+                .await
+                .ok()
+        }
+        Err(FeedError::UpstreamStalled) => None,
         Err(FeedError::Rejected(rejection)) => {
             upstream.0.abort();
             tracing::warn!(
@@ -1719,6 +1724,7 @@ async fn relay_dictation_stream(
 enum FeedError {
     Rejected(StreamRejection),
     UpstreamClosed,
+    UpstreamStalled,
 }
 
 impl From<StreamRejection> for FeedError {
@@ -1745,10 +1751,7 @@ async fn feed_dictation_audio(
             },
         };
         meter.admit(chunk.len()).await?;
-        sender
-            .send(StreamChunk::Audio(chunk))
-            .await
-            .map_err(|_| FeedError::UpstreamClosed)?;
+        send_upstream(sender, StreamChunk::Audio(chunk), deadline).await?;
     }
     let complete = meter.audio_bytes > 0
         && meter.audio_bytes.is_multiple_of(2)
@@ -1776,10 +1779,20 @@ async fn finish_dictation_upload(
     {
         return Err(StreamRejection::InvalidRequest.into());
     }
-    sender
-        .send(StreamChunk::End)
-        .await
-        .map_err(|_| FeedError::UpstreamClosed)
+    send_upstream(sender, StreamChunk::End, deadline).await
+}
+
+async fn send_upstream(
+    sender: &mpsc::Sender<StreamChunk>,
+    chunk: StreamChunk,
+    deadline: tokio::time::Instant,
+) -> Result<(), FeedError> {
+    let idle = (tokio::time::Instant::now() + DICTATION_STREAM_IDLE).min(deadline);
+    match tokio::time::timeout_at(idle, sender.send(chunk)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(FeedError::UpstreamClosed),
+        Err(_) => Err(FeedError::UpstreamStalled),
+    }
 }
 
 async fn next_stream_field<'a>(
