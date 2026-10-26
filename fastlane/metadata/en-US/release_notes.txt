@@ -6,7 +6,7 @@ Shortcuts
 • Run SSH commands from Shortcuts, in the background or in a new shell
 
 Keyboard
-• Redesigned symbols layer that mirrors the native iOS keyboard — every shell character is now available, including : ; < > \ ` + %
+• Redesigned symbols layer that mirrors the native iOS keyboard — every shell character is now available, including colons, angle brackets, backslash, backtick, plus and percent
 • Hide or restore the keyboard with the new floating chevron button, with a smooth native-style slide — or switch to the system keyboard in Settings
 • Hardware keyboards now work on iPhone
 
