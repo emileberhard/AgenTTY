@@ -11,7 +11,9 @@ use subtle::ConstantTimeEq;
 use tokio_rusqlite::Connection;
 
 use crate::config::DictationLimits;
-use crate::dictation::{DictationQuotaExceeded, DictationQuotaReservation};
+use crate::dictation::{
+    DictationGrant, DictationQuotaExceeded, DictationSubject, DictationTier, DictationWindows,
+};
 use crate::models::{
     AnalyticsAccessStatePayload, AnalyticsEventType, ConnectorAuthRecord,
     ConnectorBootstrapPayload, ConnectorRegistrationRecord, DeviceRecord, PairingCompletionPayload,
@@ -321,6 +323,7 @@ impl Database {
                     &[
                         ("scope", "TEXT NOT NULL DEFAULT 'legacy'"),
                         ("dictation_identity", "TEXT"),
+                        ("dictation_tier", "TEXT"),
                     ],
                 )
             })
@@ -656,8 +659,9 @@ impl Database {
         device_id: String,
         device_secret: String,
         scope: String,
-        dictation_identity: Option<String>,
+        dictation: Option<(String, DictationTier)>,
     ) -> Result<Option<RelaySessionResponse>> {
+        let (dictation_identity, dictation_tier) = dictation.unzip();
         let device_id = normalize_device_id(&device_id);
         let device_secret_hash = hash_text(&device_secret);
         let now = current_epoch_seconds();
@@ -674,7 +678,8 @@ impl Database {
 
                     let expires_at = now + if scope == "dictation" { 60 * 60 } else { RELAY_SESSION_TTL_SECONDS };
                     connection.execute("DELETE FROM relay_sessions WHERE relay_token_hash IN (SELECT relay_token_hash FROM relay_sessions WHERE device_id = ? ORDER BY created_at_epoch_seconds DESC, rowid DESC LIMIT -1 OFFSET 511)", params![&device_id])?;
-                    let relay_session = RelaySessionResponse::new(expires_at);
+                    let mut relay_session = RelaySessionResponse::new(expires_at);
+                    relay_session.dictation_tier = dictation_tier.map(DictationTier::as_str);
                     let relay_token_hash = hash_text(&relay_session.relay_token);
 
                     connection.execute(
@@ -683,11 +688,11 @@ impl Database {
                             relay_token_hash,
                             device_id,
                             expires_at_epoch_seconds,
-                            created_at_epoch_seconds, scope, dictation_identity
+                            created_at_epoch_seconds, scope, dictation_identity, dictation_tier
                         )
-                        VALUES (?, ?, ?, ?, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
                         "#,
-                        params![relay_token_hash, device_id, expires_at, now, scope, dictation_identity],
+                        params![relay_token_hash, device_id, expires_at, now, scope, dictation_identity, relay_session.dictation_tier],
                     )?;
 
                     Ok(Some(relay_session))
@@ -1695,12 +1700,17 @@ impl Database {
     pub async fn dictation_authorization(
         &self,
         token: String,
-    ) -> Result<Option<(DeviceRecord, Option<String>)>> {
+    ) -> Result<Option<(DeviceRecord, Option<(String, DictationTier)>)>> {
         let token_hash = hash_text(&token);
         let now = current_epoch_seconds();
         self.connection.call(move |connection| {
-            connection.query_row("SELECT d.device_id, d.apns_token, d.bundle_id, d.push_environment, s.dictation_identity FROM relay_sessions s JOIN devices d ON d.device_id = s.device_id WHERE s.relay_token_hash = ? AND s.expires_at_epoch_seconds > ? AND s.scope IN ('legacy', 'dictation')", params![token_hash, now], |row| {
-                Ok((DeviceRecord { device_id: row.get(0)?, apns_token: row.get(1)?, bundle_id: row.get(2)?, push_environment: parse_environment_column(&row.get::<_, String>(3)?)? }, row.get(4)?))
+            connection.query_row("SELECT d.device_id, d.apns_token, d.bundle_id, d.push_environment, s.dictation_identity, s.dictation_tier FROM relay_sessions s JOIN devices d ON d.device_id = s.device_id WHERE s.relay_token_hash = ? AND s.expires_at_epoch_seconds > ? AND s.scope IN ('legacy', 'dictation')", params![token_hash, now], |row| {
+                let identity: Option<String> = row.get(4)?;
+                let tier: Option<String> = row.get(5)?;
+                Ok((
+                    DeviceRecord { device_id: row.get(0)?, apns_token: row.get(1)?, bundle_id: row.get(2)?, push_environment: parse_environment_column(&row.get::<_, String>(3)?)? },
+                    identity.map(|identity| (identity, DictationTier::from_stored(tier.as_deref()))),
+                ))
             }).optional()
         }).await.context("failed to authenticate dictation token")
     }
@@ -1970,63 +1980,89 @@ impl Database {
             .context("failed to mark analytics issue alert as sent")
     }
 
-    pub async fn reserve_admitted_dictation(
+    pub async fn reserve_dictation(
         &self,
-        device_id: String,
-        identity: Option<String>,
+        subject: DictationSubject,
         limits: DictationLimits,
-        week: i64,
-        seconds: i64,
-        resets: i64,
-    ) -> Result<Result<DictationQuotaReservation, DictationQuotaExceeded>> {
-        anyhow::ensure!(seconds > 0 && seconds <= 1800, "invalid dictation charge");
-        let device_id = normalize_device_id(&device_id);
+        windows: DictationWindows,
+        minimum_seconds: i64,
+        preferred_seconds: i64,
+    ) -> Result<Result<DictationGrant, DictationQuotaExceeded>> {
+        anyhow::ensure!(
+            0 < minimum_seconds
+                && minimum_seconds <= preferred_seconds
+                && preferred_seconds <= 1800,
+            "invalid dictation charge"
+        );
         let now = current_epoch_seconds();
-        self.connection.call(move |connection| -> rusqlite::Result<Result<DictationQuotaReservation, DictationQuotaExceeded>> {
+        self.connection.call(move |connection| -> rusqlite::Result<Result<DictationGrant, DictationQuotaExceeded>> {
             let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-            let (used, legacy): (i64, i64) = tx.query_row("SELECT used_seconds, legacy_seconds FROM dictation_operator_usage WHERE week_start_epoch_seconds = ?", params![week], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.unwrap_or((0,0));
-            let day = now / 86400;
-            let daily_used: i64 = tx.query_row("SELECT used_seconds FROM dictation_operator_daily WHERE day = ?", params![day], |row| row.get(0)).optional()?.unwrap_or(0);
-            let legacy_request = identity.is_none();
-            if daily_used + seconds > limits.daily_seconds || used + seconds > limits.weekly_seconds || (legacy_request && (limits.require_verified_devices || legacy + seconds > limits.legacy_weekly_seconds)) {
-                return Ok(Err(DictationQuotaExceeded { remaining_seconds: 0, quota_resets_at_epoch_seconds: resets, operator_limit: true }));
+            let (weekly_used, legacy_used): (i64, i64) = tx.query_row("SELECT used_seconds, legacy_seconds FROM dictation_operator_usage WHERE week_start_epoch_seconds = ?", params![windows.week_start], |row| Ok((row.get(0)?, row.get(1)?))).optional()?.unwrap_or((0, 0));
+            let daily_used: i64 = tx.query_row("SELECT used_seconds FROM dictation_operator_daily WHERE day = ?", params![windows.day], |row| row.get(0)).optional()?.unwrap_or(0);
+            let legacy = matches!(subject, DictationSubject::LegacyDevice(_));
+            let mut operator_available = (limits.daily_seconds - daily_used).min(limits.weekly_seconds - weekly_used);
+            if legacy {
+                operator_available = if limits.require_verified_devices { 0 } else { operator_available.min(limits.legacy_weekly_seconds - legacy_used) };
             }
-            let subject_used: i64 = if let Some(subject) = &identity {
-                tx.query_row("SELECT used_seconds FROM dictation_identity_usage WHERE identity_hash = ? AND week_start_epoch_seconds = ?", params![subject, week], |row| row.get(0)).optional()?.unwrap_or(0)
-            } else {
-                tx.query_row("SELECT used_seconds FROM dictation_usage_weekly WHERE device_id = ? AND week_start_epoch_seconds = ?", params![&device_id, week], |row| row.get(0)).optional()?.unwrap_or(0)
+            let (subject_available, resets) = match &subject {
+                DictationSubject::Ledger { hash, monthly_seconds } => {
+                    let used: i64 = tx.query_row("SELECT used_seconds FROM dictation_monthly_usage WHERE subject_hash = ? AND month_start_epoch_seconds = ?", params![hash, windows.month_start], |row| row.get(0)).optional()?.unwrap_or(0);
+                    (monthly_seconds - used, windows.next_month_start)
+                }
+                DictationSubject::LegacyDevice(device_id) => {
+                    let used: i64 = tx.query_row("SELECT used_seconds FROM dictation_usage_weekly WHERE device_id = ? AND week_start_epoch_seconds = ?", params![normalize_device_id(device_id), windows.week_start], |row| row.get(0)).optional()?.unwrap_or(0);
+                    (DICTATION_WEEKLY_LIMIT_SECONDS - used, windows.week_resets_at())
+                }
             };
-            if subject_used + seconds > DICTATION_WEEKLY_LIMIT_SECONDS {
-                return Ok(Err(DictationQuotaExceeded { remaining_seconds: (DICTATION_WEEKLY_LIMIT_SECONDS - subject_used).max(0), quota_resets_at_epoch_seconds: resets, operator_limit: false }));
+            if subject_available < minimum_seconds || operator_available < minimum_seconds {
+                return Ok(Err(DictationQuotaExceeded { operator_limit: subject_available >= minimum_seconds, remaining_seconds: subject_available.max(0), quota_resets_at_epoch_seconds: resets }));
             }
-            if let Some(subject) = identity {
-                tx.execute("INSERT INTO dictation_identity_usage VALUES (?, ?, ?) ON CONFLICT(identity_hash, week_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds", params![subject, week, seconds])?;
-            } else {
-                tx.execute("INSERT INTO dictation_usage_weekly VALUES (?, ?, ?, ?, ?) ON CONFLICT(device_id, week_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds, updated_at_epoch_seconds = excluded.updated_at_epoch_seconds", params![&device_id, week, seconds, now, now])?;
+            let seconds = preferred_seconds.min(subject_available).min(operator_available);
+            match &subject {
+                DictationSubject::Ledger { hash, .. } => {
+                    tx.execute("INSERT INTO dictation_monthly_usage VALUES (?, ?, ?) ON CONFLICT(subject_hash, month_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds", params![hash, windows.month_start, seconds])?;
+                    tx.execute("DELETE FROM dictation_monthly_usage WHERE month_start_epoch_seconds < ?", params![windows.month_start - 400 * 86_400])?;
+                }
+                DictationSubject::LegacyDevice(device_id) => {
+                    tx.execute("INSERT INTO dictation_usage_weekly VALUES (?, ?, ?, ?, ?) ON CONFLICT(device_id, week_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds, updated_at_epoch_seconds = excluded.updated_at_epoch_seconds", params![normalize_device_id(device_id), windows.week_start, seconds, now, now])?;
+                }
             }
-            tx.execute("INSERT INTO dictation_operator_usage VALUES (?, ?, ?) ON CONFLICT(week_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds, legacy_seconds = legacy_seconds + excluded.legacy_seconds", params![week, seconds, if legacy_request { seconds } else { 0 }])?;
-            tx.execute("INSERT INTO dictation_operator_daily VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds", params![day, seconds])?;
-            tx.execute("DELETE FROM dictation_operator_daily WHERE day < ?", params![day - 8])?;
+            tx.execute("INSERT INTO dictation_operator_usage VALUES (?, ?, ?) ON CONFLICT(week_start_epoch_seconds) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds, legacy_seconds = legacy_seconds + excluded.legacy_seconds", params![windows.week_start, seconds, if legacy { seconds } else { 0 }])?;
+            tx.execute("INSERT INTO dictation_operator_daily VALUES (?, ?) ON CONFLICT(day) DO UPDATE SET used_seconds = used_seconds + excluded.used_seconds", params![windows.day, seconds])?;
+            tx.execute("DELETE FROM dictation_operator_daily WHERE day < ?", params![windows.day - 8])?;
             tx.commit()?;
-            Ok(Ok(DictationQuotaReservation { week_start_epoch_seconds: week, quota_resets_at_epoch_seconds: resets, charged_seconds: seconds, remaining_seconds_after_charge: DICTATION_WEEKLY_LIMIT_SECONDS - subject_used - seconds }))
-        }).await.context("failed to reserve admitted dictation")
+            Ok(Ok(DictationGrant { seconds, remaining_seconds: subject_available - seconds, resets_at_epoch_seconds: resets }))
+        }).await.context("failed to reserve dictation")
     }
 
-    pub async fn release_admitted_dictation(
+    pub async fn release_dictation(
         &self,
-        device_id: String,
-        identity: Option<String>,
-        week: i64,
-        seconds: i64,
+        subject: DictationSubject,
+        windows: DictationWindows,
+        personal_seconds: i64,
+        operator_seconds: i64,
     ) -> Result<()> {
-        if let Some(identity) = identity {
-            self.connection.call(move |connection| -> rusqlite::Result<()> {
-                connection.execute("UPDATE dictation_identity_usage SET used_seconds = MAX(0, used_seconds - ?) WHERE identity_hash = ? AND week_start_epoch_seconds = ?", params![seconds, identity, week])?;
-                Ok(())
-            }).await.context("failed to release identity quota")
-        } else {
-            self.release_dictation_quota(device_id, week, seconds).await
-        }
+        anyhow::ensure!(
+            personal_seconds >= 0 && operator_seconds >= 0,
+            "invalid dictation release"
+        );
+        let now = current_epoch_seconds();
+        self.connection.call(move |connection| -> rusqlite::Result<()> {
+            let tx = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let legacy = match &subject {
+                DictationSubject::Ledger { hash, .. } => {
+                    tx.execute("UPDATE dictation_monthly_usage SET used_seconds = MAX(0, used_seconds - ?) WHERE subject_hash = ? AND month_start_epoch_seconds = ?", params![personal_seconds, hash, windows.month_start])?;
+                    false
+                }
+                DictationSubject::LegacyDevice(device_id) => {
+                    tx.execute("UPDATE dictation_usage_weekly SET used_seconds = MAX(0, used_seconds - ?), updated_at_epoch_seconds = ? WHERE device_id = ? AND week_start_epoch_seconds = ?", params![personal_seconds, now, normalize_device_id(device_id), windows.week_start])?;
+                    true
+                }
+            };
+            tx.execute("UPDATE dictation_operator_usage SET used_seconds = MAX(0, used_seconds - ?1), legacy_seconds = MAX(0, legacy_seconds - ?2) WHERE week_start_epoch_seconds = ?3", params![operator_seconds, if legacy { operator_seconds } else { 0 }, windows.week_start])?;
+            tx.execute("UPDATE dictation_operator_daily SET used_seconds = MAX(0, used_seconds - ?) WHERE day = ?", params![operator_seconds, windows.day])?;
+            tx.commit()
+        }).await.context("failed to release dictation")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2408,34 +2444,6 @@ impl Database {
             })
             .await
             .context("failed to record analytics ingest failure")
-    }
-
-    async fn release_dictation_quota(
-        &self,
-        device_id: String,
-        week_start_epoch_seconds: i64,
-        charged_seconds: i64,
-    ) -> Result<()> {
-        let device_id = normalize_device_id(&device_id);
-        let now = current_epoch_seconds();
-
-        self.connection
-            .call(move |connection| -> rusqlite::Result<()> {
-                connection.execute(
-                    r#"
-                    UPDATE dictation_usage_weekly
-                    SET used_seconds = MAX(0, used_seconds - ?),
-                        updated_at_epoch_seconds = ?
-                    WHERE device_id = ? AND week_start_epoch_seconds = ?
-                    "#,
-                    params![charged_seconds, now, device_id, week_start_epoch_seconds],
-                )?;
-                Ok(())
-            })
-            .await
-            .context("failed to release dictation quota")?;
-
-        Ok(())
     }
 }
 
@@ -2917,11 +2925,11 @@ fn ensure_dictation_usage_schema(connection: &rusqlite::Connection) -> rusqlite:
             FOREIGN KEY(device_id) REFERENCES devices(device_id)
         );
 
-        CREATE TABLE IF NOT EXISTS dictation_identity_usage (
-            identity_hash TEXT NOT NULL,
-            week_start_epoch_seconds INTEGER NOT NULL,
+        CREATE TABLE IF NOT EXISTS dictation_monthly_usage (
+            subject_hash TEXT NOT NULL,
+            month_start_epoch_seconds INTEGER NOT NULL,
             used_seconds INTEGER NOT NULL CHECK(used_seconds >= 0),
-            PRIMARY KEY(identity_hash, week_start_epoch_seconds)
+            PRIMARY KEY(subject_hash, month_start_epoch_seconds)
         );
         CREATE TABLE IF NOT EXISTS dictation_operator_daily (
             day INTEGER PRIMARY KEY,

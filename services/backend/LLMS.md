@@ -35,7 +35,8 @@ traffic to it.
 - `AGENTTY_BACKEND_APNS_KEY_PATH`
 - `AGENTTY_BACKEND_APNS_KEY_ID`
 - `AGENTTY_BACKEND_APNS_TEAM_ID`
-- `AGENTTY_BACKEND_OPENAI_BASE_URL` (llm-router origin + `/v1`)
-- `AGENTTY_BACKEND_OPENAI_API_KEY` (llm-router key, principal `agentty`)
+- `AGENTTY_BACKEND_LLM_ROUTER_URL` (llm-router origin)
+- `AGENTTY_BACKEND_LLM_ROUTER_KEY` (llm-router inference key, principal `agentty`)
+- `AGENTTY_BACKEND_LIFETIME_PRODUCT_ID` (lifetime dictation tier; unset admits nobody)
 - `AGENTTY_BACKEND_REMOTECODER_TOKEN`
 - `AGENTTY_BACKEND_PINGBOOKS_TOKEN`

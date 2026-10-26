@@ -17,8 +17,8 @@ pub struct Settings {
     pub apns_key_path: PathBuf,
     pub apns_key_id: String,
     pub apns_team_id: String,
-    pub openai_base_url: String,
-    pub openai_api_key: String,
+    pub llm_router_url: String,
+    pub llm_router_key: String,
     pub public_base_url: String,
     pub internal_clients: Vec<InternalClientSettings>,
     pub analytics_alerts: AnalyticsAlertSettings,
@@ -38,14 +38,17 @@ pub struct DictationLimits {
     pub trusted_devices: Vec<(String, String)>,
     pub relay_daily_bytes: i64,
     pub relay_device_daily_bytes: i64,
+    pub free_monthly_seconds: i64,
+    pub lifetime_monthly_seconds: i64,
+    pub lifetime_product_id: Option<String>,
 }
 
 impl Default for DictationLimits {
     fn default() -> Self {
         Self {
             app_apple_id: 0,
-            weekly_seconds: 14_400,
-            daily_seconds: 3_600,
+            weekly_seconds: 86_400,
+            daily_seconds: 21_600,
             legacy_weekly_seconds: 3_600,
             require_verified_devices: false,
             require_host_adoption_proof: false,
@@ -54,6 +57,9 @@ impl Default for DictationLimits {
             trusted_devices: Vec::new(),
             relay_daily_bytes: 1024 * 1024 * 1024,
             relay_device_daily_bytes: 128 * 1024 * 1024,
+            free_monthly_seconds: 600,
+            lifetime_monthly_seconds: 7_200,
+            lifetime_product_id: None,
         }
     }
 }
@@ -158,11 +164,11 @@ impl Settings {
             "AGENTTY_BACKEND_APNS_TEAM_ID",
             "AGENTTY_NOTIFY_RELAY_APNS_TEAM_ID",
         ])?;
-        let openai_base_url = normalize_http_base_url(
-            "AGENTTY_BACKEND_OPENAI_BASE_URL",
-            &required_env_string_aliases(&["AGENTTY_BACKEND_OPENAI_BASE_URL"])?,
+        let llm_router_url = normalize_http_base_url(
+            "AGENTTY_BACKEND_LLM_ROUTER_URL",
+            &required_env_string_aliases(&["AGENTTY_BACKEND_LLM_ROUTER_URL"])?,
         )?;
-        let openai_api_key = required_env_string_aliases(&["AGENTTY_BACKEND_OPENAI_API_KEY"])?;
+        let llm_router_key = required_env_string_aliases(&["AGENTTY_BACKEND_LLM_ROUTER_KEY"])?;
         let public_base_url = optional_env_string_aliases(&[
             "AGENTTY_BACKEND_PUBLIC_BASE_URL",
             "AGENTTY_NOTIFY_RELAY_PUBLIC_BASE_URL",
@@ -273,6 +279,15 @@ impl Settings {
                 "AGENTTY_BACKEND_DICTATION_CONCURRENCY",
                 defaults.concurrency,
             )?,
+            free_monthly_seconds: env_number(
+                "AGENTTY_BACKEND_DICTATION_FREE_MONTHLY_SECONDS",
+                defaults.free_monthly_seconds,
+            )?,
+            lifetime_monthly_seconds: env_number(
+                "AGENTTY_BACKEND_DICTATION_LIFETIME_MONTHLY_SECONDS",
+                defaults.lifetime_monthly_seconds,
+            )?,
+            lifetime_product_id: optional_env_string("AGENTTY_BACKEND_LIFETIME_PRODUCT_ID"),
         };
         if dictation_limits.daily_seconds <= 0
             || dictation_limits.weekly_seconds <= 0
@@ -282,6 +297,8 @@ impl Settings {
             || dictation_limits.relay_daily_bytes <= 0
             || dictation_limits.relay_device_daily_bytes <= 0
             || dictation_limits.trusted_devices.len() > 128
+            || dictation_limits.free_monthly_seconds < 0
+            || dictation_limits.lifetime_monthly_seconds < dictation_limits.free_monthly_seconds
         {
             bail!("invalid dictation limits");
         }
@@ -292,8 +309,8 @@ impl Settings {
             apns_key_path,
             apns_key_id,
             apns_team_id,
-            openai_base_url,
-            openai_api_key,
+            llm_router_url,
+            llm_router_key,
             public_base_url,
             internal_clients,
             analytics_alerts,

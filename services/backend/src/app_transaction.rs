@@ -12,7 +12,7 @@ use openssl::{
         verify::{X509VerifyFlags, X509VerifyParam},
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use x509_parser::prelude::{FromDer, X509Certificate};
 
 use crate::{models::MAIN_BUNDLE_ID, storage::hash_text};
@@ -27,13 +27,129 @@ struct AppTransaction {
     receipt_creation_date: i64,
 }
 
-pub fn verify(signed: &str, app_apple_id: u64) -> Result<String> {
-    ensure!(signed.len() <= 24 * 1024, "app transaction exceeds limit");
-    let root = X509::from_der(include_bytes!("../resources/AppleRootCA-G3.cer"))?;
-    verify_with_root(signed, app_apple_id, root)
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Transaction {
+    original_transaction_id: String,
+    bundle_id: String,
+    product_id: String,
+    #[serde(rename = "type")]
+    kind: String,
+    environment: String,
+    signed_date: i64,
+    revocation_date: Option<i64>,
+    app_transaction_id: Option<String>,
 }
 
-fn verify_with_root(signed: &str, app_apple_id: u64, root: X509) -> Result<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedAppTransaction {
+    pub identity: String,
+    environment: String,
+    app_transaction_id: String,
+}
+
+pub fn verify(signed: &str, app_apple_id: u64) -> Result<VerifiedAppTransaction> {
+    verify_app_transaction(signed, app_apple_id, apple_root()?)
+}
+
+pub fn verify_lifetime_purchase(
+    signed: &str,
+    app: &VerifiedAppTransaction,
+    product_id: &str,
+) -> Result<String> {
+    verify_lifetime_purchase_with_root(signed, app, product_id, apple_root()?)
+}
+
+fn apple_root() -> Result<X509> {
+    Ok(X509::from_der(include_bytes!(
+        "../resources/AppleRootCA-G3.cer"
+    ))?)
+}
+
+fn verify_app_transaction(
+    signed: &str,
+    app_apple_id: u64,
+    root: X509,
+) -> Result<VerifiedAppTransaction> {
+    let transaction: AppTransaction =
+        verify_apple_signed(signed, root, |payload: &AppTransaction| {
+            payload.receipt_creation_date
+        })?;
+    ensure!(
+        transaction.bundle_id == MAIN_BUNDLE_ID,
+        "incorrect app bundle"
+    );
+    ensure!(
+        matches!(transaction.receipt_type.as_str(), "Production" | "Sandbox"),
+        "unsupported store environment"
+    );
+    ensure!(
+        transaction
+            .app_apple_id
+            .map_or(transaction.receipt_type == "Sandbox", |id| id
+                == app_apple_id),
+        "incorrect App Store app ID"
+    );
+    ensure!(
+        !transaction.app_transaction_id.is_empty() && transaction.app_transaction_id.len() <= 256,
+        "invalid app transaction ID"
+    );
+    Ok(VerifiedAppTransaction {
+        identity: hash_text(&format!(
+            "{}:{}",
+            transaction.receipt_type, transaction.app_transaction_id
+        )),
+        environment: transaction.receipt_type,
+        app_transaction_id: transaction.app_transaction_id,
+    })
+}
+
+fn verify_lifetime_purchase_with_root(
+    signed: &str,
+    app: &VerifiedAppTransaction,
+    product_id: &str,
+    root: X509,
+) -> Result<String> {
+    let transaction: Transaction =
+        verify_apple_signed(signed, root, |payload: &Transaction| payload.signed_date)?;
+    ensure!(
+        transaction.bundle_id == MAIN_BUNDLE_ID
+            && transaction.product_id == product_id
+            && transaction.kind == "Non-Consumable",
+        "not the lifetime purchase"
+    );
+    ensure!(
+        transaction.environment == app.environment,
+        "purchase environment differs from the app transaction"
+    );
+    ensure!(
+        transaction.revocation_date.is_none(),
+        "lifetime purchase was revoked"
+    );
+    ensure!(
+        transaction
+            .app_transaction_id
+            .as_ref()
+            .is_none_or(|id| *id == app.app_transaction_id),
+        "purchase belongs to another app transaction"
+    );
+    ensure!(
+        !transaction.original_transaction_id.is_empty()
+            && transaction.original_transaction_id.len() <= 64,
+        "invalid original transaction ID"
+    );
+    Ok(hash_text(&format!(
+        "purchase:{}:{}",
+        transaction.environment, transaction.original_transaction_id
+    )))
+}
+
+fn verify_apple_signed<T: DeserializeOwned>(
+    signed: &str,
+    root: X509,
+    signed_at_milliseconds: impl Fn(&T) -> i64,
+) -> Result<T> {
+    ensure!(signed.len() <= 24 * 1024, "signed payload exceeds limit");
     let header = decode_header(signed)?;
     ensure!(
         header.alg == Algorithm::ES256,
@@ -63,14 +179,14 @@ fn verify_with_root(signed: &str, app_apple_id: u64, root: X509) -> Result<Strin
     let leaf = X509::from_der(&leaf_der)?;
     let intermediate = X509::from_der(&intermediate_der)?;
     let payload = signed.split('.').nth(1).context("missing signed payload")?;
-    let unverified: AppTransaction = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
+    let unverified: T = serde_json::from_slice(&URL_SAFE_NO_PAD.decode(payload)?)?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs() as i64;
-    let signed_at = unverified.receipt_creation_date / 1000;
+    let signed_at = signed_at_milliseconds(&unverified) / 1000;
     ensure!(
         signed_at > 0 && signed_at <= now + 60,
-        "invalid receipt creation time"
+        "invalid signing time"
     );
     let mut store = X509StoreBuilder::new()?;
     store.add_cert(root)?;
@@ -89,30 +205,7 @@ fn verify_with_root(signed: &str, app_apple_id: u64, root: X509) -> Result<Strin
     validation.validate_exp = false;
     validation.validate_aud = false;
     let key = DecodingKey::from_ec_pem(&leaf.public_key()?.public_key_to_pem()?)?;
-    let transaction = decode::<AppTransaction>(signed, &key, &validation)?.claims;
-    ensure!(
-        transaction.bundle_id == MAIN_BUNDLE_ID,
-        "incorrect app bundle"
-    );
-    ensure!(
-        matches!(transaction.receipt_type.as_str(), "Production" | "Sandbox"),
-        "unsupported store environment"
-    );
-    ensure!(
-        transaction
-            .app_apple_id
-            .map_or(transaction.receipt_type == "Sandbox", |id| id
-                == app_apple_id),
-        "incorrect App Store app ID"
-    );
-    ensure!(
-        !transaction.app_transaction_id.is_empty() && transaction.app_transaction_id.len() <= 256,
-        "invalid app transaction ID"
-    );
-    Ok(hash_text(&format!(
-        "{}:{}",
-        transaction.receipt_type, transaction.app_transaction_id
-    )))
+    Ok(decode::<T>(signed, &key, &validation)?.claims)
 }
 
 #[cfg(test)]
@@ -233,24 +326,93 @@ mod tests {
         let sign =
             |payload: &serde_json::Value| jsonwebtoken::encode(&header, payload, &key).unwrap();
         let valid = sign(&payload);
-        let identity = verify_with_root(&valid, 42, root.clone()).unwrap();
-        assert_eq!(identity, hash_text("Production:account-1"));
-        assert!(verify_with_root(&valid, 43, root.clone()).is_err());
+        let identity = verify_app_transaction(&valid, 42, root.clone()).unwrap();
+        assert_eq!(identity.identity, hash_text("Production:account-1"));
+        assert!(verify_app_transaction(&valid, 43, root.clone()).is_err());
         let mut other_bundle = payload.clone();
         other_bundle["bundleId"] = serde_json::json!("other.app");
-        assert!(verify_with_root(&sign(&other_bundle), 42, root.clone()).is_err());
+        assert!(verify_app_transaction(&sign(&other_bundle), 42, root.clone()).is_err());
         let mut sandbox = payload.clone();
         sandbox["receiptType"] = serde_json::json!("Sandbox");
         sandbox.as_object_mut().unwrap().remove("appAppleId");
-        assert!(verify_with_root(&sign(&sandbox), 42, root.clone()).is_ok());
+        assert!(verify_app_transaction(&sign(&sandbox), 42, root.clone()).is_ok());
         let mut unsigned_environment = payload.clone();
         unsigned_environment["receiptType"] = serde_json::json!("Xcode");
-        assert!(verify_with_root(&sign(&unsigned_environment), 42, root.clone()).is_err());
+        assert!(verify_app_transaction(&sign(&unsigned_environment), 42, root.clone()).is_err());
         let mut segments: Vec<String> = valid.split('.').map(str::to_owned).collect();
         segments[1] = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&other_bundle).unwrap());
-        assert!(verify_with_root(&segments.join("."), 42, root.clone()).is_err());
+        assert!(verify_app_transaction(&segments.join("."), 42, root.clone()).is_err());
         let (untrusted_root, _) = certificate(None, true, None, 10);
-        assert!(verify_with_root(&valid, 42, untrusted_root).is_err());
+        assert!(verify_app_transaction(&valid, 42, untrusted_root).is_err());
         assert!(verify(&valid, 42).is_err());
+    }
+
+    #[test]
+    fn lifetime_tier_requires_this_apps_unrevoked_purchase() {
+        let (root, root_key) = certificate(None, true, None, 1);
+        let (intermediate, intermediate_key) = certificate(
+            Some((&root, &root_key)),
+            true,
+            Some("1.2.840.113635.100.6.2.1"),
+            2,
+        );
+        let (leaf, leaf_key) = certificate(
+            Some((&intermediate, &intermediate_key)),
+            false,
+            Some("1.2.840.113635.100.6.11.1"),
+            3,
+        );
+        let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
+        header.x5c = Some(vec![
+            STANDARD.encode(leaf.to_der().unwrap()),
+            STANDARD.encode(intermediate.to_der().unwrap()),
+            STANDARD.encode(root.to_der().unwrap()),
+        ]);
+        let key =
+            jsonwebtoken::EncodingKey::from_ec_pem(&leaf_key.private_key_to_pem_pkcs8().unwrap())
+                .unwrap();
+        let sign =
+            |payload: &serde_json::Value| jsonwebtoken::encode(&header, payload, &key).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let app = verify_app_transaction(
+            &sign(&serde_json::json!({"appTransactionId":"account-1", "bundleId":MAIN_BUNDLE_ID, "appAppleId":42, "receiptType":"Production", "receiptCreationDate":now})),
+            42,
+            root.clone(),
+        )
+        .unwrap();
+        let purchase = serde_json::json!({"originalTransactionId":"1000", "bundleId":MAIN_BUNDLE_ID, "productId":"lifetime", "type":"Non-Consumable", "environment":"Production", "signedDate":now, "appTransactionId":"account-1"});
+        let verify = |payload: &serde_json::Value| {
+            verify_lifetime_purchase_with_root(&sign(payload), &app, "lifetime", root.clone())
+        };
+        assert_eq!(
+            verify(&purchase).unwrap(),
+            hash_text("purchase:Production:1000")
+        );
+        let mut without_binding = purchase.clone();
+        without_binding
+            .as_object_mut()
+            .unwrap()
+            .remove("appTransactionId");
+        assert!(verify(&without_binding).is_ok());
+        for (field, value) in [
+            ("productId", serde_json::json!("other")),
+            ("type", serde_json::json!("Consumable")),
+            ("environment", serde_json::json!("Sandbox")),
+            ("revocationDate", serde_json::json!(now)),
+            ("appTransactionId", serde_json::json!("account-2")),
+            ("bundleId", serde_json::json!("other.app")),
+        ] {
+            let mut forged = purchase.clone();
+            forged[field] = value;
+            assert!(verify(&forged).is_err(), "{field} must be rejected");
+        }
+        let (untrusted_root, _) = certificate(None, true, None, 10);
+        assert!(
+            verify_lifetime_purchase_with_root(&sign(&purchase), &app, "lifetime", untrusted_root)
+                .is_err()
+        );
     }
 }

@@ -13,11 +13,12 @@ use agentty_backend::AppState;
 use agentty_backend::api::build_router;
 use agentty_backend::apns::{ApnsPushRequest, PushSendSuccess, PushSender};
 use agentty_backend::build_info;
+use agentty_backend::config::DictationLimits;
 use agentty_backend::config::{AnalyticsAlertSettings, InternalCaller, InternalClientSettings};
 use agentty_backend::create_test_app;
-use agentty_backend::create_test_app_with_transcriber;
 use agentty_backend::dictation::{
-    DictationTranscriber, DictationTranscriberError, DictationTranscriptionInput,
+    DictationSubject, DictationTier, DictationWindows, SpeechResponse, SpeechUpload,
+    SpeechUpstream, SpeechUpstreamUnavailable,
 };
 use agentty_backend::error::PushSendError;
 use agentty_backend::models::{AnalyticsEventType, MAIN_BUNDLE_ID, PushEnvironment, PushType};
@@ -54,36 +55,54 @@ impl Default for FakePushSender {
     }
 }
 
+type UpstreamCall = (Value, Vec<u8>);
+
 #[derive(Clone)]
-struct FakeDictationTranscriber {
-    calls: Arc<Mutex<Vec<DictationTranscriptionInput>>>,
-    response_text: Arc<Mutex<String>>,
+struct FakeSpeechUpstream {
+    calls: Arc<Mutex<Vec<UpstreamCall>>>,
+    started: Arc<tokio::sync::Notify>,
+    status: Arc<Mutex<StatusCode>>,
 }
 
-impl Default for FakeDictationTranscriber {
+impl Default for FakeSpeechUpstream {
     fn default() -> Self {
         Self {
             calls: Arc::new(Mutex::new(Vec::new())),
-            response_text: Arc::new(Mutex::new("transcribed text".to_owned())),
+            started: Arc::new(tokio::sync::Notify::new()),
+            status: Arc::new(Mutex::new(StatusCode::OK)),
         }
     }
 }
 
 #[async_trait]
-impl DictationTranscriber for FakeDictationTranscriber {
+impl SpeechUpstream for FakeSpeechUpstream {
     async fn transcribe(
         &self,
-        request: DictationTranscriptionInput,
-    ) -> anyhow::Result<String, DictationTranscriberError> {
-        self.calls
-            .lock()
-            .expect("fake dictation calls lock poisoned")
-            .push(request);
-        Ok(self
-            .response_text
-            .lock()
-            .expect("fake dictation response lock poisoned")
-            .clone())
+        upload: SpeechUpload,
+    ) -> std::result::Result<SpeechResponse, SpeechUpstreamUnavailable> {
+        use futures_util::TryStreamExt;
+
+        self.started.notify_one();
+        let definition = serde_json::to_value(&upload.definition).unwrap();
+        let wav = upload
+            .wav
+            .try_fold(Vec::new(), |mut wav, chunk| async move {
+                wav.extend_from_slice(&chunk);
+                Ok(wav)
+            })
+            .await
+            .map_err(|error| SpeechUpstreamUnavailable(error.into()))?;
+        self.calls.lock().unwrap().push((definition, wav));
+        let status = *self.status.lock().unwrap();
+        let body = if status.is_success() {
+            serde_json::json!({"combinedPhrases": [{"text": "transcribed text"}]})
+        } else {
+            serde_json::json!({"error": {"code": "upstream"}})
+        };
+        Ok(SpeechResponse {
+            status,
+            body: body.to_string().into(),
+        })
     }
 }
 
@@ -273,8 +292,8 @@ async fn public_notify_surfaces_apns_rejection_details() {
 
 #[tokio::test]
 async fn dictation_transcription_accepts_valid_relay_token() {
-    let transcriber = FakeDictationTranscriber::default();
-    let (app, _sender) = make_app_with_dictation(vec![], transcriber.clone()).await;
+    let speech = FakeSpeechUpstream::default();
+    let (app, _, _) = make_app_with_speech(speech.clone(), test_limits()).await;
 
     ensure_default_device(&app).await;
     let relay_token = issue_default_session(&app).await;
@@ -298,18 +317,18 @@ async fn dictation_transcription_accepts_valid_relay_token() {
     let body = response_json(response).await;
     assert_eq!(body["text"], "transcribed text");
     assert_eq!(body["seconds_charged"], 3);
-    assert_eq!(body["remaining_seconds_this_week"], 1797);
+    assert_eq!(body["remaining_seconds_this_week"], 7197);
 
-    let calls = transcriber.calls.lock().unwrap();
+    let calls = speech.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].mime_type, "audio/wav");
-    assert_eq!(calls[0].file_name, "dictation.wav");
+    assert_eq!(calls[0].0["enhancedMode"]["model"], "MAI-Transcribe-2");
+    assert_eq!(calls[0].1.len(), 44 + 3 * 32_000);
 }
 
 #[tokio::test]
 async fn dictation_transcription_accepts_large_request_body() {
-    let transcriber = FakeDictationTranscriber::default();
-    let (app, _sender) = make_app_with_dictation(vec![], transcriber.clone()).await;
+    let speech = FakeSpeechUpstream::default();
+    let (app, _, _) = make_app_with_speech(speech.clone(), test_limits()).await;
 
     ensure_default_device(&app).await;
     let relay_token = issue_default_session(&app).await;
@@ -331,18 +350,17 @@ async fn dictation_transcription_accepts_large_request_body() {
     let body = response_json(response).await;
     assert_eq!(body["seconds_charged"], 180);
 
-    let calls = transcriber.calls.lock().unwrap();
+    let calls = speech.calls.lock().unwrap();
     assert_eq!(calls.len(), 1);
-    assert!(calls[0].audio_bytes.len() > 2 * 1024 * 1024);
+    assert!(calls[0].1.len() > 2 * 1024 * 1024);
 }
 
 #[tokio::test]
-async fn dictation_transcription_rejects_when_weekly_quota_is_exhausted() {
-    let transcriber = FakeDictationTranscriber::default();
-    let (app, _sender) = make_app_with_dictation(vec![], transcriber).await;
+async fn identity_less_legacy_token_keeps_the_weekly_device_allowance() {
+    let (app, _, _) = make_app_with_speech(FakeSpeechUpstream::default(), test_limits()).await;
 
-    ensure_default_device(&app).await;
-    let relay_token = issue_default_session(&app).await;
+    ensure_production_device(&app, "legacy-device", "legacy-secret").await;
+    let relay_token = issue_relay_token(&app, "legacy-device", "legacy-secret").await;
 
     for _ in 0..45 {
         let response = app
@@ -2940,13 +2958,12 @@ async fn reopening_database_normalizes_legacy_device_ids_across_tables() {
     );
 
     let quota_result = database
-        .reserve_admitted_dictation(
-            MIXED_CASE_DEVICE_ID_LOWER.to_owned(),
-            None,
+        .reserve_dictation(
+            DictationSubject::LegacyDevice(MIXED_CASE_DEVICE_ID_LOWER.to_owned()),
             Default::default(),
-            1_715_000_000_i64,
+            DictationWindows::at(1_715_000_000),
             15,
-            1_715_604_800_i64,
+            15,
         )
         .await
         .unwrap();
@@ -3171,13 +3188,12 @@ async fn reopening_database_rejects_case_colliding_dictation_rows() {
             .unwrap()
     );
     let quota_result = database
-        .reserve_admitted_dictation(
-            MIXED_CASE_DEVICE_ID_LOWER.to_owned(),
-            None,
+        .reserve_dictation(
+            DictationSubject::LegacyDevice(MIXED_CASE_DEVICE_ID_LOWER.to_owned()),
             Default::default(),
-            1_715_000_000_i64,
+            DictationWindows::at(1_715_000_000),
             15,
-            1_715_604_800_i64,
+            15,
         )
         .await
         .unwrap();
@@ -3202,7 +3218,7 @@ async fn reopening_database_rejects_case_colliding_dictation_rows() {
             "#,
             rusqlite::params![
                 MIXED_CASE_DEVICE_ID_UPPER,
-                1_715_000_000_i64,
+                DictationWindows::at(1_715_000_000).week_start,
                 30,
                 1_715_000_000_i64,
                 1_715_000_000_i64,
@@ -3430,28 +3446,24 @@ async fn make_app(internal_clients: Vec<InternalClientSettings>) -> (axum::Route
     (app, sender)
 }
 
-async fn make_app_with_dictation(
-    internal_clients: Vec<InternalClientSettings>,
-    transcriber: FakeDictationTranscriber,
-) -> (axum::Router, FakePushSender) {
+async fn make_app_with_speech(
+    speech: FakeSpeechUpstream,
+    limits: DictationLimits,
+) -> (axum::Router, Database, PathBuf) {
     let database_path = NamedTempFile::new()
         .unwrap()
         .into_temp_path()
         .keep()
         .unwrap();
-    let database = Database::open(database_path).await.unwrap();
-    let sender = FakePushSender::default();
-
-    (
-        create_test_app_with_transcriber(
-            database,
-            Arc::new(sender.clone()),
-            Arc::new(transcriber),
-            internal_clients,
-            test_limits(),
-        ),
-        sender,
-    )
+    let database = Database::open(database_path.clone()).await.unwrap();
+    let app = create_test_app(
+        database.clone(),
+        Arc::new(FakePushSender::default()),
+        Arc::new(speech),
+        Vec::new(),
+        limits,
+    );
+    (app, database, database_path)
 }
 
 async fn make_app_with_db_path(
@@ -3468,6 +3480,7 @@ async fn make_app_with_db_path(
         create_test_app(
             database,
             Arc::new(sender.clone()),
+            Arc::new(FakeSpeechUpstream::default()),
             internal_clients,
             test_limits(),
         ),
@@ -3493,7 +3506,7 @@ async fn make_app_with_analytics_alerts(
         )),
         database,
         push_sender: Arc::new(sender.clone()),
-        dictation_transcriber: Arc::new(FakeDictationTranscriber::default()),
+        speech: Arc::new(FakeSpeechUpstream::default()),
         internal_clients: Arc::new(Vec::new()),
         analytics_alerts: Arc::new(analytics_alerts),
         relay_broker: RelayBroker::default(),
@@ -3545,13 +3558,17 @@ async fn ensure_production_device(app: &axum::Router, device_id: &str, device_se
 }
 
 async fn issue_default_session(app: &axum::Router) -> String {
+    issue_relay_token(app, "device-1", "secret-1").await
+}
+
+async fn issue_relay_token(app: &axum::Router, device_id: &str, device_secret: &str) -> String {
     let response = app
         .clone()
         .oneshot(json_request(
             "/v1/relay-sessions",
             serde_json::json!({
-                "device_id": "device-1",
-                "device_secret": "secret-1",
+                "device_id": device_id,
+                "device_secret": device_secret,
             }),
             None,
         ))
@@ -3715,8 +3732,8 @@ fn default_internal_clients() -> Vec<InternalClientSettings> {
 
 #[tokio::test]
 async fn notification_scope_cannot_spend_dictation() {
-    let transcriber = FakeDictationTranscriber::default();
-    let (app, _) = make_app_with_dictation(vec![], transcriber.clone()).await;
+    let speech = FakeSpeechUpstream::default();
+    let (app, _, _) = make_app_with_speech(speech.clone(), test_limits()).await;
     ensure_default_device(&app).await;
     let response = app.clone().oneshot(json_request("/v1/relay-sessions", serde_json::json!({"device_id":"device-1", "device_secret":"secret-1", "scope":"notify"}), None)).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
@@ -3726,7 +3743,7 @@ async fn notification_scope_cannot_spend_dictation() {
         .to_owned();
     let response = app.clone().oneshot(json_request("/v1/dictation/transcriptions", serde_json::json!({"audio_base64":pcm_wav_base64(1), "mime_type":"audio/wav", "file_name":"audio.wav"}), Some(format!("Bearer {token}")))).await.unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert!(transcriber.calls.lock().unwrap().is_empty());
+    assert!(speech.calls.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -3763,18 +3780,13 @@ async fn unauthenticated_invalid_analytics_never_creates_durable_diagnostics() {
 }
 
 #[tokio::test]
-async fn identity_and_operator_budgets_survive_new_devices_and_restarts() {
-    use agentty_backend::config::DictationLimits;
+async fn ledger_and_operator_budgets_survive_new_devices_and_restarts() {
     let path = NamedTempFile::new()
         .unwrap()
         .into_temp_path()
         .keep()
         .unwrap();
     let database = Database::open(path.clone()).await.unwrap();
-    let week = 1_790_000_000;
-    let mut limits = DictationLimits::default();
-    limits.weekly_seconds = 2000;
-    limits.legacy_weekly_seconds = 50;
     for device in ["device-a", "device-b"] {
         assert!(
             database
@@ -3788,15 +3800,25 @@ async fn identity_and_operator_budgets_survive_new_devices_and_restarts() {
                 .unwrap()
         );
     }
+    let windows = DictationWindows::at(1_790_000_000);
+    let limits = DictationLimits {
+        weekly_seconds: 2000,
+        legacy_weekly_seconds: 50,
+        ..Default::default()
+    };
+    let account = |hash: &str| DictationSubject::Ledger {
+        hash: hash.to_owned(),
+        monthly_seconds: 1800,
+    };
+    let legacy = |device: &str| DictationSubject::LegacyDevice(device.to_owned());
     assert!(
         database
-            .reserve_admitted_dictation(
-                "device-a".to_owned(),
-                Some("verified-identity".to_owned()),
+            .reserve_dictation(
+                account("verified-identity"),
                 limits.clone(),
-                week,
+                windows,
                 1700,
-                week + 604800
+                1700
             )
             .await
             .unwrap()
@@ -3805,43 +3827,32 @@ async fn identity_and_operator_budgets_survive_new_devices_and_restarts() {
     drop(database);
     let database = Database::open(path).await.unwrap();
     let quota = database
-        .reserve_admitted_dictation(
-            "device-b".to_owned(),
-            Some("verified-identity".to_owned()),
+        .reserve_dictation(
+            account("verified-identity"),
             limits.clone(),
-            week,
+            windows,
             101,
-            week + 604800,
+            101,
         )
         .await
         .unwrap()
         .unwrap_err();
     assert!(!quota.operator_limit);
     assert_eq!(quota.remaining_seconds, 100);
+    assert_eq!(
+        quota.quota_resets_at_epoch_seconds,
+        windows.next_month_start
+    );
     assert!(
         database
-            .reserve_admitted_dictation(
-                "device-a".to_owned(),
-                None,
-                limits.clone(),
-                week,
-                50,
-                week + 604800
-            )
+            .reserve_dictation(legacy("device-a"), limits.clone(), windows, 50, 50)
             .await
             .unwrap()
             .is_ok()
     );
     assert!(
         database
-            .reserve_admitted_dictation(
-                "device-b".to_owned(),
-                None,
-                limits.clone(),
-                week,
-                1,
-                week + 604800
-            )
+            .reserve_dictation(legacy("device-b"), limits.clone(), windows, 1, 1)
             .await
             .unwrap()
             .unwrap_err()
@@ -3849,43 +3860,33 @@ async fn identity_and_operator_budgets_survive_new_devices_and_restarts() {
     );
     assert!(
         database
-            .reserve_admitted_dictation(
-                "device-b".to_owned(),
-                Some("another-identity".to_owned()),
+            .reserve_dictation(
+                account("another-identity"),
                 limits.clone(),
-                week,
+                windows,
                 251,
-                week + 604800
+                251
             )
             .await
             .unwrap()
             .unwrap_err()
             .operator_limit
     );
+    let grant = database
+        .reserve_dictation(
+            account("another-identity"),
+            limits.clone(),
+            windows,
+            1,
+            1800,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(grant.seconds, 250);
     assert!(
         database
-            .reserve_admitted_dictation(
-                "device-b".to_owned(),
-                Some("another-identity".to_owned()),
-                limits.clone(),
-                week,
-                250,
-                week + 604800
-            )
-            .await
-            .unwrap()
-            .is_ok()
-    );
-    assert!(
-        database
-            .reserve_admitted_dictation(
-                "device-b".to_owned(),
-                Some("another-identity".to_owned()),
-                limits,
-                week,
-                1,
-                week + 604800
-            )
+            .reserve_dictation(account("another-identity"), limits, windows, 1, 1)
             .await
             .unwrap()
             .unwrap_err()
@@ -4009,7 +4010,7 @@ async fn host_identity_alone_cannot_replace_a_connector_but_host_possession_can(
         .await
         .unwrap()
         .unwrap();
-    let limits = agentty_backend::config::DictationLimits {
+    let limits = DictationLimits {
         relay_daily_bytes: 100,
         relay_device_daily_bytes: 10,
         relay_legacy_daily_bytes: 5,
@@ -4077,8 +4078,8 @@ async fn public_request_budget_leaves_companion_contracts_available() {
     assert_ne!(response.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 
-fn test_limits() -> agentty_backend::config::DictationLimits {
-    agentty_backend::config::DictationLimits {
+fn test_limits() -> DictationLimits {
+    DictationLimits {
         trusted_devices: [
             ("device-1", "secret-1"),
             ("device-2", "secret-2"),
@@ -4109,6 +4110,7 @@ async fn legacy_onboarding_remains_available_until_operator_enables_verified_adm
     let legacy = create_test_app(
         database.clone(),
         Arc::new(FakePushSender::default()),
+        Arc::new(FakeSpeechUpstream::default()),
         vec![],
         Default::default(),
     );
@@ -4121,8 +4123,9 @@ async fn legacy_onboarding_remains_available_until_operator_enables_verified_adm
     let strict = create_test_app(
         database,
         Arc::new(FakePushSender::default()),
+        Arc::new(FakeSpeechUpstream::default()),
         vec![],
-        agentty_backend::config::DictationLimits {
+        DictationLimits {
             require_verified_devices: true,
             ..Default::default()
         },
@@ -4143,24 +4146,14 @@ async fn concurrent_connections_cannot_double_spend_a_dictation_allowance() {
         .unwrap();
     let first = Database::open(path.clone()).await.unwrap();
     let second = Database::open(path).await.unwrap();
-    let week = 1_790_000_000;
+    let windows = DictationWindows::at(1_790_000_000);
+    let subject = DictationSubject::Ledger {
+        hash: "same-verified-account".to_owned(),
+        monthly_seconds: 1800,
+    };
     let (first_charge, second_charge) = tokio::join!(
-        first.reserve_admitted_dictation(
-            "device-a".to_owned(),
-            Some("same-verified-account".to_owned()),
-            Default::default(),
-            week,
-            1_200,
-            week + 604800
-        ),
-        second.reserve_admitted_dictation(
-            "device-b".to_owned(),
-            Some("same-verified-account".to_owned()),
-            Default::default(),
-            week,
-            1_200,
-            week + 604800
-        )
+        first.reserve_dictation(subject.clone(), Default::default(), windows, 1_200, 1_200),
+        second.reserve_dictation(subject, Default::default(), windows, 1_200, 1_200)
     );
     assert_eq!(
         [first_charge.unwrap(), second_charge.unwrap()]
@@ -4179,40 +4172,30 @@ async fn daily_operator_spend_is_shared_and_not_refunded_with_the_personal_quota
         .keep()
         .unwrap();
     let first = Database::open(path.clone()).await.unwrap();
-    let limits = agentty_backend::config::DictationLimits {
+    let limits = DictationLimits {
         daily_seconds: 100,
         ..Default::default()
     };
-    let week = 1_790_000_000;
+    let windows = DictationWindows::at(1_790_000_000);
+    let account = |hash: &str| DictationSubject::Ledger {
+        hash: hash.to_owned(),
+        monthly_seconds: 600,
+    };
     assert!(
         first
-            .reserve_admitted_dictation(
-                "a".to_owned(),
-                Some("first".to_owned()),
-                limits.clone(),
-                week,
-                80,
-                week + 604800
-            )
+            .reserve_dictation(account("first"), limits.clone(), windows, 80, 80)
             .await
             .unwrap()
             .is_ok()
     );
     first
-        .release_admitted_dictation("a".to_owned(), Some("first".to_owned()), week, 80)
+        .release_dictation(account("first"), windows, 80, 0)
         .await
         .unwrap();
     let second = Database::open(path).await.unwrap();
     assert!(
         second
-            .reserve_admitted_dictation(
-                "b".to_owned(),
-                Some("second".to_owned()),
-                limits.clone(),
-                week,
-                21,
-                week + 604800
-            )
+            .reserve_dictation(account("second"), limits.clone(), windows, 21, 21)
             .await
             .unwrap()
             .unwrap_err()
@@ -4220,14 +4203,7 @@ async fn daily_operator_spend_is_shared_and_not_refunded_with_the_personal_quota
     );
     assert!(
         second
-            .reserve_admitted_dictation(
-                "b".to_owned(),
-                Some("second".to_owned()),
-                limits,
-                week,
-                20,
-                week + 604800
-            )
+            .reserve_dictation(account("second"), limits, windows, 20, 20)
             .await
             .unwrap()
             .is_ok()
@@ -4254,8 +4230,9 @@ async fn strict_admission_allows_an_existing_legacy_device_to_present_its_store_
     let app = create_test_app(
         database,
         Arc::new(FakePushSender::default()),
+        Arc::new(FakeSpeechUpstream::default()),
         vec![],
-        agentty_backend::config::DictationLimits {
+        DictationLimits {
             require_verified_devices: true,
             app_apple_id: 42,
             ..Default::default()
@@ -4277,13 +4254,13 @@ async fn a_trusted_device_id_without_the_matching_credential_stays_in_the_legacy
         .keep()
         .unwrap();
     let database = Database::open(path).await.unwrap();
-    let transcriber = FakeDictationTranscriber::default();
-    let app = create_test_app_with_transcriber(
+    let speech = FakeSpeechUpstream::default();
+    let app = create_test_app(
         database,
         Arc::new(FakePushSender::default()),
-        Arc::new(transcriber.clone()),
+        Arc::new(speech.clone()),
         vec![],
-        agentty_backend::config::DictationLimits {
+        DictationLimits {
             legacy_weekly_seconds: 0,
             trusted_devices: vec![("device-1".to_owned(), "0".repeat(64))],
             ..Default::default()
@@ -4293,5 +4270,448 @@ async fn a_trusted_device_id_without_the_matching_credential_stays_in_the_legacy
     let token = issue_default_session(&app).await;
     let response = app.oneshot(json_request("/v1/dictation/transcriptions", serde_json::json!({"audio_base64":pcm_wav_base64(1),"mime_type":"audio/wav","file_name":"audio.wav"}), Some(format!("Bearer {token}")))).await.unwrap();
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
-    assert!(transcriber.calls.lock().unwrap().is_empty());
+    assert!(speech.calls.lock().unwrap().is_empty());
+}
+
+const STREAM_BOUNDARY: &str = "agentty-test-boundary";
+
+fn stream_wav(data_bytes: Option<u32>, pcm_bytes: usize) -> Vec<u8> {
+    let declared = data_bytes.unwrap_or(u32::MAX);
+    let riff = data_bytes.map_or(u32::MAX, |bytes| bytes + 36);
+    let mut wav = Vec::with_capacity(44 + pcm_bytes);
+    wav.extend_from_slice(b"RIFF");
+    wav.extend_from_slice(&riff.to_le_bytes());
+    wav.extend_from_slice(b"WAVEfmt ");
+    wav.extend_from_slice(&16_u32.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&1_u16.to_le_bytes());
+    wav.extend_from_slice(&16_000_u32.to_le_bytes());
+    wav.extend_from_slice(&32_000_u32.to_le_bytes());
+    wav.extend_from_slice(&2_u16.to_le_bytes());
+    wav.extend_from_slice(&16_u16.to_le_bytes());
+    wav.extend_from_slice(b"data");
+    wav.extend_from_slice(&declared.to_le_bytes());
+    wav.resize(44 + pcm_bytes, 1);
+    wav
+}
+
+fn mai_definition() -> Value {
+    serde_json::json!({
+        "enhancedMode": {
+            "enabled": true,
+            "model": "MAI-Transcribe-2",
+            "modelOptions": {"transcribeStyle": "clean"}
+        },
+        "phraseList": {"phrases": ["AgenTTY", "tmux"]},
+        "locales": ["sv"]
+    })
+}
+
+fn stream_prefix(definition: &Value) -> Vec<u8> {
+    format!(
+        "--{STREAM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"definition\"\r\nContent-Type: application/json\r\n\r\n{definition}\r\n--{STREAM_BOUNDARY}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+fn stream_suffix() -> Vec<u8> {
+    format!("\r\n--{STREAM_BOUNDARY}--\r\n").into_bytes()
+}
+
+fn stream_request(token: &str, body: Body) -> Request<Body> {
+    Request::builder()
+        .method("POST")
+        .uri("/v1/dictation/azure-speech/speechtotext/transcriptions:transcribe?api-version=2025-10-15")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={STREAM_BOUNDARY}"),
+        )
+        .header("authorization", format!("Bearer {token}"))
+        .body(body)
+        .unwrap()
+}
+
+fn chunked_stream_body(definition: &Value, wav: &[u8]) -> Body {
+    let mut chunks = vec![stream_prefix(definition)];
+    chunks.extend(wav.chunks(3_200).map(<[u8]>::to_vec));
+    chunks.push(stream_suffix());
+    Body::from_stream(futures_util::StreamExt::then(
+        futures_util::stream::iter(chunks),
+        |chunk| async move {
+            tokio::task::yield_now().await;
+            Ok::<_, std::io::Error>(chunk)
+        },
+    ))
+}
+
+fn rejection_kind(response: &axum::response::Response) -> Option<&str> {
+    response
+        .headers()
+        .get("x-speech-relay-rejection")
+        .map(|value| value.to_str().unwrap())
+}
+
+async fn dictation_token(
+    app: &axum::Router,
+    database: &Database,
+    device_id: &str,
+    identity: &str,
+    tier: DictationTier,
+) -> String {
+    ensure_production_device(app, device_id, "stream-secret").await;
+    database
+        .issue_relay_session(
+            device_id.to_owned(),
+            "stream-secret".to_owned(),
+            "dictation".to_owned(),
+            Some((identity.to_owned(), tier)),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .relay_token
+}
+
+fn monthly_usage(path: &PathBuf, identity: &str) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT COALESCE(SUM(used_seconds), 0) FROM dictation_monthly_usage WHERE subject_hash = ?",
+            [identity],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+fn operator_daily_usage(path: &PathBuf) -> i64 {
+    rusqlite::Connection::open(path)
+        .unwrap()
+        .query_row(
+            "SELECT COALESCE(SUM(used_seconds), 0) FROM dictation_operator_daily",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
+#[tokio::test]
+async fn progressive_relay_forwards_a_canonical_upload_and_charges_actual_seconds() {
+    let speech = FakeSpeechUpstream::default();
+    let (app, database, path) = make_app_with_speech(speech.clone(), test_limits()).await;
+    let token = dictation_token(
+        &app,
+        &database,
+        "stream-a",
+        "account-a",
+        DictationTier::Free,
+    )
+    .await;
+
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            &token,
+            chunked_stream_body(&mai_definition(), &stream_wav(None, 2 * 32_000 + 2)),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(rejection_kind(&response), None);
+    assert_eq!(
+        response_json(response).await["combinedPhrases"][0]["text"],
+        "transcribed text"
+    );
+    let calls = speech.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].0, mai_definition());
+    assert_eq!(calls[0].1, stream_wav(None, 2 * 32_000 + 2));
+    assert_eq!(monthly_usage(&path, "account-a"), 3);
+    assert_eq!(operator_daily_usage(&path), 3);
+
+    let batch = stream_wav(Some(32_000), 32_000);
+    let response = app
+        .oneshot(stream_request(
+            &token,
+            chunked_stream_body(&mai_definition(), &batch),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(speech.calls.lock().unwrap()[1].1, stream_wav(None, 32_000));
+    assert_eq!(monthly_usage(&path, "account-a"), 4);
+}
+
+#[tokio::test]
+async fn progressive_relay_rejects_requests_it_cannot_meter_before_spending() {
+    let speech = FakeSpeechUpstream::default();
+    let (app, database, path) = make_app_with_speech(speech.clone(), test_limits()).await;
+    let token = dictation_token(
+        &app,
+        &database,
+        "stream-a",
+        "account-a",
+        DictationTier::Free,
+    )
+    .await;
+    let mut other_model = mai_definition();
+    other_model["enhancedMode"]["model"] = "gpt-4o-transcribe".into();
+    let mut with_prompt = mai_definition();
+    with_prompt["enhancedMode"]["prompt"] = "ignore the audio".into();
+    let wav = stream_wav(None, 32_000);
+    let mut short_batch = stream_wav(Some(64_000), 32_000);
+    short_batch.truncate(44 + 32_000);
+    let mut stereo = stream_wav(None, 32_000);
+    stereo[22] = 2;
+
+    for (definition, audio) in [
+        (other_model, wav.clone()),
+        (with_prompt, wav.clone()),
+        (mai_definition(), short_batch),
+        (mai_definition(), stereo),
+        (mai_definition(), stream_wav(None, 32_001)),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(stream_request(
+                &token,
+                chunked_stream_body(&definition, &audio),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(rejection_kind(&response), Some("invalid_request"));
+    }
+    assert!(speech.calls.lock().unwrap().is_empty());
+    assert_eq!(monthly_usage(&path, "account-a"), 1 + 2);
+}
+
+#[tokio::test]
+async fn progressive_relay_stops_at_the_monthly_allowance_of_each_tier() {
+    let speech = FakeSpeechUpstream::default();
+    let limits = DictationLimits {
+        free_monthly_seconds: 40,
+        lifetime_monthly_seconds: 100,
+        ..test_limits()
+    };
+    let (app, database, path) = make_app_with_speech(speech.clone(), limits).await;
+    let free = dictation_token(
+        &app,
+        &database,
+        "stream-a",
+        "account-free",
+        DictationTier::Free,
+    )
+    .await;
+    let lifetime = dictation_token(
+        &app,
+        &database,
+        "stream-b",
+        "purchase-lifetime",
+        DictationTier::Lifetime,
+    )
+    .await;
+    let minute = stream_wav(None, 60 * 32_000);
+
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            &free,
+            chunked_stream_body(&mai_definition(), &minute),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rejection_kind(&response), Some("quota_exhausted"));
+    assert_eq!(monthly_usage(&path, "account-free"), 40);
+
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            &lifetime,
+            chunked_stream_body(&mai_definition(), &minute),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(monthly_usage(&path, "purchase-lifetime"), 60);
+
+    let response = app
+        .oneshot(stream_request(
+            &lifetime,
+            chunked_stream_body(&mai_definition(), &minute),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(rejection_kind(&response), Some("quota_exhausted"));
+    assert_eq!(monthly_usage(&path, "purchase-lifetime"), 100);
+}
+
+#[tokio::test]
+async fn progressive_relay_refunds_the_user_only_when_the_upstream_fails() {
+    let speech = FakeSpeechUpstream::default();
+    let (app, database, path) = make_app_with_speech(speech.clone(), test_limits()).await;
+    let rejected = dictation_token(
+        &app,
+        &database,
+        "stream-a",
+        "account-a",
+        DictationTier::Free,
+    )
+    .await;
+    let failed = dictation_token(
+        &app,
+        &database,
+        "stream-b",
+        "account-b",
+        DictationTier::Free,
+    )
+    .await;
+    let audio = stream_wav(None, 3 * 32_000);
+
+    *speech.status.lock().unwrap() = StatusCode::BAD_REQUEST;
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            &rejected,
+            chunked_stream_body(&mai_definition(), &audio),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(rejection_kind(&response), None);
+    assert_eq!(response_json(response).await, serde_json::json!({}));
+    assert_eq!(monthly_usage(&path, "account-a"), 3);
+
+    *speech.status.lock().unwrap() = StatusCode::SERVICE_UNAVAILABLE;
+    let response = app
+        .oneshot(stream_request(
+            &failed,
+            chunked_stream_body(&mai_definition(), &audio),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(rejection_kind(&response), None);
+    assert_eq!(monthly_usage(&path, "account-b"), 0);
+    assert_eq!(operator_daily_usage(&path), 6);
+}
+
+#[tokio::test]
+async fn progressive_relay_allows_one_active_stream_per_allowance() {
+    let speech = FakeSpeechUpstream::default();
+    let (app, database, _) = make_app_with_speech(speech.clone(), test_limits()).await;
+    let token = dictation_token(
+        &app,
+        &database,
+        "stream-a",
+        "account-a",
+        DictationTier::Free,
+    )
+    .await;
+    let other = dictation_token(
+        &app,
+        &database,
+        "stream-b",
+        "account-b",
+        DictationTier::Free,
+    )
+    .await;
+    let (body_sender, body_receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(4);
+    let body = Body::from_stream(futures_util::stream::unfold(
+        body_receiver,
+        |mut receiver| async move {
+            receiver
+                .recv()
+                .await
+                .map(|chunk| (Ok::<_, std::io::Error>(chunk), receiver))
+        },
+    ));
+    let first = tokio::spawn(app.clone().oneshot(stream_request(&token, body)));
+    let mut opening = stream_prefix(&mai_definition());
+    opening.extend(stream_wav(None, 32_000));
+    body_sender.send(opening).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), speech.started.notified())
+        .await
+        .unwrap();
+
+    let audio = stream_wav(None, 32_000);
+    let response = app
+        .clone()
+        .oneshot(stream_request(
+            &token,
+            chunked_stream_body(&mai_definition(), &audio),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(rejection_kind(&response), Some("busy"));
+
+    let response = app
+        .oneshot(stream_request(
+            &other,
+            chunked_stream_body(&mai_definition(), &audio),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    body_sender.send(stream_suffix()).await.unwrap();
+    drop(body_sender);
+    assert_eq!(first.await.unwrap().unwrap().status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn progressive_relay_admits_only_dictation_tokens_and_trusted_legacy_devices() {
+    let speech = FakeSpeechUpstream::default();
+    let (app, _, _) = make_app_with_speech(speech.clone(), test_limits()).await;
+    let audio = stream_wav(None, 32_000);
+    ensure_default_device(&app).await;
+    ensure_production_device(&app, "legacy-device", "legacy-secret").await;
+    let trusted = issue_default_session(&app).await;
+    let untrusted = issue_relay_token(&app, "legacy-device", "legacy-secret").await;
+    let response = app
+        .clone()
+        .oneshot(json_request(
+            "/v1/relay-sessions",
+            serde_json::json!({"device_id": "device-1", "device_secret": "secret-1", "scope": "notify"}),
+            None,
+        ))
+        .await
+        .unwrap();
+    let notify = response_json(response).await["relay_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    for (token, status, kind) in [
+        (notify.as_str(), StatusCode::UNAUTHORIZED, "unauthorized"),
+        ("not-a-token", StatusCode::UNAUTHORIZED, "unauthorized"),
+        (
+            untrusted.as_str(),
+            StatusCode::FORBIDDEN,
+            "verification_required",
+        ),
+    ] {
+        let response = app
+            .clone()
+            .oneshot(stream_request(
+                token,
+                chunked_stream_body(&mai_definition(), &audio),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(rejection_kind(&response), Some(kind));
+    }
+    assert!(speech.calls.lock().unwrap().is_empty());
+
+    let response = app
+        .oneshot(stream_request(
+            &trusted,
+            chunked_stream_body(&mai_definition(), &audio),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
 }

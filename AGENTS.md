@@ -50,12 +50,14 @@ App source paths above are relative to `AgenTTY/Sources`.
 - Dictation library sharing defaults off. Account changes never adopt another
   account's captures. Keep unpublished originals durable; insertion success
   and provider-cache cleanup are not permission to delete archival originals.
-- The backend owns hosted admission and persistent service budgets. Keep
+- The backend owns hosted admission and persistent service budgets, and meters
+  dictation audio before forwarding it. llm-router owns the speech provider
+  credential and routing; the app never holds a provider or router key. Keep
   notification and dictation credentials scoped separately; SSH trust remains
   app-to-host. Preserve explicit compatibility lanes until their documented
-  rollout condition is satisfied. Deploys fence and wait for idle SSH, aborting
-  after 120 seconds if busy. Host shutdown allows ten seconds for SSH and forty
-  for HTTP within the loaded sixty-second launchd exit limit.
+  rollout condition is satisfied. Deploys fence and wait for idle SSH,
+  aborting after 120 seconds if busy. Host shutdown allows ten seconds for SSH
+  and forty for HTTP within the loaded sixty-second launchd exit limit.
 - Analytics are production-only. Never log credentials, SSH private keys,
   audio or terminal contents as diagnostics. Unknown delivery remains unknown;
   do not blindly retry externally visible side effects.

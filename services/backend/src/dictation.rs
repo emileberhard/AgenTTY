@@ -1,157 +1,312 @@
-use anyhow::{Context, Result, bail, ensure};
+use std::io;
+use std::pin::Pin;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use async_trait::async_trait;
+use axum::body::Bytes;
 use base64::Engine;
-use reqwest::multipart::{Form, Part};
-use reqwest::{Client, StatusCode};
-use serde::Deserialize;
+use futures_util::{Stream, StreamExt, stream};
+use reqwest::{Body, Client, StatusCode, header};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::config::Settings;
+use crate::config::{DictationLimits, Settings};
 
-const OPENAI_TRANSCRIPTION_MODEL: &str = "gpt-4o-mini-transcribe";
+pub const AZURE_SPEECH_API_VERSION: &str = "2025-10-15";
+pub const STREAM_SAMPLE_RATE: u32 = 16_000;
+pub const STREAM_BYTES_PER_SECOND: u64 = STREAM_SAMPLE_RATE as u64 * 2;
+pub const WAV_HEADER_BYTES: usize = 44;
+const MAI_TRANSCRIBE_MODEL: &str = "MAI-Transcribe-2";
+const MAX_UPSTREAM_RESPONSE_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone)]
-pub struct DictationTranscriptionInput {
-    pub audio_bytes: Vec<u8>,
-    pub mime_type: String,
-    pub file_name: String,
-    pub instructions: Option<String>,
-    pub language_hints: Vec<String>,
+pub type AudioStream = Pin<Box<dyn Stream<Item = io::Result<Bytes>> + Send>>;
+
+pub struct SpeechUpload {
+    pub definition: Definition,
+    pub wav: AudioStream,
 }
 
-#[async_trait]
-pub trait DictationTranscriber: Send + Sync {
-    async fn transcribe(
-        &self,
-        request: DictationTranscriptionInput,
-    ) -> std::result::Result<String, DictationTranscriberError>;
+pub struct SpeechResponse {
+    pub status: StatusCode,
+    pub body: Bytes,
 }
 
 #[derive(Debug, Error)]
-pub enum DictationTranscriberError {
-    #[error("invalid audio payload")]
-    InvalidAudioPayload,
-    #[error("failed to prepare OpenAI transcription request")]
-    InvalidRequest(#[source] anyhow::Error),
-    #[error("failed to send OpenAI transcription request")]
-    Request(#[source] reqwest::Error),
-    #[error("OpenAI rejected the transcription request with status {status}: {detail}")]
-    Rejected { status: StatusCode, detail: String },
+#[error("speech upstream unavailable")]
+pub struct SpeechUpstreamUnavailable(#[source] pub anyhow::Error);
+
+#[async_trait]
+pub trait SpeechUpstream: Send + Sync {
+    async fn transcribe(
+        &self,
+        upload: SpeechUpload,
+    ) -> std::result::Result<SpeechResponse, SpeechUpstreamUnavailable>;
 }
 
-#[derive(Clone)]
-pub struct OpenAIDictationTranscriber {
-    http_client: Client,
-    transcriptions_url: String,
-    api_key: String,
+pub struct RouterSpeechUpstream {
+    client: Client,
+    url: String,
+    key: String,
 }
 
-impl OpenAIDictationTranscriber {
+impl RouterSpeechUpstream {
     pub fn new(settings: &Settings) -> Result<Self> {
-        let http_client = Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .timeout(std::time::Duration::from_secs(120))
-            .build()
-            .context("failed to build OpenAI dictation client")?;
-
         Ok(Self {
-            http_client,
-            transcriptions_url: format!("{}/audio/transcriptions", settings.openai_base_url),
-            api_key: settings.openai_api_key.clone(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(10))
+                .build()
+                .context("failed to build speech upstream client")?,
+            url: format!(
+                "{}/vendors/azure-speech/speechtotext/transcriptions:transcribe?api-version={AZURE_SPEECH_API_VERSION}",
+                settings.llm_router_url
+            ),
+            key: settings.llm_router_key.clone(),
         })
     }
 }
 
 #[async_trait]
-impl DictationTranscriber for OpenAIDictationTranscriber {
+impl SpeechUpstream for RouterSpeechUpstream {
     async fn transcribe(
         &self,
-        request: DictationTranscriptionInput,
-    ) -> std::result::Result<String, DictationTranscriberError> {
-        let file_part = Part::bytes(request.audio_bytes)
-            .file_name(request.file_name)
-            .mime_str(&request.mime_type)
-            .map_err(|error| DictationTranscriberError::InvalidRequest(error.into()))?;
-
-        let mut form = Form::new()
-            .text("model", OPENAI_TRANSCRIPTION_MODEL.to_owned())
-            .part("file", file_part);
-
-        if let Some(instructions) = request.instructions
-            && !instructions.is_empty()
-        {
-            form = form.text("prompt", instructions);
-        }
-
-        if request.language_hints.len() == 1 {
-            form = form.text("language", request.language_hints[0].clone());
-        }
-
-        let response = self
-            .http_client
-            .post(&self.transcriptions_url)
-            .bearer_auth(&self.api_key)
-            .multipart(form)
+        upload: SpeechUpload,
+    ) -> std::result::Result<SpeechResponse, SpeechUpstreamUnavailable> {
+        let unavailable = |error: reqwest::Error| SpeechUpstreamUnavailable(error.into());
+        let boundary = hex::encode(rand::random::<[u8; 16]>());
+        let definition = serde_json::to_string(&upload.definition)
+            .map_err(|error| SpeechUpstreamUnavailable(error.into()))?;
+        let prefix = Bytes::from(format!(
+            "--{boundary}\r\nContent-Disposition: form-data; name=\"definition\"\r\n\r\n{definition}\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"audio\"; filename=\"recording.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        ));
+        let suffix = Bytes::from(format!("\r\n--{boundary}--\r\n"));
+        let body = stream::once(async { Ok(prefix) })
+            .chain(upload.wav)
+            .chain(stream::once(async { Ok(suffix) }));
+        let mut response = self
+            .client
+            .post(&self.url)
+            .bearer_auth(&self.key)
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .body(Body::wrap_stream(body))
             .send()
             .await
-            .map_err(DictationTranscriberError::Request)?;
-
+            .map_err(unavailable)?;
         let status = response.status();
-        let mut response = response;
-        let mut body_bytes = Vec::new();
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(DictationTranscriberError::Request)?
-        {
-            if body_bytes.len() + chunk.len() > 128 * 1024 {
-                return Err(DictationTranscriberError::InvalidRequest(anyhow::anyhow!(
-                    "transcription response exceeds limit"
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(unavailable)? {
+            if body.len() + chunk.len() > MAX_UPSTREAM_RESPONSE_BYTES {
+                return Err(SpeechUpstreamUnavailable(anyhow!(
+                    "speech response exceeds limit"
                 )));
             }
-            body_bytes.extend_from_slice(&chunk);
+            body.extend_from_slice(&chunk);
         }
-        let body = String::from_utf8(body_bytes)
-            .map_err(|error| DictationTranscriberError::InvalidRequest(error.into()))?;
-
-        if !status.is_success() {
-            return Err(DictationTranscriberError::Rejected {
-                status,
-                detail: truncate_error_body(&body, 400),
-            });
-        }
-
-        let parsed_response = serde_json::from_str::<OpenAITranscriptionResponse>(&body)
-            .map_err(|error| DictationTranscriberError::InvalidRequest(error.into()))?;
-
-        Ok(parsed_response.text)
+        Ok(SpeechResponse {
+            status,
+            body: body.into(),
+        })
     }
 }
 
-#[derive(Clone)]
-pub struct NoopDictationTranscriber;
-
-#[async_trait]
-impl DictationTranscriber for NoopDictationTranscriber {
-    async fn transcribe(
-        &self,
-        _request: DictationTranscriptionInput,
-    ) -> std::result::Result<String, DictationTranscriberError> {
-        Err(DictationTranscriberError::InvalidAudioPayload)
-    }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct Definition {
+    enhanced_mode: EnhancedMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    phrase_list: Option<PhraseList>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    locales: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
-struct OpenAITranscriptionResponse {
-    text: String,
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct EnhancedMode {
+    enabled: bool,
+    model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_options: Option<ModelOptions>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct ModelOptions {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    transcribe_style: Option<TranscribeStyle>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TranscribeStyle {
+    Clean,
+    Verbatim,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PhraseList {
+    phrases: Vec<String>,
+}
+
+impl Definition {
+    pub fn clean_transcript() -> Self {
+        Self {
+            enhanced_mode: EnhancedMode {
+                enabled: true,
+                model: MAI_TRANSCRIBE_MODEL.to_owned(),
+                model_options: Some(ModelOptions {
+                    transcribe_style: Some(TranscribeStyle::Clean),
+                }),
+            },
+            phrase_list: None,
+            locales: None,
+        }
+    }
+
+    pub fn parse(json: &[u8]) -> Result<Self> {
+        let definition: Self = serde_json::from_slice(json)?;
+        ensure!(
+            definition.enhanced_mode.enabled
+                && definition.enhanced_mode.model == MAI_TRANSCRIBE_MODEL,
+            "unsupported transcription model"
+        );
+        if let Some(list) = &definition.phrase_list {
+            ensure!(
+                list.phrases.len() <= 50
+                    && list
+                        .phrases
+                        .iter()
+                        .all(|phrase| (1..=50).contains(&phrase.chars().count())),
+                "invalid phrase list"
+            );
+        }
+        if let Some(locales) = &definition.locales {
+            ensure!(
+                locales.len() == 1
+                    && locales.iter().all(|locale| {
+                        (2..=16).contains(&locale.len())
+                            && locale
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    }),
+                "invalid locale"
+            );
+        }
+        Ok(definition)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DictationQuotaReservation {
-    pub week_start_epoch_seconds: i64,
-    pub quota_resets_at_epoch_seconds: i64,
-    pub charged_seconds: i64,
-    pub remaining_seconds_after_charge: i64,
+pub enum StreamWavLength {
+    Open,
+    Exact(u64),
+}
+
+pub fn parse_stream_wav_header(header: &[u8]) -> Result<StreamWavLength> {
+    ensure!(header.len() == WAV_HEADER_BYTES, "incomplete wav header");
+    let u32_at = |offset: usize| u32::from_le_bytes(header[offset..offset + 4].try_into().unwrap());
+    let u16_at = |offset: usize| u16::from_le_bytes(header[offset..offset + 2].try_into().unwrap());
+    ensure!(
+        &header[0..4] == b"RIFF"
+            && &header[8..16] == b"WAVEfmt "
+            && u32_at(16) == 16
+            && u16_at(20) == 1
+            && u16_at(22) == 1
+            && u32_at(24) == STREAM_SAMPLE_RATE
+            && u64::from(u32_at(28)) == STREAM_BYTES_PER_SECOND
+            && u16_at(32) == 2
+            && u16_at(34) == 16
+            && &header[36..40] == b"data",
+        "unsupported wav format"
+    );
+    match (u32_at(4), u32_at(40)) {
+        (u32::MAX, u32::MAX) => Ok(StreamWavLength::Open),
+        (riff, data) if data > 0 && data % 2 == 0 && data.checked_add(36) == Some(riff) => {
+            Ok(StreamWavLength::Exact(u64::from(data)))
+        }
+        _ => bail!("contradictory wav lengths"),
+    }
+}
+
+pub fn open_stream_wav_header() -> Bytes {
+    let mut header = Vec::with_capacity(WAV_HEADER_BYTES);
+    header.extend_from_slice(b"RIFF");
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header.extend_from_slice(b"WAVEfmt ");
+    header.extend_from_slice(&16_u32.to_le_bytes());
+    header.extend_from_slice(&1_u16.to_le_bytes());
+    header.extend_from_slice(&1_u16.to_le_bytes());
+    header.extend_from_slice(&STREAM_SAMPLE_RATE.to_le_bytes());
+    header.extend_from_slice(&(STREAM_BYTES_PER_SECOND as u32).to_le_bytes());
+    header.extend_from_slice(&2_u16.to_le_bytes());
+    header.extend_from_slice(&16_u16.to_le_bytes());
+    header.extend_from_slice(b"data");
+    header.extend_from_slice(&u32::MAX.to_le_bytes());
+    header.into()
+}
+
+pub fn transcript_text(body: &[u8]) -> Result<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Transcription {
+        combined_phrases: Vec<Phrase>,
+    }
+    #[derive(Deserialize)]
+    struct Phrase {
+        text: String,
+    }
+    let transcription: Transcription = serde_json::from_slice(body)?;
+    Ok(transcription
+        .combined_phrases
+        .into_iter()
+        .map(|phrase| phrase.text)
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DictationTier {
+    Free,
+    Lifetime,
+}
+
+impl DictationTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Lifetime => "lifetime",
+        }
+    }
+
+    pub fn from_stored(value: Option<&str>) -> Self {
+        match value {
+            Some("lifetime") => Self::Lifetime,
+            _ => Self::Free,
+        }
+    }
+
+    pub fn monthly_seconds(self, limits: &DictationLimits) -> i64 {
+        match self {
+            Self::Free => limits.free_monthly_seconds,
+            Self::Lifetime => limits.lifetime_monthly_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DictationSubject {
+    Ledger { hash: String, monthly_seconds: i64 },
+    LegacyDevice(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DictationGrant {
+    pub seconds: i64,
+    pub remaining_seconds: i64,
+    pub resets_at_epoch_seconds: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,36 +317,75 @@ pub struct DictationQuotaExceeded {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DictationChargeWindow {
-    pub week_start_epoch_seconds: i64,
-    pub quota_resets_at_epoch_seconds: i64,
-    pub charged_seconds: i64,
+pub struct DictationWindows {
+    pub day: i64,
+    pub week_start: i64,
+    pub month_start: i64,
+    pub next_month_start: i64,
 }
 
-pub fn parse_audio_payload(
-    audio_base64: &str,
-    mime_type: &str,
-) -> Result<(Vec<u8>, DictationChargeWindow)> {
+impl DictationWindows {
+    pub fn now() -> Self {
+        Self::at(current_epoch_seconds())
+    }
+
+    pub fn at(epoch_seconds: i64) -> Self {
+        const DAY: i64 = 24 * 60 * 60;
+        let days = epoch_seconds.div_euclid(DAY);
+        let (year, month) = civil_year_month(days);
+        let (next_year, next_month) = if month == 12 {
+            (year + 1, 1)
+        } else {
+            (year, month + 1)
+        };
+        Self {
+            day: days,
+            week_start: (days - (days + 3).rem_euclid(7)) * DAY,
+            month_start: days_from_civil(year, month) * DAY,
+            next_month_start: days_from_civil(next_year, next_month) * DAY,
+        }
+    }
+
+    pub fn week_resets_at(&self) -> i64 {
+        self.week_start + 7 * 24 * 60 * 60
+    }
+}
+
+fn civil_year_month(days: i64) -> (i64, i64) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    };
+    (year_of_era + era * 400 + i64::from(month <= 2), month)
+}
+
+fn days_from_civil(year: i64, month: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year.rem_euclid(400);
+    let shifted_month = if month > 2 { month - 3 } else { month + 9 };
+    let day_of_year = (153 * shifted_month + 2) / 5;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+pub fn parse_audio_payload(audio_base64: &str, mime_type: &str) -> Result<(Vec<u8>, i64)> {
     if mime_type != "audio/wav" {
         bail!("only audio/wav payloads are supported")
     }
-
     let audio_bytes = base64::engine::general_purpose::STANDARD
         .decode(audio_base64)
         .context("failed to decode base64 audio payload")?;
-
     let charged_seconds = parse_wav_duration_seconds(&audio_bytes)?;
-    let now = current_epoch_seconds();
-    let week_start_epoch_seconds = current_week_start_epoch_seconds(now);
-
-    Ok((
-        audio_bytes,
-        DictationChargeWindow {
-            week_start_epoch_seconds,
-            quota_resets_at_epoch_seconds: week_start_epoch_seconds + 7 * 24 * 60 * 60,
-            charged_seconds,
-        },
-    ))
+    Ok((audio_bytes, charged_seconds))
 }
 
 fn parse_wav_duration_seconds(audio: &[u8]) -> Result<i64> {
@@ -281,27 +475,9 @@ fn current_epoch_seconds() -> i64 {
     }
 }
 
-fn current_week_start_epoch_seconds(now: i64) -> i64 {
-    let seconds_per_day = 24 * 60 * 60;
-    let days_since_epoch = now.div_euclid(seconds_per_day);
-    let days_since_monday = (days_since_epoch + 3).rem_euclid(7);
-    (days_since_epoch - days_since_monday) * seconds_per_day
-}
-
-fn truncate_error_body(body: &str, max_characters: usize) -> String {
-    let single_line = body.replace('\n', " ");
-    if single_line.chars().count() <= max_characters {
-        return single_line;
-    }
-    format!(
-        "{}…",
-        single_line.chars().take(max_characters).collect::<String>()
-    )
-}
-
 #[cfg(test)]
 mod tests {
-    use super::parse_audio_payload;
+    use super::*;
     use base64::Engine;
 
     fn sample_wav(
@@ -337,9 +513,9 @@ mod tests {
         let wav = sample_wav(16_001 * 2, 16_000, 1, 16);
         let encoded = base64::engine::general_purpose::STANDARD.encode(wav);
 
-        let (_, charge_window) = parse_audio_payload(&encoded, "audio/wav").unwrap();
+        let (_, charged_seconds) = parse_audio_payload(&encoded, "audio/wav").unwrap();
 
-        assert_eq!(charge_window.charged_seconds, 2);
+        assert_eq!(charged_seconds, 2);
     }
     #[test]
     fn rejects_forged_or_ambiguous_pcm_headers() {
@@ -367,12 +543,67 @@ mod tests {
             assert!(parse_audio_payload(&encoded, "audio/wav").is_err());
         }
         let encoded = base64::engine::general_purpose::STANDARD.encode(valid);
+        assert_eq!(parse_audio_payload(&encoded, "audio/wav").unwrap().1, 60);
+    }
+
+    #[test]
+    fn windows_follow_utc_calendar_months_and_monday_weeks() {
+        let windows = DictationWindows::at(1_793_020_799);
+        assert_eq!(windows.month_start, 1_790_812_800);
+        assert_eq!(windows.next_month_start, 1_793_491_200);
+        assert_eq!(windows.week_start, 1_792_972_800);
+        let december = DictationWindows::at(1_798_761_599);
+        assert_eq!(december.next_month_start, 1_798_761_600);
         assert_eq!(
-            parse_audio_payload(&encoded, "audio/wav")
-                .unwrap()
-                .1
-                .charged_seconds,
-            60
+            DictationWindows::at(1_798_761_600).month_start,
+            1_798_761_600
         );
+        assert_eq!(
+            DictationWindows::at(1_709_164_800).month_start,
+            1_706_745_600
+        );
+    }
+
+    #[test]
+    fn definitions_are_limited_to_mai_transcription_options() {
+        let speechkit = br#"{"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2","modelOptions":{"transcribeStyle":"clean"}},"phraseList":{"phrases":["tmux","kubectl"]},"locales":["sv"]}"#;
+        let parsed = Definition::parse(speechkit).unwrap();
+        assert_eq!(serde_json::to_vec(&parsed).unwrap(), speechkit.to_vec());
+        for rejected in [
+            &br#"{"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2"},"diarization":{"enabled":true}}"#[..],
+            br#"{"enhancedMode":{"enabled":true,"model":"other"}}"#,
+            br#"{"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2","task":"translate"}}"#,
+            br#"{"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2","modelOptions":{"timestamps":"word"}}}"#,
+            br#"{"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2"},"locales":["en","sv"]}"#,
+            br#"{"enhancedMode":{"enabled":false,"model":"MAI-Transcribe-2"}}"#,
+        ] {
+            assert!(Definition::parse(rejected).is_err());
+        }
+        let too_many = serde_json::json!({"enhancedMode":{"enabled":true,"model":"MAI-Transcribe-2"},"phraseList":{"phrases":vec!["a"; 51]}});
+        assert!(Definition::parse(&serde_json::to_vec(&too_many).unwrap()).is_err());
+    }
+
+    #[test]
+    fn stream_headers_accept_only_open_or_exact_16k_mono_pcm() {
+        let open = open_stream_wav_header();
+        assert_eq!(
+            parse_stream_wav_header(&open).unwrap(),
+            StreamWavLength::Open
+        );
+        let exact = sample_wav(64_000, 16_000, 1, 16);
+        assert_eq!(
+            parse_stream_wav_header(&exact[..44]).unwrap(),
+            StreamWavLength::Exact(64_000)
+        );
+        for wrong in [
+            sample_wav(64_000, 48_000, 1, 16),
+            sample_wav(64_000, 16_000, 2, 16),
+            sample_wav(64_000, 16_000, 1, 8),
+        ] {
+            assert!(parse_stream_wav_header(&wrong[..44]).is_err());
+        }
+        let mut mixed = open.to_vec();
+        mixed[40..44].copy_from_slice(&100_u32.to_le_bytes());
+        assert!(parse_stream_wav_header(&mixed).is_err());
     }
 }

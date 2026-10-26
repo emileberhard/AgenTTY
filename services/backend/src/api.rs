@@ -2,10 +2,11 @@ use std::time::{Duration, Instant};
 
 use axum::Json;
 use axum::Router;
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::{HeaderMap, StatusCode, header};
-use axum::response::Response;
+use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -18,7 +19,10 @@ use crate::apns::{ApnsPushRequest, PushSendSuccess, PushSender};
 use crate::build_info;
 use crate::config::InternalClientSettings;
 use crate::dictation::{
-    DictationTranscriberError, DictationTranscriptionInput, parse_audio_payload,
+    AudioStream, Definition, DictationSubject, DictationTier, DictationWindows,
+    STREAM_BYTES_PER_SECOND, SpeechResponse, SpeechUpload, SpeechUpstreamUnavailable,
+    StreamWavLength, WAV_HEADER_BYTES, open_stream_wav_header, parse_audio_payload,
+    parse_stream_wav_header, transcript_text,
 };
 use crate::error::ApiError;
 use crate::logging::{log_value, option_display, token_tail};
@@ -46,6 +50,16 @@ use crate::storage::{
 // The relay receives dictation audio as base64-encoded JSON, so the request
 // body must be materially larger than the upstream raw-file limit.
 const MAX_DICTATION_REQUEST_BODY_BYTES: usize = 33_400_000;
+pub const DICTATION_STREAM_PATH: &str =
+    "/v1/dictation/azure-speech/speechtotext/transcriptions:transcribe";
+const DICTATION_STREAM_MAX_SECONDS: u64 = 15 * 60;
+const MAX_DICTATION_STREAM_BODY_BYTES: usize =
+    (DICTATION_STREAM_MAX_SECONDS * STREAM_BYTES_PER_SECOND) as usize + 64 * 1024;
+const DICTATION_STREAM_RESERVATION_SECONDS: i64 = 30;
+const DICTATION_STREAM_IDLE: Duration = Duration::from_secs(30);
+const DICTATION_STREAM_DEADLINE: Duration = Duration::from_secs(15 * 60);
+const DICTATION_UPSTREAM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(120);
+const MAX_DICTATION_DEFINITION_BYTES: usize = 8 * 1024;
 const CONNECTOR_CONTROL_PROBE_HEADER: &str = "x-agentty-probe";
 const CONNECTOR_CONTROL_PROBE_VALUE: &str = "connector-control";
 const CONNECTOR_CONTROL_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
@@ -73,6 +87,10 @@ pub fn build_router(state: AppState) -> Router {
             get(app_ssh_relay_session_websocket),
         )
         .route("/v1/analytics/events", post(ingest_analytics_events))
+        .route(
+            DICTATION_STREAM_PATH,
+            post(dictation_stream).layer(DefaultBodyLimit::max(MAX_DICTATION_STREAM_BODY_BYTES)),
+        )
         .route(
             "/v1/dictation/transcriptions",
             post(dictation_transcription)
@@ -264,21 +282,43 @@ async fn issue_dictation_session(
         request.device_secret.as_str(),
     )
     .await?;
-    let app_id = state.admission.dictation_limits.app_apple_id;
+    let limits = &state.admission.dictation_limits;
+    let app_id = limits.app_apple_id;
     if app_id == 0 {
         return Err(ApiError::forbidden(
             "App Store dictation admission is not configured.",
         ));
     }
     let signed = request.signed_app_transaction.into_inner();
-    let identity =
-        tokio::task::spawn_blocking(move || crate::app_transaction::verify(&signed, app_id))
-            .await
-            .map_err(|error| ApiError::from(anyhow::Error::from(error)))?
-            .map_err(|_| ApiError::unauthorized("Invalid signed app transaction."))?;
+    let lifetime = request
+        .signed_lifetime_transaction
+        .map(|value| value.into_inner())
+        .zip(limits.lifetime_product_id.clone());
+    let device_id = request.device_id.as_str().to_owned();
+    let (app, purchase) = tokio::task::spawn_blocking(move || {
+        let app = crate::app_transaction::verify(&signed, app_id)?;
+        let purchase = lifetime.map(|(signed, product_id)| {
+            crate::app_transaction::verify_lifetime_purchase(&signed, &app, &product_id)
+        });
+        anyhow::Ok((app, purchase))
+    })
+    .await
+    .map_err(|error| ApiError::from(anyhow::Error::from(error)))?
+    .map_err(|_| ApiError::unauthorized("Invalid signed app transaction."))?;
+    let dictation = match purchase {
+        Some(Ok(purchase)) => (purchase, DictationTier::Lifetime),
+        Some(Err(error)) => {
+            tracing::warn!(
+                "agentty_backend dictation_lifetime_rejected device_id={} reason={error}",
+                log_value(&device_id),
+            );
+            (app.identity.clone(), DictationTier::Free)
+        }
+        None => (app.identity.clone(), DictationTier::Free),
+    };
     state
         .database
-        .admit_verified_device(request.device_id.as_str().to_owned(), identity.clone())
+        .admit_verified_device(device_id, app.identity)
         .await
         .map_err(ApiError::from)?;
     authorize_device(&state, request.device_id.as_str()).await?;
@@ -288,7 +328,7 @@ async fn issue_dictation_session(
             request.device_id.into_inner(),
             request.device_secret.into_inner(),
             "dictation".to_owned(),
-            Some(identity),
+            Some(dictation),
         )
         .await
         .map_err(ApiError::from)?
@@ -1220,7 +1260,7 @@ async fn dictation_transcription(
     Json(request): Json<DictationTranscriptionRequest>,
 ) -> Result<Json<DictationTranscriptionResponse>, ApiError> {
     let relay_token = bearer_token(&headers)?;
-    let (device, mut identity) = state
+    let (device, dictation) = state
         .database
         .dictation_authorization(relay_token.clone())
         .await
@@ -1247,38 +1287,21 @@ async fn dictation_transcription(
         ));
     }
     authorize_device(&state, &device.device_id).await?;
-    if identity.is_none() {
-        if let Some((secret_hash, _)) = state
-            .database
-            .device_admission(device.device_id.clone())
-            .await
-            .map_err(ApiError::from)?
-        {
-            let trusted =
-                state
-                    .admission
-                    .dictation_limits
-                    .trusted_devices
-                    .iter()
-                    .any(|(id, expected)| {
-                        id == &device.device_id
-                            && expected
-                                .as_bytes()
-                                .ct_eq(secret_hash.as_bytes())
-                                .unwrap_u8()
-                                == 1
-                    });
-            if trusted {
-                identity = Some(hash_text(&format!("trusted:{}", device.device_id)));
-            }
-        }
-    }
-    let content_length = headers
-        .get(header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-
-    let (audio_bytes, charge_window) = parse_audio_payload(
+    let limits = &state.admission.dictation_limits;
+    let subject = match dictation {
+        Some((hash, tier)) => DictationSubject::Ledger {
+            hash,
+            monthly_seconds: tier.monthly_seconds(limits),
+        },
+        None => match trusted_dictation_identity(&state, &device.device_id).await? {
+            Some(hash) => DictationSubject::Ledger {
+                hash,
+                monthly_seconds: limits.lifetime_monthly_seconds,
+            },
+            None => DictationSubject::LegacyDevice(device.device_id.clone()),
+        },
+    };
+    let (audio_bytes, seconds) = parse_audio_payload(
         request.audio_base64.as_str(),
         request.mime_type.as_str(),
     )
@@ -1290,36 +1313,20 @@ async fn dictation_transcription(
         );
         ApiError::bad_request("Invalid audio payload.")
     })?;
-
-    tracing::info!(
-        "agentty_backend dictation_received device_id={} content_length={} audio_bytes={} charged_seconds={} relay_token_tail={}",
-        log_value(&device.device_id),
-        option_display(content_length),
-        audio_bytes.len(),
-        charge_window.charged_seconds,
-        token_tail(&relay_token),
-    );
-
-    let quota_reservation = match state
+    let windows = DictationWindows::now();
+    let grant = match state
         .database
-        .reserve_admitted_dictation(
-            device.device_id.clone(),
-            identity.clone(),
-            state.admission.dictation_limits.clone(),
-            charge_window.week_start_epoch_seconds,
-            charge_window.charged_seconds,
-            charge_window.quota_resets_at_epoch_seconds,
-        )
+        .reserve_dictation(subject.clone(), limits.clone(), windows, seconds, seconds)
         .await
         .map_err(ApiError::from)?
     {
-        Ok(reservation) => reservation,
+        Ok(grant) => grant,
+        Err(exhausted) if exhausted.operator_limit => {
+            return Err(ApiError::forbidden(
+                "The relay dictation budget is exhausted. Please try again after the daily or weekly reset.",
+            ));
+        }
         Err(exhausted) => {
-            if exhausted.operator_limit {
-                return Err(ApiError::forbidden(
-                    "The relay dictation budget is exhausted. Please try again after the daily or weekly reset.",
-                ));
-            }
             tracing::warn!(
                 "agentty_backend dictation_rejected device_id={} reason=quota_exhausted remaining_seconds={} reset_at={}",
                 log_value(&device.device_id),
@@ -1332,33 +1339,24 @@ async fn dictation_transcription(
             ));
         }
     };
-
-    let transcription_result = state
-        .dictation_transcriber
-        .transcribe(DictationTranscriptionInput {
-            audio_bytes,
-            mime_type: request.mime_type.into_inner(),
-            file_name: request.file_name.into_inner(),
-            instructions: request.instructions.map(|value| value.into_inner()),
-            language_hints: request
-                .language_hints
-                .into_iter()
-                .map(|value| value.into_inner())
-                .collect(),
-        })
-        .await;
-
-    let text = match transcription_result {
-        Ok(text) => text,
-        Err(error) => {
+    let upload = SpeechUpload {
+        definition: Definition::clean_transcript(),
+        wav: futures_util::stream::once(async move { Ok(Bytes::from(audio_bytes)) }).boxed(),
+    };
+    let text = match state.speech.transcribe(upload).await {
+        Ok(SpeechResponse { status, body }) if status.is_success() => {
+            transcript_text(&body).map_err(ApiError::from)?
+        }
+        Ok(SpeechResponse { status, .. }) if status.is_client_error() => {
+            return Err(ApiError::bad_request("Invalid dictation request."));
+        }
+        failure => {
+            if let Err(error) = &failure {
+                tracing::warn!("agentty_backend dictation_upstream_failed error={error:#}");
+            }
             if let Err(release_error) = state
                 .database
-                .release_admitted_dictation(
-                    device.device_id.clone(),
-                    identity,
-                    quota_reservation.week_start_epoch_seconds,
-                    quota_reservation.charged_seconds,
-                )
+                .release_dictation(subject, windows, seconds, 0)
                 .await
             {
                 tracing::error!(
@@ -1366,24 +1364,478 @@ async fn dictation_transcription(
                     log_value(&device.device_id),
                 );
             }
-            return Err(map_dictation_error(error));
+            return Err(ApiError::Internal(anyhow::anyhow!(
+                "dictation provider failed"
+            )));
         }
     };
-
     tracing::info!(
         "agentty_backend dictation_transcribed device_id={} seconds_charged={} remaining_seconds={} relay_token_tail={}",
         log_value(&device.device_id),
-        quota_reservation.charged_seconds,
-        quota_reservation.remaining_seconds_after_charge,
+        seconds,
+        grant.remaining_seconds,
         token_tail(&relay_token),
     );
-
     Ok(Json(DictationTranscriptionResponse {
         text,
-        seconds_charged: quota_reservation.charged_seconds,
-        remaining_seconds_this_week: quota_reservation.remaining_seconds_after_charge,
-        quota_resets_at_epoch_seconds: quota_reservation.quota_resets_at_epoch_seconds,
+        seconds_charged: seconds,
+        remaining_seconds_this_week: grant.remaining_seconds,
+        quota_resets_at_epoch_seconds: grant.resets_at_epoch_seconds,
     }))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StreamRejection {
+    Unauthorized,
+    VerificationRequired,
+    QuotaExhausted,
+    ServiceLimit,
+    Busy,
+    InvalidRequest,
+    AudioTooLong,
+    UpstreamUnavailable,
+}
+
+impl StreamRejection {
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::VerificationRequired => "verification_required",
+            Self::QuotaExhausted => "quota_exhausted",
+            Self::ServiceLimit => "service_limit",
+            Self::Busy => "busy",
+            Self::InvalidRequest => "invalid_request",
+            Self::AudioTooLong => "audio_too_long",
+            Self::UpstreamUnavailable => "upstream_unavailable",
+        }
+    }
+
+    fn status(self) -> StatusCode {
+        match self {
+            Self::Unauthorized => StatusCode::UNAUTHORIZED,
+            Self::VerificationRequired => StatusCode::FORBIDDEN,
+            Self::QuotaExhausted | Self::Busy => StatusCode::TOO_MANY_REQUESTS,
+            Self::ServiceLimit => StatusCode::SERVICE_UNAVAILABLE,
+            Self::InvalidRequest => StatusCode::BAD_REQUEST,
+            Self::AudioTooLong => StatusCode::PAYLOAD_TOO_LARGE,
+            Self::UpstreamUnavailable => StatusCode::BAD_GATEWAY,
+        }
+    }
+}
+
+impl IntoResponse for StreamRejection {
+    fn into_response(self) -> Response {
+        (
+            self.status(),
+            [(
+                HeaderName::from_static("x-speech-relay-rejection"),
+                HeaderValue::from_static(self.kind()),
+            )],
+            Json(json!({ "code": self.kind() })),
+        )
+            .into_response()
+    }
+}
+
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+enum StreamChunk {
+    Audio(Bytes),
+    End,
+}
+
+fn stream_audio(receiver: mpsc::Receiver<StreamChunk>) -> AudioStream {
+    let pcm = futures_util::stream::unfold(Some(receiver), |receiver| async move {
+        let mut receiver = receiver?;
+        match receiver.recv().await {
+            Some(StreamChunk::Audio(bytes)) => Some((Ok(bytes), Some(receiver))),
+            Some(StreamChunk::End) => None,
+            None => Some((
+                Err(std::io::Error::other("dictation audio ended early")),
+                None,
+            )),
+        }
+    });
+    futures_util::stream::once(async { Ok(open_stream_wav_header()) })
+        .chain(pcm)
+        .boxed()
+}
+
+struct StreamMeter {
+    database: crate::storage::Database,
+    limits: crate::config::DictationLimits,
+    subject: DictationSubject,
+    windows: DictationWindows,
+    reserved_seconds: i64,
+    audio_bytes: u64,
+    settled: bool,
+}
+
+impl StreamMeter {
+    fn charged_seconds(&self) -> i64 {
+        self.audio_bytes.div_ceil(STREAM_BYTES_PER_SECOND) as i64
+    }
+
+    async fn admit(&mut self, bytes: usize) -> Result<(), StreamRejection> {
+        let total = self.audio_bytes + bytes as u64;
+        if total > DICTATION_STREAM_MAX_SECONDS * STREAM_BYTES_PER_SECOND {
+            return Err(StreamRejection::AudioTooLong);
+        }
+        let needed = total.div_ceil(STREAM_BYTES_PER_SECOND) as i64;
+        if needed > self.reserved_seconds {
+            let deficit = needed - self.reserved_seconds;
+            self.reserved_seconds += self
+                .reserve(deficit, deficit.max(DICTATION_STREAM_RESERVATION_SECONDS))
+                .await?;
+        }
+        self.audio_bytes = total;
+        Ok(())
+    }
+
+    async fn reserve(&self, minimum: i64, preferred: i64) -> Result<i64, StreamRejection> {
+        match self
+            .database
+            .reserve_dictation(
+                self.subject.clone(),
+                self.limits.clone(),
+                self.windows,
+                minimum,
+                preferred,
+            )
+            .await
+        {
+            Ok(Ok(grant)) => Ok(grant.seconds),
+            Ok(Err(exhausted)) if exhausted.operator_limit => Err(StreamRejection::ServiceLimit),
+            Ok(Err(_)) => Err(StreamRejection::QuotaExhausted),
+            Err(error) => {
+                tracing::error!("agentty_backend dictation_reservation_failed error={error:#}");
+                Err(StreamRejection::UpstreamUnavailable)
+            }
+        }
+    }
+
+    async fn settle(mut self, refund_audio: bool) {
+        self.settled = true;
+        let charged = self.charged_seconds();
+        let unused = self.reserved_seconds - charged;
+        let personal = unused + if refund_audio { charged } else { 0 };
+        if let Err(error) = self
+            .database
+            .release_dictation(self.subject.clone(), self.windows, personal, unused)
+            .await
+        {
+            tracing::error!("agentty_backend dictation_settlement_failed error={error:#}");
+        }
+    }
+}
+
+impl Drop for StreamMeter {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let unused = self.reserved_seconds - self.charged_seconds();
+        let database = self.database.clone();
+        let subject = self.subject.clone();
+        let windows = self.windows;
+        tokio::spawn(async move {
+            if let Err(error) = database
+                .release_dictation(subject, windows, unused, unused)
+                .await
+            {
+                tracing::error!("agentty_backend dictation_settlement_failed error={error:#}");
+            }
+        });
+    }
+}
+
+async fn dictation_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request,
+) -> Response {
+    match relay_dictation_stream(state, headers, request).await {
+        Ok(response) => response,
+        Err(rejection) => rejection.into_response(),
+    }
+}
+
+async fn relay_dictation_stream(
+    state: AppState,
+    headers: HeaderMap,
+    request: Request,
+) -> Result<Response, StreamRejection> {
+    let deadline = tokio::time::Instant::now() + DICTATION_STREAM_DEADLINE;
+    let token = bearer_token(&headers).map_err(|_| StreamRejection::Unauthorized)?;
+    let (device, dictation) = state
+        .database
+        .dictation_authorization(token)
+        .await
+        .map_err(|_| StreamRejection::UpstreamUnavailable)?
+        .ok_or(StreamRejection::Unauthorized)?;
+    if device.bundle_id != MAIN_BUNDLE_ID {
+        return Err(StreamRejection::VerificationRequired);
+    }
+    authorize_device(&state, &device.device_id)
+        .await
+        .map_err(|error| match error {
+            ApiError::ResourceLimit { .. } => StreamRejection::Busy,
+            _ => StreamRejection::VerificationRequired,
+        })?;
+    let limits = state.admission.dictation_limits.clone();
+    let (hash, tier) = match dictation {
+        Some(dictation) => dictation,
+        None => (
+            trusted_dictation_identity(&state, &device.device_id)
+                .await
+                .map_err(|_| StreamRejection::UpstreamUnavailable)?
+                .ok_or(StreamRejection::VerificationRequired)?,
+            DictationTier::Lifetime,
+        ),
+    };
+    let _permit = state
+        .admission
+        .begin_dictation_stream(&hash)
+        .ok_or(StreamRejection::Busy)?;
+    let mut multipart = Multipart::from_request(request, &())
+        .await
+        .map_err(|_| StreamRejection::InvalidRequest)?;
+    let definition = {
+        let mut field = next_stream_field(&mut multipart, deadline, "definition").await?;
+        let mut json = Vec::new();
+        while let Some(chunk) = next_stream_chunk(&mut field, deadline).await? {
+            if json.len() + chunk.len() > MAX_DICTATION_DEFINITION_BYTES {
+                return Err(StreamRejection::InvalidRequest);
+            }
+            json.extend_from_slice(&chunk);
+        }
+        Definition::parse(&json).map_err(|_| StreamRejection::InvalidRequest)?
+    };
+    let mut audio = next_stream_field(&mut multipart, deadline, "audio").await?;
+    let mut header = Vec::with_capacity(WAV_HEADER_BYTES);
+    while header.len() < WAV_HEADER_BYTES {
+        let chunk = next_stream_chunk(&mut audio, deadline)
+            .await?
+            .ok_or(StreamRejection::InvalidRequest)?;
+        header.extend_from_slice(&chunk);
+    }
+    let first_audio = Bytes::from(header.split_off(WAV_HEADER_BYTES));
+    let declared_length =
+        parse_stream_wav_header(&header).map_err(|_| StreamRejection::InvalidRequest)?;
+    let windows = DictationWindows::now();
+    let mut meter = StreamMeter {
+        database: state.database.clone(),
+        subject: DictationSubject::Ledger {
+            hash,
+            monthly_seconds: tier.monthly_seconds(&limits),
+        },
+        limits,
+        windows,
+        reserved_seconds: 0,
+        audio_bytes: 0,
+        settled: false,
+    };
+    meter.reserved_seconds = meter
+        .reserve(1, DICTATION_STREAM_RESERVATION_SECONDS)
+        .await?;
+    let (sender, receiver) = mpsc::channel(16);
+    let upload = SpeechUpload {
+        definition,
+        wav: stream_audio(receiver),
+    };
+    let speech = state.speech.clone();
+    let mut upstream = AbortOnDrop(tokio::spawn(async move { speech.transcribe(upload).await }));
+    let fed = match feed_dictation_audio(
+        audio,
+        first_audio,
+        declared_length,
+        &sender,
+        &mut meter,
+        deadline,
+    )
+    .await
+    {
+        Ok(()) => finish_dictation_upload(&mut multipart, &sender, deadline).await,
+        Err(error) => Err(error),
+    };
+    let upstream_result = match fed {
+        Ok(()) => tokio::time::timeout(DICTATION_UPSTREAM_RESPONSE_TIMEOUT, &mut upstream.0)
+            .await
+            .ok(),
+        Err(FeedError::UpstreamClosed) => Some((&mut upstream.0).await),
+        Err(FeedError::Rejected(rejection)) => {
+            upstream.0.abort();
+            tracing::warn!(
+                "agentty_backend dictation_stream_rejected device_id={} reason={} seconds={}",
+                log_value(&device.device_id),
+                rejection.kind(),
+                meter.charged_seconds(),
+            );
+            meter.settle(false).await;
+            return Err(rejection);
+        }
+    };
+    let response = match upstream_result {
+        Some(Ok(Ok(response))) => Ok(response),
+        Some(Ok(Err(SpeechUpstreamUnavailable(error)))) => Err(error),
+        Some(Err(error)) => Err(error.into()),
+        None => Err(anyhow::anyhow!("speech upstream timed out")),
+    };
+    let seconds = meter.charged_seconds();
+    match response {
+        Ok(SpeechResponse { status, body }) => {
+            meter.settle(status.is_server_error()).await;
+            tracing::info!(
+                "agentty_backend dictation_stream_finished device_id={} status={} seconds={}",
+                log_value(&device.device_id),
+                status.as_u16(),
+                seconds,
+            );
+            let body = if status.is_success() {
+                body
+            } else {
+                Bytes::from_static(b"{}")
+            };
+            Ok((status, [(header::CONTENT_TYPE, "application/json")], body).into_response())
+        }
+        Err(error) => {
+            meter.settle(true).await;
+            tracing::warn!(
+                "agentty_backend dictation_stream_upstream_failed device_id={} seconds={} error={error:#}",
+                log_value(&device.device_id),
+                seconds,
+            );
+            Err(StreamRejection::UpstreamUnavailable)
+        }
+    }
+}
+
+enum FeedError {
+    Rejected(StreamRejection),
+    UpstreamClosed,
+}
+
+impl From<StreamRejection> for FeedError {
+    fn from(rejection: StreamRejection) -> Self {
+        Self::Rejected(rejection)
+    }
+}
+
+async fn feed_dictation_audio(
+    mut audio: axum::extract::multipart::Field<'_>,
+    first_audio: Bytes,
+    declared_length: StreamWavLength,
+    sender: &mpsc::Sender<StreamChunk>,
+    meter: &mut StreamMeter,
+    deadline: tokio::time::Instant,
+) -> Result<(), FeedError> {
+    let mut pending = Some(first_audio).filter(|bytes| !bytes.is_empty());
+    loop {
+        let chunk = match pending.take() {
+            Some(chunk) => chunk,
+            None => match next_stream_chunk(&mut audio, deadline).await? {
+                Some(chunk) => chunk,
+                None => break,
+            },
+        };
+        meter.admit(chunk.len()).await?;
+        sender
+            .send(StreamChunk::Audio(chunk))
+            .await
+            .map_err(|_| FeedError::UpstreamClosed)?;
+    }
+    let complete = meter.audio_bytes > 0
+        && meter.audio_bytes.is_multiple_of(2)
+        && match declared_length {
+            StreamWavLength::Open => true,
+            StreamWavLength::Exact(length) => length == meter.audio_bytes,
+        };
+    if complete {
+        Ok(())
+    } else {
+        Err(StreamRejection::InvalidRequest.into())
+    }
+}
+
+async fn finish_dictation_upload(
+    multipart: &mut Multipart,
+    sender: &mpsc::Sender<StreamChunk>,
+    deadline: tokio::time::Instant,
+) -> Result<(), FeedError> {
+    if tokio::time::timeout_at(deadline, multipart.next_field())
+        .await
+        .map_err(|_| StreamRejection::InvalidRequest)?
+        .map_err(|_| StreamRejection::InvalidRequest)?
+        .is_some()
+    {
+        return Err(StreamRejection::InvalidRequest.into());
+    }
+    sender
+        .send(StreamChunk::End)
+        .await
+        .map_err(|_| FeedError::UpstreamClosed)
+}
+
+async fn next_stream_field<'a>(
+    multipart: &'a mut Multipart,
+    deadline: tokio::time::Instant,
+    name: &str,
+) -> Result<axum::extract::multipart::Field<'a>, StreamRejection> {
+    let idle = (tokio::time::Instant::now() + DICTATION_STREAM_IDLE).min(deadline);
+    let field = tokio::time::timeout_at(idle, multipart.next_field())
+        .await
+        .map_err(|_| StreamRejection::InvalidRequest)?
+        .map_err(|_| StreamRejection::InvalidRequest)?
+        .ok_or(StreamRejection::InvalidRequest)?;
+    if field.name() != Some(name) {
+        return Err(StreamRejection::InvalidRequest);
+    }
+    Ok(field)
+}
+
+async fn next_stream_chunk(
+    field: &mut axum::extract::multipart::Field<'_>,
+    deadline: tokio::time::Instant,
+) -> Result<Option<Bytes>, StreamRejection> {
+    let idle = (tokio::time::Instant::now() + DICTATION_STREAM_IDLE).min(deadline);
+    tokio::time::timeout_at(idle, field.chunk())
+        .await
+        .map_err(|_| StreamRejection::InvalidRequest)?
+        .map_err(|_| StreamRejection::InvalidRequest)
+}
+
+async fn trusted_dictation_identity(
+    state: &AppState,
+    device_id: &str,
+) -> Result<Option<String>, ApiError> {
+    let Some((secret_hash, _)) = state
+        .database
+        .device_admission(device_id.to_owned())
+        .await
+        .map_err(ApiError::from)?
+    else {
+        return Ok(None);
+    };
+    let trusted = state
+        .admission
+        .dictation_limits
+        .trusted_devices
+        .iter()
+        .any(|(id, expected)| {
+            id == device_id
+                && expected
+                    .as_bytes()
+                    .ct_eq(secret_hash.as_bytes())
+                    .unwrap_u8()
+                    == 1
+        });
+    Ok(trusted.then(|| crate::storage::hash_text(&format!("trusted:{device_id}"))))
 }
 
 async fn internal_alert(
@@ -1550,18 +2002,6 @@ async fn send_and_wrap_response(
     })
 }
 
-fn map_dictation_error(error: DictationTranscriberError) -> ApiError {
-    match error {
-        DictationTranscriberError::InvalidAudioPayload
-        | DictationTranscriberError::InvalidRequest(_) => {
-            ApiError::bad_request("Invalid dictation request.")
-        }
-        DictationTranscriberError::Request(_) | DictationTranscriberError::Rejected { .. } => {
-            ApiError::Internal(error.into())
-        }
-    }
-}
-
 fn authenticate_internal_caller<'a>(
     state: &'a AppState,
     headers: &HeaderMap,
@@ -1638,12 +2078,12 @@ async fn registration_admission(
             ));
         }
         let signed = signed.to_owned();
-        let identity =
+        let app =
             tokio::task::spawn_blocking(move || crate::app_transaction::verify(&signed, app_id))
                 .await
                 .map_err(|error| ApiError::from(anyhow::Error::from(error)))?
                 .map_err(|_| ApiError::unauthorized("Invalid signed app transaction."))?;
-        return Ok(Some(identity));
+        return Ok(Some(app.identity));
     }
     let trusted = state
         .admission

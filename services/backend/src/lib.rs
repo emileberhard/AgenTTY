@@ -22,9 +22,7 @@ use axum::Router;
 use crate::api::build_router;
 use crate::apns::ApnsPushSender;
 use crate::config::{AnalyticsAlertSettings, InternalClientSettings, Settings};
-use crate::dictation::{
-    DictationTranscriber, NoopDictationTranscriber, OpenAIDictationTranscriber,
-};
+use crate::dictation::{RouterSpeechUpstream, SpeechUpstream};
 use crate::relay_broker::RelayBroker;
 use crate::relay_tokens::RelayTokenManager;
 use crate::storage::Database;
@@ -33,7 +31,7 @@ use crate::storage::Database;
 pub struct AppState {
     pub database: Database,
     pub push_sender: Arc<dyn apns::PushSender>,
-    pub dictation_transcriber: Arc<dyn DictationTranscriber>,
+    pub speech: Arc<dyn SpeechUpstream>,
     pub internal_clients: Arc<Vec<InternalClientSettings>>,
     pub analytics_alerts: Arc<AnalyticsAlertSettings>,
     pub relay_broker: RelayBroker,
@@ -44,14 +42,14 @@ pub struct AppState {
 pub async fn create_app(settings: Settings, relay_broker: RelayBroker) -> Result<Router> {
     let database = Database::open(settings.database_path.clone()).await?;
     let push_sender = Arc::new(ApnsPushSender::new(&settings)?);
-    let dictation_transcriber = Arc::new(OpenAIDictationTranscriber::new(&settings)?);
+    let speech = Arc::new(RouterSpeechUpstream::new(&settings)?);
     let relay_tokens = Arc::new(RelayTokenManager::from_settings(&settings)?);
 
     Ok(build_router(AppState {
         admission: Arc::new(admission::Admission::new(settings.dictation_limits)),
         database,
         push_sender,
-        dictation_transcriber,
+        speech,
         internal_clients: Arc::new(settings.internal_clients),
         analytics_alerts: Arc::new(settings.analytics_alerts),
         relay_broker,
@@ -62,22 +60,7 @@ pub async fn create_app(settings: Settings, relay_broker: RelayBroker) -> Result
 pub fn create_test_app(
     database: Database,
     push_sender: Arc<dyn apns::PushSender>,
-    internal_clients: Vec<InternalClientSettings>,
-    limits: config::DictationLimits,
-) -> Router {
-    create_test_app_with_transcriber(
-        database,
-        push_sender,
-        Arc::new(NoopDictationTranscriber),
-        internal_clients,
-        limits,
-    )
-}
-
-pub fn create_test_app_with_transcriber(
-    database: Database,
-    push_sender: Arc<dyn apns::PushSender>,
-    dictation_transcriber: Arc<dyn DictationTranscriber>,
+    speech: Arc<dyn SpeechUpstream>,
     internal_clients: Vec<InternalClientSettings>,
     limits: config::DictationLimits,
 ) -> Router {
@@ -85,7 +68,7 @@ pub fn create_test_app_with_transcriber(
         admission: Arc::new(admission::Admission::new(limits)),
         database,
         push_sender,
-        dictation_transcriber,
+        speech,
         internal_clients: Arc::new(internal_clients),
         analytics_alerts: Arc::new(AnalyticsAlertSettings {
             destination_device_id: None,

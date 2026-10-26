@@ -6,7 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -20,6 +20,23 @@ pub struct Admission {
     windows: Mutex<[(Instant, u32); 2]>,
     devices: Mutex<HashMap<String, (Instant, u32)>>,
     sockets: Arc<Semaphore>,
+    dictation_streams: Arc<Semaphore>,
+    active_dictation_subjects: Arc<Mutex<HashSet<String>>>,
+}
+
+pub struct DictationStreamPermit {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+    subject: String,
+    active: Arc<Mutex<HashSet<String>>>,
+}
+
+impl Drop for DictationStreamPermit {
+    fn drop(&mut self) {
+        self.active
+            .lock()
+            .expect("dictation stream lock poisoned")
+            .remove(&self.subject);
+    }
 }
 
 impl Admission {
@@ -27,6 +44,8 @@ impl Admission {
         Self {
             requests: Semaphore::new(32),
             sockets: Arc::new(Semaphore::new(128)),
+            dictation_streams: Arc::new(Semaphore::new(32)),
+            active_dictation_subjects: Arc::new(Mutex::new(HashSet::new())),
             dictation: Semaphore::new(limits.concurrency),
             dictation_limits: limits,
             devices: Mutex::new(HashMap::new()),
@@ -42,6 +61,23 @@ impl Admission {
                 code: "relay_socket_capacity",
                 detail: "Relay socket capacity reached. Please try again shortly.",
             }
+        })
+    }
+
+    pub fn begin_dictation_stream(&self, subject: &str) -> Option<DictationStreamPermit> {
+        let permit = self.dictation_streams.clone().try_acquire_owned().ok()?;
+        if !self
+            .active_dictation_subjects
+            .lock()
+            .expect("dictation stream lock poisoned")
+            .insert(subject.to_owned())
+        {
+            return None;
+        }
+        Some(DictationStreamPermit {
+            _permit: permit,
+            subject: subject.to_owned(),
+            active: self.active_dictation_subjects.clone(),
         })
     }
 
@@ -109,6 +145,9 @@ pub async fn limit(State(state): State<AppState>, request: Request, next: Next) 
     );
     if !admission.admit_rate(provision) {
         return (StatusCode::TOO_MANY_REQUESTS, axum::Json(serde_json::json!({"code":"relay_request_limit","detail":"Relay request limit reached. Please try again shortly."}))).into_response();
+    }
+    if path == crate::api::DICTATION_STREAM_PATH {
+        return next.run(request).await;
     }
     let Ok(_request_permit) = admission.requests.try_acquire() else {
         return busy();

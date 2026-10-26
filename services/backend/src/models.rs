@@ -259,6 +259,7 @@ pub struct DictationSessionRequest {
     pub device_id: DeviceId,
     pub device_secret: NonEmptyString,
     pub signed_app_transaction: NonEmptyString,
+    pub signed_lifetime_transaction: Option<NonEmptyString>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2155,6 +2156,8 @@ impl AnalyticsIngestRequest {
 pub struct RelaySessionResponse {
     pub relay_token: String,
     pub expires_at_epoch_seconds: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dictation_tier: Option<&'static str>,
 }
 
 impl RelaySessionResponse {
@@ -2164,6 +2167,7 @@ impl RelaySessionResponse {
         Self {
             relay_token: URL_SAFE_NO_PAD.encode(bytes),
             expires_at_epoch_seconds,
+            dictation_tier: None,
         }
     }
 }
