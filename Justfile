@@ -1134,6 +1134,7 @@ maintainer-testflight version run_id:
     export GITHUB_REPOSITORY="$(ghp repo view --json nameWithOwner --jq .nameWithOwner)"
     [[ "$(ghp api "repos/$GITHUB_REPOSITORY/actions/runs/{{ run_id }}" --jq .head_sha)" == "$(git rev-parse HEAD)" ]]
     mkdir -p build
+    rm -rf build/release-candidate.tar.gz build/release-runtime
     ghp run download "{{ run_id }}" --repo "$GITHUB_REPOSITORY" --name release-candidate --dir build
     tar -xzf build/release-candidate.tar.gz -C build release-runtime
     (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
