@@ -1146,3 +1146,4 @@ maintainer-testflight version run_id:
     ghp release create "{{ version }}" --draft --verify-tag --title "{{ version }}" --notes-file build/release-notes.md
     ghp release upload "{{ version }}" build/release-runtime/*
     ghp release edit "{{ version }}" --draft=false
+    rm -f AgenTTY_iOS.ipa AgenTTY_iOS.app.dSYM.zip
