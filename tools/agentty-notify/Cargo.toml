@@ -6,8 +6,8 @@ version = "0.0.0"
 edition = "2024"
 
 [dependencies]
-reqwest = { version = "0.12.14", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
-time = { version = "0.3.41", features = ["formatting", "local-offset", "macros"] }
-toml = "0.8.23"
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+time = { version = "0.3.55", features = ["formatting", "local-offset", "macros"] }
+toml = "1.1.8"
