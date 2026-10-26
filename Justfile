@@ -1127,6 +1127,7 @@ maintainer-testflight version run_id:
     set -euo pipefail
     ./scripts/check-release-tag "{{ version }}"
     ./scripts/check-build-identity
+    export AGENTTY_APP_IDENTIFIER="${AGENTTY_APP_IDENTIFIER:-$(sed -n 's/^AGENTTY_BUNDLE_ID *= *//p' Config/Local.xcconfig)}"
     ./scripts/check-release-version "{{ version }}"
     just release-toolchain-check
     export MARKETING_VERSION="{{ version }}"
