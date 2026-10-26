@@ -47,12 +47,14 @@ final class AgenTTYDictationLibrary {
     static func capabilities(backend: AgenTTYDictation.Backend) throws -> DictationCapabilities {
         let models: Set<String>
         switch backend {
-        case .relayOpenAI: models = [backend.libraryIdentifier]
+        case .relayMAITranscribe2: models = [backend.libraryIdentifier]
         case .direct: models = Set(AgenTTYDictation.Model.allCases.map(\.libraryIdentifier))
         }
+        var modelOptions = Dictionary(uniqueKeysWithValues: AgenTTYDictation.Model.allCases.map { ($0.libraryIdentifier, $0.libraryOptions) })
+        modelOptions[backend.libraryIdentifier] = backend.model.libraryOptions
         return try DictationCapabilities(
             models: models, fallbackModel: backend.libraryIdentifier, supportsCleanup: false,
-            modelOptions: Dictionary(uniqueKeysWithValues: AgenTTYDictation.Model.allCases.map { ($0.libraryIdentifier, $0.libraryOptions) })
+            modelOptions: modelOptions
         )
     }
 
@@ -285,7 +287,14 @@ final class AgenTTYDictationLibrary {
             dictionary: capturePlan.dictionary, cleanupEnabled: false, outputLanguage: nil,
             thinkingLevel: capturePlan.thinkingLevel
         )
-        let options = AgenTTYDictation.Model.allCases.first { $0.libraryIdentifier == model }?.libraryOptions ?? [:]
+        let options: [String: String]
+        if model == AgenTTYDictation.Backend.relayMAITranscribe2.batchLibraryIdentifier {
+            options = AgenTTYDictation.Model.azureMAITranscribe2.libraryOptions
+        } else {
+            options = AgenTTYDictation.Model.allCases.first {
+                $0.libraryIdentifier == model || $0.batchLibraryIdentifier == model
+            }?.libraryOptions ?? [:]
+        }
         return DictationPlan(unverifiedProfile: profile, context: .terminal, capabilities: try DictationCapabilities(
             models: [model], fallbackModel: model, supportsCleanup: false, modelOptions: [model: options]
         ))
@@ -327,21 +336,28 @@ final class AgenTTYDictationLibrary {
 extension AgenTTYDictation.Backend {
     nonisolated var libraryIdentifier: String {
         switch self {
-        case .relayOpenAI: "agentty-relay/gpt-4o-mini-transcribe/batch"
+        case .relayMAITranscribe2: "agentty-relay/MAI-Transcribe-2/progressive"
         case .direct(let model): model.libraryIdentifier
+        }
+    }
+
+    nonisolated var batchLibraryIdentifier: String {
+        switch self {
+        case .relayMAITranscribe2: "agentty-relay/MAI-Transcribe-2/batch"
+        case .direct(let model): model.batchLibraryIdentifier
         }
     }
 
     nonisolated var libraryDisplayName: String {
         switch self {
-        case .relayOpenAI: "the AgenTTY relay"
+        case .relayMAITranscribe2: "MAI-Transcribe-2"
         case .direct(let model): model.displayName
         }
     }
 
     nonisolated func resolvingLibraryModel(_ identifier: String) throws -> Self {
         switch self {
-        case .relayOpenAI: return .relayOpenAI
+        case .relayMAITranscribe2: return .relayMAITranscribe2
         case .direct:
             guard let model = AgenTTYDictation.Model.allCases.first(where: { $0.libraryIdentifier == identifier }) else {
                 throw AgenTTYDictation.ConfigurationError.invalidModelSelection(identifier)
@@ -394,6 +410,7 @@ extension AgenTTYDictation.Model {
         case .gemini35TranscribeLiveSmart: AgenTTYDictation.Model.gemini35TranscribeSmart.libraryIdentifier
         case .gemini35TranscribeLiveVerbatim: AgenTTYDictation.Model.gemini35TranscribeVerbatim.libraryIdentifier
         case .assemblyAIUniversal35ProRealtime: AgenTTYDictation.Model.assemblyAIUniversal35Pro.libraryIdentifier
+        case .azureMAITranscribe2: "azure/MAI-Transcribe-2/batch"
         default: libraryIdentifier
         }
     }

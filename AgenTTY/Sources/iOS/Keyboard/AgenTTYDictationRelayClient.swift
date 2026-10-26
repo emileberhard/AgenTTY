@@ -1,9 +1,12 @@
 import Foundation
+import SpeechKit
+import StoreKit
 
 private nonisolated struct AgenTTYDictationSessionRequest: Encodable, Sendable {
     let deviceID: UUID
     let deviceSecret: String
     let signedAppTransaction: String
+    let signedLifetimeTransaction: String?
 }
 
 private nonisolated struct AgenTTYLegacyDictationSessionRequest: Encodable, Sendable {
@@ -11,291 +14,113 @@ private nonisolated struct AgenTTYLegacyDictationSessionRequest: Encodable, Send
     let deviceSecret: String
 }
 
-private nonisolated struct AgenTTYDictationRelayTranscriptionRequest: Codable, Sendable {
-    let audioBase64: String
-    let mimeType: String
-    let fileName: String
-    let instructions: String?
-    let languageHints: [String]
-}
+private nonisolated struct AgenTTYDictationRelaySession: Decodable, Sendable {
+    enum Tier: String, Decodable, Sendable {
+        case free
+        case lifetime
+    }
 
-nonisolated struct AgenTTYDictationRelayTranscriptionResponse: Codable, Sendable {
-    let text: String
-    let secondsCharged: Int
-    let remainingSecondsThisWeek: Int
-    let quotaResetsAtEpochSeconds: Int
-}
-
-private nonisolated struct AgenTTYDictationRelaySessionResponse: Codable, Sendable {
     let relayToken: String
     let expiresAtEpochSeconds: Int
-}
-
-private nonisolated struct AgenTTYDictationRelayErrorResponse: Codable, Sendable {
-    let detail: String
-    let remainingSecondsThisWeek: Int?
-    let quotaResetsAtEpochSeconds: Int?
-    let code: String?
-}
-
-private nonisolated struct AgenTTYDictationRelayRequestMetadata: Sendable {
-    let host: String
-    let requestBodyBytes: Int
-    let audioBytes: Int
-}
-
-nonisolated enum AgenTTYDictationRelayError: LocalizedError, Sendable {
-    case invalidResponse
-    case unauthorized
-    case quotaExceeded(resetAtEpochSeconds: Int?)
-    case payloadTooLarge
-    case backend(detail: String)
-    case unexpectedStatusCode(Int)
-
-    var errorDescription: String? {
-        switch self {
-        case .invalidResponse:
-            return "Invalid dictation backend response."
-        case .unauthorized:
-            return "Dictation is temporarily unavailable. Please try again."
-        case .quotaExceeded(let resetAtEpochSeconds):
-            guard let resetAtEpochSeconds else {
-                return "Weekly dictation limit reached."
-            }
-            let resetDate = Date(timeIntervalSince1970: TimeInterval(resetAtEpochSeconds))
-            let formatter = DateFormatter()
-            formatter.dateStyle = .medium
-            formatter.timeStyle = .short
-            return "Weekly dictation limit reached. Try again after \(formatter.string(from: resetDate))."
-        case .payloadTooLarge:
-            return "Dictation recording was too large for the backend. Try again with a shorter recording."
-        case .backend(let detail):
-            return detail
-        case .unexpectedStatusCode(let statusCode):
-            return "Unexpected backend status code: \(statusCode)."
-        }
-    }
-
-    var shouldCaptureToSentry: Bool {
-        switch self {
-        case .quotaExceeded:
-            false
-        case .invalidResponse, .unauthorized, .payloadTooLarge, .backend, .unexpectedStatusCode:
-            true
-        }
-    }
+    let dictationTier: Tier?
 }
 
 actor AgenTTYDictationRelayClient {
     static let shared = AgenTTYDictationRelayClient()
-    static let maximumAudioByteCount = 25_000_000
-    private let sessionRefreshLeadTime: TimeInterval = 5 * 60
-
     private let urlSession: URLSession
-    private var cachedRelaySession: AgenTTYNotifyRelaySession?
+    private var cachedSession: AgenTTYDictationRelaySession?
+    private var pendingSession: Task<AgenTTYDictationRelaySession, any Error>?
 
     init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
     }
 
-    private var baseURL: URL {
-        AgenTTYRelayConfiguration.baseURL
+    func relay() async throws -> SpeechRelay {
+        let session: AgenTTYDictationRelaySession
+        if let cachedSession, Double(cachedSession.expiresAtEpochSeconds) - Date().timeIntervalSince1970 > 5 * 60 {
+            session = cachedSession
+        } else if let pendingSession {
+            session = try await pendingSession.value
+        } else {
+            let task = Task { try await self.issueSession() }
+            pendingSession = task
+            defer { pendingSession = nil }
+            session = try await task.value
+            cachedSession = session
+        }
+        return try SpeechRelay(
+            baseURL: AgenTTYRelayConfiguration.baseURL.appending(path: "v1/dictation/azure-speech"),
+            bearerToken: session.relayToken
+        )
     }
 
-    func transcribe(
-        audioData: Data,
-        fileName: String,
-        mimeType: String,
-        instructions: String?,
-        languageHints: [String]
-    ) async throws -> AgenTTYDictationRelayTranscriptionResponse {
-        guard audioData.count <= Self.maximumAudioByteCount else {
-            throw AgenTTYDictationRelayError.payloadTooLarge
-        }
-        let relayToken = try await issueRelaySession()
-        let requestBody = AgenTTYDictationRelayTranscriptionRequest(
-            audioBase64: audioData.base64EncodedString(),
-            mimeType: mimeType,
-            fileName: fileName,
-            instructions: instructions,
-            languageHints: languageHints
-        )
+    func invalidateSession() {
+        cachedSession = nil
+    }
 
-        var request = try AgenTTYRelayTransport.makeJSONRequest(
-            baseURL: baseURL,
-            path: "v1/dictation/transcriptions",
-            body: requestBody
-        )
-        request.setValue("Bearer \(relayToken)", forHTTPHeaderField: "Authorization")
-        let requestMetadata = AgenTTYDictationRelayRequestMetadata(
-            host: baseURL.host ?? "unknown",
-            requestBodyBytes: request.httpBody?.count ?? 0,
-            audioBytes: audioData.count
-        )
-
-        EsmaLog.terminal.notice(
-            "dictation relay request start host=\(requestMetadata.host, privacy: .public) audio_bytes=\(requestMetadata.audioBytes) request_body_bytes=\(requestMetadata.requestBodyBytes)"
-        )
+    func reportTierMismatch(hasLifetimeAccess: Bool) {
+        guard hasLifetimeAccess, cachedSession?.dictationTier == .free else { return }
+        EsmaLog.terminal.warning("dictation relay granted free tier while lifetime access is unlocked")
         AgenTTYSentryService.addBreadcrumb(
-            message: "Dictation relay request started",
+            message: "Dictation tier differs from local lifetime access",
             category: "dictation",
-            level: "info",
-            data: [
-                "host": requestMetadata.host,
-                "audio_bytes": "\(requestMetadata.audioBytes)",
-                "request_body_bytes": "\(requestMetadata.requestBodyBytes)",
-            ]
+            level: "warning",
+            data: ["dictation_tier": "free", "local_lifetime_access": "true"]
         )
-
-        do {
-            return try await sendTranscriptionRequest(request, metadata: requestMetadata)
-        } catch AgenTTYDictationRelayError.unauthorized {
-            cachedRelaySession = nil
-            let refreshedRelayToken = try await issueRelaySession()
-            request.setValue("Bearer \(refreshedRelayToken)", forHTTPHeaderField: "Authorization")
-            EsmaLog.terminal.notice(
-                "dictation relay request retry host=\(requestMetadata.host, privacy: .public) reason=unauthorized request_body_bytes=\(requestMetadata.requestBodyBytes)"
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Dictation relay request retrying after unauthorized response",
-                category: "dictation",
-                level: "warning",
-                data: [
-                    "host": requestMetadata.host,
-                    "request_body_bytes": "\(requestMetadata.requestBodyBytes)",
-                ]
-            )
-            return try await sendTranscriptionRequest(request, metadata: requestMetadata)
-        }
     }
 
-    private func issueRelaySession() async throws -> String {
-        if let cachedRelaySession, !cachedRelaySession.isExpiringSoon(refreshLeadTime: sessionRefreshLeadTime) {
-            return cachedRelaySession.relayToken
-        }
-
+    private func issueSession() async throws -> AgenTTYDictationRelaySession {
         let identity = AgenTTYRelayTransport.currentDeviceIdentity()
-        let signedTransaction = await AgenTTYRelayTransport.signedAppTransaction()
+        let signedAppTransaction = await AgenTTYRelayTransport.signedAppTransaction()
         let request: URLRequest
-        if let signedTransaction {
+        if let signedAppTransaction {
+            var signedLifetimeTransaction: String?
+            for await result in Transaction.currentEntitlements(for: AgenTTYLifetimeAccessProduct.productID) {
+                if case .verified = result {
+                    signedLifetimeTransaction = result.jwsRepresentation
+                    break
+                }
+            }
             request = try AgenTTYRelayTransport.makeJSONRequest(
-                baseURL: baseURL,
+                baseURL: AgenTTYRelayConfiguration.baseURL,
                 path: "v1/dictation/sessions",
-                body: AgenTTYDictationSessionRequest(deviceID: identity.deviceID, deviceSecret: identity.deviceSecret, signedAppTransaction: signedTransaction)
+                body: AgenTTYDictationSessionRequest(
+                    deviceID: identity.deviceID,
+                    deviceSecret: identity.deviceSecret,
+                    signedAppTransaction: signedAppTransaction,
+                    signedLifetimeTransaction: signedLifetimeTransaction
+                )
             )
         } else {
             request = try AgenTTYRelayTransport.makeJSONRequest(
-                baseURL: baseURL,
+                baseURL: AgenTTYRelayConfiguration.baseURL,
                 path: "v1/relay-sessions",
                 body: AgenTTYLegacyDictationSessionRequest(deviceID: identity.deviceID, deviceSecret: identity.deviceSecret)
             )
         }
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AgenTTYDictationRelayError.invalidResponse
-        }
-
-        if httpResponse.statusCode == 200 {
-            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYNotifyRelaySession.self, from: data)
-            cachedRelaySession = session
-            return session.relayToken
-        }
-
-        if httpResponse.statusCode == 401 {
-            try await ensureDeviceIdentity()
-            let retryRequest = request
-            let (retryData, retryResponse) = try await urlSession.data(for: retryRequest)
-            guard let retryHTTPResponse = retryResponse as? HTTPURLResponse else {
-                throw AgenTTYDictationRelayError.invalidResponse
-            }
-            guard retryHTTPResponse.statusCode == 200 else {
-                throw AgenTTYDictationRelayError.unexpectedStatusCode(retryHTTPResponse.statusCode)
-            }
-            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYNotifyRelaySession.self, from: retryData)
-            cachedRelaySession = session
-            return session.relayToken
-        }
-
-        throw AgenTTYDictationRelayError.unexpectedStatusCode(httpResponse.statusCode)
-    }
-
-    private func ensureDeviceIdentity() async throws {
-        do {
+        var (data, response) = try await urlSession.data(for: request)
+        if (response as? HTTPURLResponse)?.statusCode == 401 {
             try await AgenTTYRelayTransport.ensureCurrentDeviceIdentity(
-                baseURL: baseURL,
+                baseURL: AgenTTYRelayConfiguration.baseURL,
                 urlSession: urlSession
             )
-        } catch let error as AgenTTYRelayTransportError {
-            switch error {
-            case .missingBundleIdentifier, .invalidResponse:
-                throw AgenTTYDictationRelayError.invalidResponse
-            case .unauthorized:
-                throw AgenTTYDictationRelayError.unauthorized
-            case .unexpectedStatusCode(let statusCode):
-                throw AgenTTYDictationRelayError.unexpectedStatusCode(statusCode)
-            }
+            (data, response) = try await urlSession.data(for: request)
         }
-    }
-
-    private func sendTranscriptionRequest(
-        _ request: URLRequest,
-        metadata: AgenTTYDictationRelayRequestMetadata
-    ) async throws -> AgenTTYDictationRelayTranscriptionResponse {
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AgenTTYDictationRelayError.invalidResponse
-        }
-
-        let statusCode = httpResponse.statusCode
-        if statusCode != 200 {
-            let responsePreview = AgenTTYRelayTransport.responsePreview(from: data, maximumLength: 240)
-            EsmaLog.terminal.error(
-                "dictation relay request failed host=\(metadata.host, privacy: .public) status=\(statusCode) audio_bytes=\(metadata.audioBytes) request_body_bytes=\(metadata.requestBodyBytes) response_preview=\(responsePreview, privacy: .public)"
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Dictation relay request failed",
-                category: "dictation",
-                level: "error",
-                data: [
-                    "host": metadata.host,
-                    "status_code": "\(statusCode)",
-                    "audio_bytes": "\(metadata.audioBytes)",
-                    "request_body_bytes": "\(metadata.requestBodyBytes)",
-                    "response_preview": responsePreview,
-                ]
-            )
-        }
-
-        switch statusCode {
+        guard let response = response as? HTTPURLResponse else { throw SpeechKitError.invalidResponse }
+        switch response.statusCode {
         case 200:
-            return try AgenTTYRelayTransport.makeDecoder()
-                .decode(AgenTTYDictationRelayTranscriptionResponse.self, from: data)
+            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYDictationRelaySession.self, from: data)
+            guard signedAppTransaction == nil || session.dictationTier != nil else { throw SpeechKitError.invalidResponse }
+            return session
         case 401:
-            throw AgenTTYDictationRelayError.unauthorized
-        case 413:
-            throw AgenTTYDictationRelayError.payloadTooLarge
-        case 429:
-            let errorBody = try? AgenTTYRelayTransport.makeDecoder()
-                .decode(AgenTTYDictationRelayErrorResponse.self, from: data)
-            if let errorBody, errorBody.code != nil {
-                throw AgenTTYDictationRelayError.backend(detail: errorBody.detail)
-            }
-            throw AgenTTYDictationRelayError.quotaExceeded(
-                resetAtEpochSeconds: errorBody?.quotaResetsAtEpochSeconds
-            )
+            throw SpeechKitError.relayRejected(kind: "unauthorized")
+        case 403:
+            throw SpeechKitError.relayRejected(kind: "verification_required")
         default:
-            if let errorBody = try? AgenTTYRelayTransport.makeDecoder()
-                .decode(AgenTTYDictationRelayErrorResponse.self, from: data) {
-                throw AgenTTYDictationRelayError.backend(detail: errorBody.detail)
-            }
-            throw AgenTTYDictationRelayError.unexpectedStatusCode(httpResponse.statusCode)
+            throw SpeechKitError.httpFailure(
+                statusCode: response.statusCode,
+                body: HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
+            )
         }
-    }
-}
-
-private nonisolated extension AgenTTYNotifyRelaySession {
-    func isExpiringSoon(refreshLeadTime: TimeInterval) -> Bool {
-        let now = Date().timeIntervalSince1970
-        return Double(expiresAtEpochSeconds) - now <= refreshLeadTime
     }
 }

@@ -12,7 +12,7 @@ nonisolated struct AgenTTYDictationIntegrationTests {
     @Test
     func batchFactoryTranscribesWithTerminalContextAndDictionary() async throws {
         let model = AgenTTYDictation.Model.openAIGPT4oMiniTranscribe
-        let engine = try AgenTTYBatchTranscription.engine(for: model)
+        let engine = try await AgenTTYBatchTranscription.engine(for: model)
         let audio = try TranscriptionAudio(
             data: Data(contentsOf: Self.fixture()), fileName: "terminal-dictation.wav",
             mimeType: "audio/wav", fileExtension: "wav"
@@ -28,7 +28,7 @@ nonisolated struct AgenTTYDictationIntegrationTests {
     @Test
     func realtimeFactoryFinalizesAndPreservesFallbackAudio() async throws {
         let model = AgenTTYDictation.Model.elevenLabsScribeV2Realtime
-        let dictation = try AgenTTYRealtimeDictation.make(model: model, languageHints: languages, customVocabulary: dictionary)
+        let dictation = try await AgenTTYRealtimeDictation.make(model: model, languageHints: languages, customVocabulary: dictionary)
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = DictationRecordingStore<String>(directory: directory, retention: try DictationRecordingRetention(maximumCount: 1, maximumAge: .seconds(600)))
@@ -41,7 +41,7 @@ nonisolated struct AgenTTYDictationIntegrationTests {
         }
         let recording = try await writer.finish()
         let output = try await AgenTTYRealtimeDictation.transcribe(
-            dictation: dictation, recording: recording, model: model,
+            dictation: dictation, recording: recording, backend: .direct(model),
             languageHints: languages, customVocabulary: dictionary
         )
         Self.expectComplete(output.text)

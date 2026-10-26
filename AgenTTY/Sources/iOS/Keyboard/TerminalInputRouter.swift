@@ -44,6 +44,7 @@ final class TerminalInputRouter {
     private(set) var isDictationProcessing = false
     private(set) var isDictationArming = false
     var dictationError: String?
+    var lifetimeAccessController: AgenTTYLifetimeAccessController?
     var keyboardEncodingMode: KeyboardEncodingMode = .defaultShortcuts
     var hostConnectionPhase: AgenTTYHostConnectionPhase = .disconnected
     var hostConnectionMethod: AgenTTYHostConnectionMethod?
@@ -359,21 +360,22 @@ final class TerminalInputRouter {
                 if case .failed(let error) = ending { throw error }
                 try Task.checkCancellation()
                 let output: AgenTTYDictationOutput
-                if let dictation, case .direct(let model) = capture.backend {
+                if let dictation {
                     output = try await AgenTTYRealtimeDictation.transcribe(
-                        dictation: dictation, recording: recording, model: model,
+                        dictation: dictation, recording: recording, backend: capture.backend,
                         languageHints: capture.plan.languages, customVocabulary: capture.plan.dictionary
                     )
                 } else {
                     guard let recording else { throw SpeechKitError.invalidRequest("Dictation recording is unavailable") }
                     let context = capture.backend.promptFormat == .unsupported ? nil : await captureDictationShellContext()
                     let instructions = Self.dictationInstructions(for: capture.backend, shellContext: context)
-                    let audio = try await recording.transcriptionAudio(maximumByteCount: Self.maximumAudioByteCount(backend: capture.backend))
-                    let text = try await Self.transcribeDictationAudio(
-                        preparedAudio: PreparedDictationAudio(audioData: audio.data, transcriptionAudio: audio),
-                        instructions: instructions, backend: capture.backend,
-                        languageHints: capture.plan.languages, customVocabulary: capture.plan.dictionary
+                    let engine = try await AgenTTYBatchTranscription.engine(for: capture.backend.model)
+                    let audio = try await recording.transcriptionAudio(maximumByteCount: engine.maximumAudioByteCount)
+                    let request = TranscriptionRequest(
+                        audio: audio, languageHints: capture.plan.languages,
+                        customVocabulary: capture.plan.dictionary, instructions: instructions
                     )
+                    let text = try await engine.transcribe(request).text
                     output = AgenTTYDictationOutput(
                         text: text, model: capture.backend.libraryIdentifier,
                         kind: instructions == nil ? .providerOutput : .contextualOutput,
@@ -400,10 +402,15 @@ final class TerminalInputRouter {
                     kind: .failure, model: capture.backend.libraryIdentifier, contextWasUsed: false
                 )
                 if let incomplete = error as? IncompleteDictationRecording<String> { recording = incomplete.recording }
-                if Self.shouldReportDictationErrorToSentry(error) {
+                if AgenTTYDictationErrorPresentation.shouldCaptureToSentry(error) {
                     AgenTTYSentryService.capture(error: error, context: "dictation_transcription_failure", data: ["backend_identifier": capture.backend.logIdentifier])
                 }
-                dictationError = Self.dictationErrorMessage(for: error)
+                if case SpeechKitError.relayRejected(kind: "unauthorized") = error {
+                    await AgenTTYDictationRelayClient.shared.invalidateSession()
+                }
+                dictationError = AgenTTYDictationErrorPresentation.message(
+                    for: error, hasLifetimeAccess: lifetimeAccessController?.hasLifetimeAccess == true, now: Date()
+                )
             }
             if let archiveWarning = await archiveWarning { dictationError = archiveWarning }
             if let recording { try? await store.discard(recording) }
@@ -426,11 +433,15 @@ final class TerminalInputRouter {
             registerDictationAudioSessionObserversIfNeeded()
             let hapticsEnabled = try await audioSessionBoundary.activateForRecording()
             if !hapticsEnabled { EsmaLog.terminal.error("dictation recording-session haptics are not enabled") }
-            if case .direct(let model) = preparedCapture.backend, model.capture == .streaming {
-                dictation = try AgenTTYRealtimeDictation.make(
+            let model = preparedCapture.backend.model
+            if model.capture == .streaming {
+                dictation = try await AgenTTYRealtimeDictation.make(
                     model: model, languageHints: preparedCapture.plan.languages,
                     customVocabulary: preparedCapture.plan.dictionary
                 )
+            }
+            if case .relayMAITranscribe2 = preparedCapture.backend {
+                await AgenTTYDictationRelayClient.shared.reportTierMismatch(hasLifetimeAccess: lifetimeAccessController?.hasLifetimeAccess == true)
             }
             let store: DictationRecordingStore<String>
             if let realtimeRecordingStore { store = realtimeRecordingStore }
@@ -477,17 +488,12 @@ final class TerminalInputRouter {
                 await AgenTTYDictationLibrary.shared.record(capture, text: String(reflecting: type(of: error)), kind: .failure, model: capture.backend.libraryIdentifier, contextWasUsed: false)
             }
             if let writer { try? await writer.discard() }
-            dictationError = Self.dictationErrorMessage(for: error)
+            dictationError = AgenTTYDictationErrorPresentation.message(
+                for: error, hasLifetimeAccess: lifetimeAccessController?.hasLifetimeAccess == true, now: Date()
+            )
             deactivateAudioSession()
         }
         isDictationArming = false
-    }
-
-    nonisolated private static func dictationErrorMessage(for error: any Error) -> String {
-        if error is AgenTTYDictation.ConfigurationError {
-            return error.localizedDescription
-        }
-        return "Dictation failed: \(error.localizedDescription)"
     }
 
     private func captureDictationShellContext() async -> String? {
@@ -648,63 +654,6 @@ final class TerminalInputRouter {
         }
     }
 
-    @concurrent
-    nonisolated private static func transcribeDictationAudio(
-        preparedAudio: PreparedDictationAudio,
-        instructions: String?,
-        backend: AgenTTYDictation.Backend,
-        languageHints: [String],
-        customVocabulary: [String]
-    ) async throws -> String {
-        switch backend {
-        case .relayOpenAI:
-            let response = try await AgenTTYDictationRelayClient.shared.transcribe(
-                audioData: preparedAudio.audioData,
-                fileName: Self.dictationFileName,
-                mimeType: Self.dictationMimeType,
-                instructions: customVocabulary.isEmpty ? instructions : [instructions, "Preserve these dictionary terms when spoken: " + customVocabulary.joined(separator: ", ")].compactMap { $0 }.joined(separator: "\n\n"),
-                languageHints: languageHints
-            )
-            EsmaLog.terminal.notice(
-                "dictation transcribe: relay charged_seconds=\(response.secondsCharged, privacy: .public) remaining_seconds=\(response.remainingSecondsThisWeek, privacy: .public)"
-            )
-            return response.text
-        case .direct(let model):
-            return try await transcribeDictationAudio(
-                preparedAudio: preparedAudio,
-                instructions: instructions,
-                model: model,
-                languageHints: languageHints,
-                customVocabulary: customVocabulary
-            )
-        }
-    }
-
-    @concurrent
-    nonisolated private static func transcribeDictationAudio(
-        preparedAudio: PreparedDictationAudio,
-        instructions: String?,
-        model: AgenTTYDictation.Model,
-        languageHints: [String],
-        customVocabulary: [String]
-    ) async throws -> String {
-        let transcriptionRequest = TranscriptionRequest(
-            audio: preparedAudio.transcriptionAudio,
-            languageHints: languageHints,
-            customVocabulary: customVocabulary,
-            instructions: instructions
-        )
-        let engine = try AgenTTYBatchTranscription.engine(for: model)
-        return try await engine.transcribe(transcriptionRequest).text
-    }
-
-    nonisolated private static func maximumAudioByteCount(backend: AgenTTYDictation.Backend) throws -> Int {
-        switch backend {
-        case .relayOpenAI: AgenTTYDictationRelayClient.maximumAudioByteCount
-        case .direct(let model): try AgenTTYBatchTranscription.engine(for: model).maximumAudioByteCount
-        }
-    }
-
     private enum DictationRecordingError: LocalizedError {
         case failedToResume
 
@@ -715,25 +664,6 @@ final class TerminalInputRouter {
             }
         }
     }
-
-    nonisolated private static let dictationFileName = "dictation.wav"
-    nonisolated private static let dictationMimeType = "audio/wav"
-
-    nonisolated private static func shouldReportDictationErrorToSentry(_ error: Error) -> Bool {
-        if error is AgenTTYDictation.ConfigurationError {
-            return false
-        }
-        if let relayError = error as? AgenTTYDictationRelayError {
-            return relayError.shouldCaptureToSentry
-        }
-        return true
-    }
-
-}
-
-private nonisolated struct PreparedDictationAudio: Sendable {
-    let audioData: Data
-    let transcriptionAudio: TranscriptionAudio
 }
 
 private nonisolated struct DictationInterruptionPayload: Sendable {

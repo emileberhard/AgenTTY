@@ -436,6 +436,7 @@ struct AgenTTYiOSApp: App {
             .onAppear {
                 appDelegate.shellState = shellState
                 inputRouter.keyboardEncodingMode = keyboardEncodingMode
+                inputRouter.lifetimeAccessController = lifetimeAccessController
                 lifetimeAccessController.setSceneActive(scenePhase == .active)
                 hostReachabilityMonitor.updateHosts(hostStore.hosts)
                 hostReachabilityMonitor.setSceneActive(scenePhase == .active)
@@ -468,6 +469,9 @@ struct AgenTTYiOSApp: App {
                     await AgenTTYDictationLibrary.shared.resumePublication()
                     await lifetimeAccessController.refreshForForeground()
                 }
+            }
+            .onChange(of: lifetimeAccessController.hasLifetimeAccess) { _, _ in
+                Task { await AgenTTYDictationRelayClient.shared.invalidateSession() }
             }
             .onChange(of: hostStore.hosts) { _, newHosts in
                 hostReachabilityMonitor.updateHosts(newHosts)

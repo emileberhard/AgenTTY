@@ -18,16 +18,16 @@ nonisolated enum AgenTTYRealtimeDictation {
     static func transcribe(
         dictation: RealtimeDictation,
         recording: DictationRecording<String>?,
-        model: AgenTTYDictation.Model,
+        backend: AgenTTYDictation.Backend,
         languageHints: [String],
         customVocabulary: [String]
     ) async throws -> AgenTTYDictationOutput {
-        try await transcribe(dictation: dictation, modelID: model.libraryIdentifier) { error in
+        try await transcribe(dictation: dictation, modelID: backend.libraryIdentifier) { error in
             guard let recording else { throw error }
-            let engine = try AgenTTYBatchTranscription.engine(for: model)
+            let engine = try await AgenTTYBatchTranscription.engine(for: backend.model)
             let audio = try await recording.transcriptionAudio(maximumByteCount: engine.maximumAudioByteCount)
             let request = TranscriptionRequest(audio: audio, languageHints: languageHints, customVocabulary: customVocabulary)
-            return AgenTTYDictationOutput(text: try await engine.transcribe(request).text, model: model.batchLibraryIdentifier, kind: .providerOutput, contextWasUsed: false)
+            return AgenTTYDictationOutput(text: try await engine.transcribe(request).text, model: backend.batchLibraryIdentifier, kind: .providerOutput, contextWasUsed: false)
         }
     }
 
@@ -41,6 +41,9 @@ nonisolated enum AgenTTYRealtimeDictation {
         } catch is CancellationError {
             throw CancellationError()
         } catch {
+            if let kind = AgenTTYDictationErrorPresentation.relayRejectionKind(for: error) {
+                throw SpeechKitError.relayRejected(kind: kind)
+            }
             return try await fallback(error)
         }
     }
@@ -49,7 +52,7 @@ nonisolated enum AgenTTYRealtimeDictation {
         model: AgenTTYDictation.Model,
         languageHints: [String],
         customVocabulary: [String]
-    ) throws -> RealtimeDictation {
+    ) async throws -> RealtimeDictation {
         switch model {
         case .elevenLabsScribeV2Realtime:
             let configuration = try ElevenLabsRealtimeSessionConfiguration(
@@ -78,7 +81,7 @@ nonisolated enum AgenTTYRealtimeDictation {
             return RealtimeDictation(session: AssemblyAIRealtimeSession(configuration: configuration))
         case .azureMAITranscribe2:
             let session = ProgressiveRealtimeTranscriptionSession(
-                provider: AzureSpeechTranscriptionProvider(configuration: try AgenTTYAzureSpeech.configuration()),
+                provider: AzureSpeechTranscriptionProvider(configuration: try await AgenTTYAzureSpeech.configuration()),
                 request: ProgressiveTranscriptionRequest(
                     languageHints: languageHints,
                     customVocabulary: customVocabulary

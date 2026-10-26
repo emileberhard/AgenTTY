@@ -7,18 +7,19 @@ import Testing
 struct DictationLibraryPolicyTests {
     @Test
     func publicRelayCannotBeBypassedBySharedPreferences() throws {
-        let capabilities = try AgenTTYDictationLibrary.capabilities(backend: .relayOpenAI)
+        let capabilities = try AgenTTYDictationLibrary.capabilities(backend: .relayMAITranscribe2)
         let profile = DictationProfile(
             archiveEnabled: true, preferredModel: "elevenlabs/scribe_v2_realtime/realtime",
             languages: ["sv", "en"], dictionary: ["AgenTTY", "NuGet"],
             cleanupEnabled: true, outputLanguage: "fr", thinkingLevel: "high"
         )
         let plan = DictationPlan(unverifiedProfile: profile, context: .terminal, capabilities: capabilities)
-        let backend = try AgenTTYDictation.Backend.relayOpenAI.resolvingLibraryModel(plan.effectiveModel)
+        let backend = try AgenTTYDictation.Backend.relayMAITranscribe2.resolvingLibraryModel(plan.effectiveModel)
         #expect(plan.usesFallbackModel)
-        #expect(backend.libraryIdentifier == "agentty-relay/gpt-4o-mini-transcribe/batch")
+        #expect(backend.libraryIdentifier == "agentty-relay/MAI-Transcribe-2/progressive")
         #expect(plan.languages == ["sv", "en"])
         #expect(plan.dictionary == ["AgenTTY", "NuGet"])
+        #expect(plan.providerOptions == ["transcribeStyle": "clean"])
         #expect(!plan.cleanupEnabled)
         #expect(plan.outputLanguage == nil)
         #expect(profile.preferredModel == "elevenlabs/scribe_v2_realtime/realtime")
@@ -40,7 +41,7 @@ struct DictationLibraryPolicyTests {
 
     @Test
     func unavailableProfileCanPreserveAnUnownedCaptureAfterConsent() throws {
-        let backend = AgenTTYDictation.Backend.relayOpenAI
+        let backend = AgenTTYDictation.Backend.relayMAITranscribe2
         let plan = AgenTTYDictationLibrary.heldPlan(backend: backend, capabilities: try AgenTTYDictationLibrary.capabilities(backend: backend))
         #expect(plan.archiveEnabled)
         #expect(plan.effectiveModel == backend.libraryIdentifier)

@@ -2,9 +2,16 @@ import Foundation
 import SpeechKit
 
 nonisolated enum AgenTTYAzureSpeech {
-    static func configuration() throws -> AzureSpeechProviderConfiguration {
-        try AzureSpeechProviderConfiguration(
-            access: .router(AgenTTYDictation.router()),
+    static func configuration() async throws -> AzureSpeechProviderConfiguration {
+        let access: SpeechProviderAccess
+        switch AgenTTYBuildFlavor.current() {
+        case .main:
+            access = .relay(try await AgenTTYDictationRelayClient.shared.relay())
+        case .dev, .exp:
+            access = .router(try AgenTTYDictation.router())
+        }
+        return try AzureSpeechProviderConfiguration(
+            access: access,
             model: .maiTranscribe2,
             modelOptions: .init(transcribeStyle: .clean)
         )
@@ -12,7 +19,7 @@ nonisolated enum AgenTTYAzureSpeech {
 }
 
 nonisolated enum AgenTTYBatchTranscription {
-    static func engine(for model: AgenTTYDictation.Model) throws -> TranscriptionEngine {
+    static func engine(for model: AgenTTYDictation.Model) async throws -> TranscriptionEngine {
         switch model {
         case .elevenLabsScribeV2, .elevenLabsScribeV2Realtime:
             let configuration = ElevenLabsProviderConfiguration(access: .router(try AgenTTYDictation.router()))
@@ -38,7 +45,7 @@ nonisolated enum AgenTTYBatchTranscription {
             )
             return TranscriptionEngine(provider: AssemblyAITranscriptionProvider(configuration: configuration))
         case .azureMAITranscribe2:
-            return TranscriptionEngine(provider: AzureSpeechTranscriptionProvider(configuration: try AgenTTYAzureSpeech.configuration()))
+            return TranscriptionEngine(provider: AzureSpeechTranscriptionProvider(configuration: try await AgenTTYAzureSpeech.configuration()))
         }
     }
 

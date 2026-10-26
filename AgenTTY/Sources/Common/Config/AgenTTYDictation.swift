@@ -135,12 +135,12 @@ nonisolated enum AgenTTYDictation {
     }
 
     nonisolated enum TranscriptionMode: Sendable {
-        case relayOpenAI
+        case relayMAITranscribe2
         case selectableModels
 
         var modelSelectionAvailable: Bool {
             switch self {
-            case .relayOpenAI:
+            case .relayMAITranscribe2:
                 false
             case .selectableModels:
                 true
@@ -149,8 +149,8 @@ nonisolated enum AgenTTYDictation {
 
         var enabledSubtitle: String {
             switch self {
-            case .relayOpenAI:
-                "Server-backed OpenAI transcription"
+            case .relayMAITranscribe2:
+                "MAI-Transcribe-2 cloud dictation"
             case .selectableModels:
                 "Transcription via AI provider"
             }
@@ -158,7 +158,7 @@ nonisolated enum AgenTTYDictation {
 
         var disabledSubtitle: String {
             switch self {
-            case .relayOpenAI:
+            case .relayMAITranscribe2:
                 "Server-backed transcription disabled"
             case .selectableModels:
                 "AI transcription disabled"
@@ -167,13 +167,20 @@ nonisolated enum AgenTTYDictation {
     }
 
     nonisolated enum Backend: Sendable {
-        case relayOpenAI
+        case relayMAITranscribe2
         case direct(Model)
+
+        var model: Model {
+            switch self {
+            case .relayMAITranscribe2: .azureMAITranscribe2
+            case .direct(let model): model
+            }
+        }
 
         var logIdentifier: String {
             switch self {
-            case .relayOpenAI:
-                "agentty-relay-openai"
+            case .relayMAITranscribe2:
+                "agentty-relay-mai-transcribe-2"
             case .direct(let model):
                 model.rawValue
             }
@@ -181,8 +188,8 @@ nonisolated enum AgenTTYDictation {
 
         var promptFormat: PromptFormat {
             switch self {
-            case .relayOpenAI:
-                .openAIText
+            case .relayMAITranscribe2:
+                .unsupported
             case .direct(let model):
                 model.promptFormat
             }
@@ -192,7 +199,7 @@ nonisolated enum AgenTTYDictation {
     static var currentTranscriptionMode: TranscriptionMode {
         switch AgenTTYBuildFlavor.current() {
         case .main:
-            .relayOpenAI
+            .relayMAITranscribe2
         case .dev, .exp:
             .selectableModels
         }
@@ -200,8 +207,8 @@ nonisolated enum AgenTTYDictation {
 
     static func currentBackend() throws -> Backend {
         switch currentTranscriptionMode {
-        case .relayOpenAI:
-            .relayOpenAI
+        case .relayMAITranscribe2:
+            .relayMAITranscribe2
         case .selectableModels:
             .direct(try selectedModel())
         }

@@ -7,6 +7,22 @@ import Testing
 @Suite
 struct RealtimeDictationFallbackTests {
     @Test
+    func relayQuotaRejectionDoesNotUploadTheRecordingAgain() async throws {
+        let dictation = RealtimeDictation(session: RejectedRealtimeSession())
+        dictation.append(Data(repeating: 0, count: 320))
+
+        do {
+            _ = try await AgenTTYRealtimeDictation.transcribe(dictation: dictation, modelID: "relay") { _ in
+                Issue.record("A relay refusal must not trigger a batch upload")
+                return AgenTTYDictationOutput(text: "", model: "batch", kind: .providerOutput, contextWasUsed: false)
+            }
+            Issue.record("Expected the quota rejection")
+        } catch SpeechKitError.relayRejected(let kind) {
+            #expect(kind == "quota_exhausted")
+        }
+    }
+
+    @Test
     func usesBatchResultWhenFinalCommitNeverCompletes() async throws {
         let dictation = RealtimeDictation(session: UnfinalizedRealtimeSession())
         dictation.append(Data(repeating: 0, count: 320))
@@ -44,4 +60,17 @@ private final class UnfinalizedRealtimeSession: RealtimeTranscriptionSession, @u
     func disconnect() async {
         continuation.withLock { $0?.finish() }
     }
+}
+
+private struct RejectedRealtimeSession: RealtimeTranscriptionSession {
+    let sampleRate = 16_000
+    let finalizationTimeout: Duration = .seconds(1)
+
+    func connectTranscription() async throws -> AsyncThrowingStream<RealtimeTranscriptionEvent, Error> {
+        throw SpeechKitError.relayRejected(kind: "quota_exhausted")
+    }
+
+    func sendAudioChunk(_ audioData: Data) async throws {}
+    func requestCommit() async throws {}
+    func disconnect() async {}
 }
