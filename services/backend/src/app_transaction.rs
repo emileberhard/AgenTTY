@@ -119,8 +119,8 @@ fn verify_lifetime_purchase_with_root(
         "not the lifetime purchase"
     );
     ensure!(
-        transaction.environment == app.environment,
-        "purchase environment differs from the app transaction"
+        transaction.environment == "Production" && app.environment == "Production",
+        "only App Store purchases grant the lifetime tier"
     );
     ensure!(
         transaction.revocation_date.is_none(),
@@ -409,6 +409,24 @@ mod tests {
             forged[field] = value;
             assert!(verify(&forged).is_err(), "{field} must be rejected");
         }
+        let sandbox_app = verify_app_transaction(
+            &sign(&serde_json::json!({"appTransactionId":"account-1", "bundleId":MAIN_BUNDLE_ID, "receiptType":"Sandbox", "receiptCreationDate":now})),
+            42,
+            root.clone(),
+        )
+        .unwrap();
+        let mut sandbox_purchase = purchase.clone();
+        sandbox_purchase["environment"] = serde_json::json!("Sandbox");
+        assert!(
+            verify_lifetime_purchase_with_root(
+                &sign(&sandbox_purchase),
+                &sandbox_app,
+                "lifetime",
+                root.clone()
+            )
+            .is_err(),
+            "free sandbox purchases must not grant the lifetime tier"
+        );
         let (untrusted_root, _) = certificate(None, true, None, 10);
         assert!(
             verify_lifetime_purchase_with_root(&sign(&purchase), &app, "lifetime", untrusted_root)
