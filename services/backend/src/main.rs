@@ -3,15 +3,12 @@
 mod operator_control;
 
 use std::future::IntoFuture;
-use std::net::SocketAddr;
 
 use anyhow::{Context, Result};
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use agentty_backend::{build_info, config::Settings, create_app, relay_broker::RelayBroker};
-
-const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:5012";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,6 +23,7 @@ async fn main() -> Result<()> {
     );
 
     let settings = Settings::from_env()?;
+    let bind_address = settings.bind_address;
     let relay_broker = RelayBroker::default();
     let _control = operator_control::ControlServer::start(
         settings.control_socket_path.clone(),
@@ -34,9 +32,6 @@ async fn main() -> Result<()> {
     .await?;
     let app = create_app(settings, relay_broker.clone()).await?;
 
-    let bind_address: SocketAddr = DEFAULT_BIND_ADDRESS
-        .parse()
-        .context("failed to parse default bind address")?;
     let listener = TcpListener::bind(bind_address)
         .await
         .with_context(|| format!("failed to bind relay on {bind_address}"))?;

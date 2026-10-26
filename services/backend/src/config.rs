@@ -1,7 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::models::PushType;
 
@@ -12,6 +12,7 @@ const BACKEND_DATABASE_PATH_DEFAULT: &str = "~/.agentty/backend.sqlite3";
 
 #[derive(Debug, Clone)]
 pub struct Settings {
+    pub bind_address: std::net::SocketAddr,
     pub database_path: PathBuf,
     pub control_socket_path: PathBuf,
     pub apns_key_path: PathBuf,
@@ -146,6 +147,10 @@ impl Settings {
             default_database_path()?
         };
 
+        let bind_address = optional_env_string("AGENTTY_BACKEND_BIND_ADDRESS")
+            .unwrap_or_else(|| "127.0.0.1:5012".to_owned())
+            .parse()
+            .context("AGENTTY_BACKEND_BIND_ADDRESS must be an IP address and port")?;
         let control_socket_path = PathBuf::from(
             optional_env_string("AGENTTY_BACKEND_CONTROL_SOCKET_PATH")
                 .unwrap_or_else(|| "~/.agentty/backend-control/socket".to_owned()),
@@ -305,6 +310,7 @@ impl Settings {
         Ok(Self {
             dictation_limits,
             database_path,
+            bind_address,
             control_socket_path,
             apns_key_path,
             apns_key_id,
