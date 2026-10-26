@@ -8,9 +8,9 @@ FEATURES
 - Paste screenshots and images directly into supported workflows from your phone
 - Persistent tmux sessions with quick reconnect
 - Long-press the spacebar for a fast shell quick switcher
-- AI-generated shell titles plus live folder and git-branch context
+- Live folder and git-branch context for every shell
 - A custom keyboard built for terminal work, with familiar shortcuts and modifier slide-chords
-- Whisper-based dictation for hands-free prompting on the go
+- Fast dictation for hands-free prompting on the go, with 10 minutes a month during the trial and 120 minutes a month with lifetime access
 
 BUILT FOR LONG-RUNNING SESSIONS
 
