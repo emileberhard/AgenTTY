@@ -30,24 +30,14 @@ actor AgenTTYDictationRelayClient {
     private let urlSession: URLSession
     private var cachedSession: AgenTTYDictationRelaySession?
     private var pendingSession: Task<AgenTTYDictationRelaySession, any Error>?
+    private var generation = 0
 
     init(urlSession: URLSession = .shared) {
         self.urlSession = urlSession
     }
 
     func relay() async throws -> SpeechRelay {
-        let session: AgenTTYDictationRelaySession
-        if let cachedSession, Double(cachedSession.expiresAtEpochSeconds) - Date().timeIntervalSince1970 > 5 * 60 {
-            session = cachedSession
-        } else if let pendingSession {
-            session = try await pendingSession.value
-        } else {
-            let task = Task { try await self.issueSession() }
-            pendingSession = task
-            defer { pendingSession = nil }
-            session = try await task.value
-            cachedSession = session
-        }
+        let session = try await currentSession()
         return try SpeechRelay(
             baseURL: AgenTTYRelayConfiguration.baseURL.appending(path: "v1/dictation/azure-speech"),
             bearerToken: session.relayToken
@@ -55,7 +45,26 @@ actor AgenTTYDictationRelayClient {
     }
 
     func invalidateSession() {
+        generation += 1
         cachedSession = nil
+        pendingSession = nil
+    }
+
+    private func currentSession() async throws -> AgenTTYDictationRelaySession {
+        while true {
+            if let cachedSession, Double(cachedSession.expiresAtEpochSeconds) - Date().timeIntervalSince1970 > 5 * 60 {
+                return cachedSession
+            }
+            let issuedGeneration = generation
+            let task = pendingSession ?? Task { try await self.issueSession() }
+            pendingSession = task
+            let result = await task.result
+            guard generation == issuedGeneration else { continue }
+            pendingSession = nil
+            let session = try result.get()
+            cachedSession = session
+            return session
+        }
     }
 
     func reportTierMismatch(hasLifetimeAccess: Bool) {
