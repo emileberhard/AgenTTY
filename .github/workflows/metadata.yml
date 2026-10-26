@@ -45,5 +45,4 @@ jobs:
           trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
           umask 077
           printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
-          ./scripts/check-release-version "$APP_STORE_VERSION" --metadata
           bundle _4.0.16_ exec fastlane ios metadata version:"$APP_STORE_VERSION" skip_screenshots:true

@@ -212,7 +212,8 @@ platform :ios do
       .strip
 
     if build_setting_version.empty? || build_setting_version == "0.0.0"
-      resolved = sh("./scripts/resolve-release-marketing-version", log: false).to_s.strip
+      script = File.expand_path("../scripts/resolve-release-marketing-version", __dir__)
+      resolved = sh(Shellwords.escape(script), log: false).to_s.strip
       return resolved unless resolved.empty?
       UI.user_error!("failed to resolve release marketing version from MARKETING_VERSION or an exact semver tag at HEAD")
     end
@@ -311,7 +312,7 @@ platform :ios do
   desc "Upload App Store metadata, and screenshots unless skip_screenshots:true"
   lane :metadata do |options|
     version = release_version(options)
-    sh("./scripts/check-release-version", version, "--metadata")
+    sh(File.expand_path("../scripts/check-release-version", __dir__), version, "--metadata")
     # Screenshots are generated and visually reviewed locally (`just
     # screenshots`) and the tracked set lags the live listing's device classes.
     skip_screenshots = options[:skip_screenshots].to_s != "false"
