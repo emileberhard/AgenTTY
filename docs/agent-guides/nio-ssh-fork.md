@@ -54,7 +54,7 @@ Changing or losing any of these breaks the app build, so they are the contract t
 
 ## Working on the fork
 
-Not in this repo. Clone `emileberhard/swift-nio-ssh`, work on `agentty-nio-ssh`, keep one concern per commit, and keep `swift test` green on macOS with the Xcode 27 toolchain (Swift 6.4) — the same toolchain AgenTTY builds with. Then bump the revision in `Project.swift`, regenerate, and let `Package.resolved` update. Do not point AgenTTY at a local path or a branch.
+Not in this repo. Clone `emileberhard/swift-nio-ssh`, work on `agentty-nio-ssh`, keep one concern per commit, and keep `swift test` green on macOS with the Xcode 27 toolchain (Swift 6.4) — the same toolchain AgenTTY builds with. Then bump the revision in the Xcode project and update its `Package.resolved`. Do not point AgenTTY at a local path or a branch.
 
 To read the fork source without cloning it, the resolved checkout is at
 `~/Library/Developer/Xcode/DerivedData/AgenTTY-*/SourcePackages/checkouts/swift-nio-ssh`.

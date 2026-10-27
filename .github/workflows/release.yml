@@ -111,23 +111,24 @@ jobs:
       - run: scripts/select-xcode
 
       - name: Configure
-        env:
-          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
         run: |
           scripts/configure-hosted-release
           scripts/check-build-identity
           plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
-          umask 077
-          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
 
-      - name: Select the next global build number
+      - name: Check the version and select the next global build number
         id: build
         env:
           APP_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
           APP_STORE_CONNECT_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: |
+          umask 077
+          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          scripts/app-store-connect check-version "$VERSION"
           number=$(scripts/app-store-connect build-number)
           echo "number=$number" >> "$GITHUB_OUTPUT"
 
@@ -175,9 +176,14 @@ jobs:
 
       - name: Sign, check the entitlements and upload to TestFlight
         env:
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
           KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          BUILD_NUMBER: ${{ steps.build.outputs.number }}
         run: |
+          umask 077
+          trap 'rm -f "$RUNNER_TEMP/AuthKey.p8"' EXIT
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
           export_archive() {
             xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/AgenTTY.xcarchive" -exportPath "$RUNNER_TEMP/$1" \
               -exportOptionsPlist "$RUNNER_TEMP/$1.plist" -allowProvisioningUpdates \
@@ -189,8 +195,11 @@ jobs:
           unzip -q "$RUNNER_TEMP/check/AgenTTY_iOS.ipa" -d "$RUNNER_TEMP/check"
           app="$RUNNER_TEMP/check/Payload/AgenTTY_iOS.app"
           scripts/sign-bundles check "$app"
-          plutil -extract CFBundleShortVersionString raw "$app/Info.plist"
-          plutil -extract CFBundleVersion raw "$app/Info.plist"
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            [[ $(plutil -extract CFBundleShortVersionString raw "$bundle/Info.plist") == "$VERSION" \
+              && $(plutil -extract CFBundleVersion raw "$bundle/Info.plist") == "$BUILD_NUMBER" ]] \
+              || { echo "::error::$bundle does not carry version $VERSION build $BUILD_NUMBER."; exit 1; }
+          done
           export_archive upload
 
   testflight-review:
@@ -271,9 +280,13 @@ jobs:
           [[ -s $RUNNER_TEMP/notes.md ]] || { echo "::error::The $VERSION tag has no message to publish."; exit 1; }
           newest=$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags" --jq '.[].ref | ltrimstr("refs/tags/")' \
             | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
-          latest=()
-          [[ $VERSION == "$newest" ]] || latest=(--latest=false)
-          gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${latest[@]}" "$RUNNER_TEMP"/release-runtime/*
+          latest=false
+          [[ $VERSION == "$newest" ]] && latest=true
+          if [[ $(gh release view "$VERSION" --json isDraft --jq .isDraft 2>/dev/null) == true ]]; then
+            gh release delete "$VERSION" --yes
+          fi
+          gh release create "$VERSION" --draft --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" "$RUNNER_TEMP"/release-runtime/*
+          gh release edit "$VERSION" --draft=false --latest="$latest"
 
   npm:
     needs: [github-release, npm-candidate]

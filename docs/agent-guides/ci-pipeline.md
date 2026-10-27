@@ -39,7 +39,8 @@ commit a push to `main` ended on, after its CI passed.
    run of the same commit. It never reruns CI.
 2. `tmux` builds the four tmux runtimes, and `npm-candidate` builds the tagged
    pairing package. Neither holds release credentials.
-3. `testflight` reserves one build number above every App Store Connect build
+3. `testflight` refuses a version not above every released App Store and uploaded
+   TestFlight version, reserves one build number above every App Store Connect build
    and pending upload, builds the host helpers and the complete runtime,
    archives unsigned with the tag as `MARKETING_VERSION`, ad-hoc signs each
    bundle with its entitlements (`Config/entitlements.json`), uploads the Sentry

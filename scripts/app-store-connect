@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.appstoreconnect.apple.com/v1/"
-EDITABLE = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"}
+EDITABLE = {"PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"}
 RELEASED = {"READY_FOR_DISTRIBUTION", "PROCESSING_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_VERSION"}
 DEADLINE = time.monotonic() + 40 * 60
 
@@ -43,11 +43,11 @@ def send(request):
         except urllib.error.HTTPError as error:
             retryable = error.code == 429 or error.code >= 500 and request.get_method() != "POST"
             if not retryable or attempt == 5:
-                raise RequestFailed(f"{request.get_method()} {request.full_url} failed with {error.code}: {error.read().decode(errors='replace')[:2000]}")
+                raise RequestFailed(f"{request.get_method()} {request.full_url.split('?')[0]} failed with {error.code}: {error.read().decode(errors='replace')[:2000]}")
             delay = error.headers.get("Retry-After")
         except (urllib.error.URLError, TimeoutError) as error:
             if request.get_method() == "POST" or attempt == 5:
-                raise RequestFailed(f"{request.get_method()} {request.full_url} failed: {error}")
+                raise RequestFailed(f"{request.get_method()} {request.full_url.split('?')[0]} failed: {error}")
             delay = None
         time.sleep(float(delay) if delay and delay.isdigit() else 2 ** attempt * random.uniform(0.5, 1))
 
@@ -234,6 +234,15 @@ def processed_screenshots(placements):
     return None if any(a["state"] == "ASSET_PROCESSING" for a in attributes) else True
 
 
+def check_version(app, version):
+    released = [v["attributes"]["versionString"] for v in api("GET", f"apps/{app}/appStoreVersions", **{"filter[platform]": "IOS", "limit": 200})
+                if v["attributes"]["appVersionState"] in RELEASED]
+    uploaded = [v["attributes"]["version"] for v in api("GET", f"apps/{app}/preReleaseVersions", **{"filter[platform]": "IOS", "limit": 200})]
+    newest = max(released + uploaded, key=parse, default=None)
+    if newest and parse(version) <= parse(newest):
+        sys.exit(f"{version} must exceed the App Store and TestFlight version {newest}.")
+
+
 def testflight(app, version, number, notes):
     build = wait(f"The {version} build", lambda: processed_build(app, version, number))
     set_test_notes(app, build, notes)
@@ -299,6 +308,9 @@ def main(command, *arguments):
     if command == "build-number":
         print(next_build_number(apps[0]["id"]))
         return
+    if command == "check-version":
+        check_version(apps[0]["id"], arguments[0])
+        return
     version, number, *paths = arguments
     notes = Path(paths[-1]).read_text().strip()
     if command == "testflight":
@@ -308,9 +320,9 @@ def main(command, *arguments):
 
 
 if __name__ == "__main__":
-    counts = {"build-number": 2, "testflight": 5, "app-store": 7}
+    counts = {"build-number": 2, "check-version": 3, "testflight": 5, "app-store": 7}
     if len(sys.argv) != counts.get(sys.argv[1] if len(sys.argv) > 1 else "", 0):
-        sys.exit("Usage: scripts/app-store-connect build-number\n       scripts/app-store-connect testflight VERSION BUILD NOTES\n       scripts/app-store-connect app-store VERSION BUILD METADATA SCREENSHOTS NOTES")
+        sys.exit("Usage: scripts/app-store-connect build-number\n       scripts/app-store-connect check-version VERSION\n       scripts/app-store-connect testflight VERSION BUILD NOTES\n       scripts/app-store-connect app-store VERSION BUILD METADATA SCREENSHOTS NOTES")
     try:
         main(*sys.argv[1:])
     except RequestFailed as failure:
