@@ -109,12 +109,14 @@ class VersionAndMetadataTests(unittest.TestCase):
                       {"attributes": {"versionString": "2.14.0", "appVersionState": "PREPARE_FOR_SUBMISSION"}}],
                      [{"attributes": {"version": "2.13.1"}}]]
         for version, accepted in (("2.13.1", False), ("2.13.0", False), ("2.13.2", True)):
-            with self.subTest(version=version), patch.object(asc, "api", side_effect=list(responses)):
+            with self.subTest(version=version), patch.object(asc, "api", side_effect=list(responses)) as api:
                 if accepted:
                     asc.check_version("app", version)
                 else:
                     with self.assertRaisesRegex(SystemExit, "must exceed"):
                         asc.check_version("app", version)
+                self.assertEqual(["apps/app/appStoreVersions", "preReleaseVersions"], [call.args[1] for call in api.call_args_list])
+                self.assertEqual("app", api.call_args_list[1].kwargs["filter[app]"])
 
     def test_an_editable_app_info_is_patched_and_whats_new_only_follows_a_release(self):
         calls = []

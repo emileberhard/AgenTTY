@@ -18,7 +18,7 @@ boundary. `CLAUDE.md`, `GEMINI.md` and `LLMS.md` link to this file.
 | `tools/agentty-notify`, `tools/agentty-host-connector` | Host hooks/notifications and persistent SSH relay connector |
 | `services/backend` | Pairing, device identities, relay, APNs, analytics and paid transcription admission |
 | `AgenTTY.xcodeproj`, `Config`, `Justfile`, `scripts` | The committed JSON Xcode project and its package lock, build identity, entitlements, Info.plists, commands and release tooling |
-| `AppStore` | Committed App Store text per locale and the reviewed screenshots per placement group, applied by the release |
+| `AppStore` | Committed App Store text per locale and the screenshots per placement group, once committed, applied by the release |
 
 App source paths above are relative to `AgenTTY/Sources`.
 
@@ -129,7 +129,7 @@ every pushed tag and rejects anything but that tag; `admit` then waits for `main
 CI on the same commit. `testflight` builds the complete runtime and the unsigned
 archive, ad-hoc signs each bundle, exports through Xcode cloud signing with the
 `testflight` environment's ASC key, checks the entitlements and uploads with a
-build number reserved from App Store Connect. `testflight-review` sets What to
+build number reserved from App Store Connect. `testflight-notes` sets What to
 Test, `app-store` applies `AppStore/` to the prepared version, `github-release`
 publishes the tag message verbatim with the runtime assets, and `npm` publishes
 the pairing package with OIDC and provenance. App Review stays manual.

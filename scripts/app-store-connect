@@ -237,7 +237,7 @@ def processed_screenshots(placements):
 def check_version(app, version):
     released = [v["attributes"]["versionString"] for v in api("GET", f"apps/{app}/appStoreVersions", **{"filter[platform]": "IOS", "limit": 200})
                 if v["attributes"]["appVersionState"] in RELEASED]
-    uploaded = [v["attributes"]["version"] for v in api("GET", f"apps/{app}/preReleaseVersions", **{"filter[platform]": "IOS", "limit": 200})]
+    uploaded = [v["attributes"]["version"] for v in api("GET", "preReleaseVersions", **{"filter[app]": app, "filter[platform]": "IOS", "limit": 200})]
     newest = max(released + uploaded, key=parse, default=None)
     if newest and parse(version) <= parse(newest):
         sys.exit(f"{version} must exceed the App Store and TestFlight version {newest}.")

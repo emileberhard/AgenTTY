@@ -35,7 +35,7 @@ commit a push to `main` ended on, after its CI passed.
 `release.yml` runs on every tag push and fails visibly on a wrong one:
 
 1. `admit` checks the tag, that it is the newest version and on `main`, and
-   that its annotation has release notes, then waits for the successful push CI
+   that its annotation is a Markdown list of release notes, then waits for the successful push CI
    run of the same commit. It never reruns CI.
 2. `tmux` builds the four tmux runtimes, and `npm-candidate` builds the tagged
    pairing package. Neither holds release credentials.
@@ -47,7 +47,7 @@ commit a push to `main` ended on, after its CI passed.
    symbols, exports through Xcode cloud signing, checks the exported
    entitlements and uploads. Its build-number output makes the later jobs select
    that exact build, also on retries.
-4. `testflight-review` sets What to Test from the tag message. The workflow
+4. `testflight-notes` sets What to Test from the tag message. The workflow
    never distributes to beta groups or submits for beta review.
 5. `app-store` prepares the App Store version with manual release, short of App
    Review: it applies `AppStore/metadata/<locale>/*.txt` (description, keywords,
@@ -63,7 +63,8 @@ commit a push to `main` ended on, after its CI passed.
 Submitting for App Review and releasing on the App Store stay manual. Rerun a
 transiently failed job from the tag's own run, only while that tag is still the
 newest version; a fix ships as the next patch. Candidate artifacts expire after
-three days.
+30 days. A tag whose upload Apple may already have recorded is not rerun: the
+`testflight` check refuses it, and the fix ships as the next patch.
 
 ## Environment setup
 
@@ -152,7 +153,7 @@ In npm package settings, configure the GitHub trusted publisher: user
 `emileberhard`, repository `AgenTTY`, workflow `release.yml`, environment
 `testflight`, allowing direct `npm publish`. Until that trust exists the `npm`
 job fails with ENEEDAUTH and everything else still ships. After setting it up,
-rerun the `npm` job from the newest tag's run (the candidate lives three days),
+rerun the `npm` job from the newest tag's run (the candidate lives 30 days),
 or publish with the next tag.
 
 Canonical public policy/support URLs are

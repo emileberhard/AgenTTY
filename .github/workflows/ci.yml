@@ -67,6 +67,12 @@ jobs:
       - run: scripts/ios-public archive
       - name: Check that the entitlement map covers the archived bundles
         run: scripts/sign-bundles sign "$ARCHIVE_PATH/Products/Applications/AgenTTY_iOS.app"
+      - name: Check that the release configuration never compiles the local unlock
+        run: |
+          settings=$(xcodebuild -project AgenTTY.xcodeproj -scheme AgenTTY-iOS -configuration Release -showBuildSettings)
+          if grep -E '^ *(OTHER_SWIFT_FLAGS|SWIFT_ACTIVE_COMPILATION_CONDITIONS) = ' <<< "$settings" | grep -q AGENTTY_LOCAL_MAIN_UNLOCK; then
+            echo "::error::The Release configuration compiles AGENTTY_LOCAL_MAIN_UNLOCK."; exit 1
+          fi
       - name: Remove build output
         if: always()
         run: rm -rf "$ARCHIVE_PATH"

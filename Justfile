@@ -297,6 +297,9 @@ _ensure-release-host-runtime-published:
 _ensure-project:
     #!/bin/bash
     set -euo pipefail
+    for stale in AgenTTY.xcodeproj/project.pbxproj AgenTTY.xcworkspace .agentty-resource-paths.sha256; do
+        [[ ! -e "$stale" ]] || { echo "$stale is generated Tuist output that the committed project replaced; delete it." >&2; exit 1; }
+    done
     # --- SPM: resolve packages (auto-recover from stale caches) ---
     resolve_log="$(mktemp -t agentty-spm-resolve.XXXXXX)"
     trap 'rm -f "$resolve_log"' EXIT
