@@ -41,6 +41,13 @@ def main(mode, app):
             missing = {key: value for key, value in wanted.items() if actual.get(key) != value}
             if missing:
                 raise SystemExit(f"Exported {bundle} lost required entitlements: {missing}")
+    if mode == "check":
+        team = os.environ["DEVELOPMENT_TEAM"]
+        run("codesign", "--verify", "--deep", "--strict", str(app))
+        for framework in sorted(app.glob("Frameworks/*.framework")):
+            details = subprocess.run(("codesign", "-dvv", str(framework)), capture_output=True, text=True).stderr
+            if f"TeamIdentifier={team}\n" not in details:
+                raise SystemExit(f"Exported {framework.name} is not signed by team {team}.")
 
 
 if __name__ == "__main__":
