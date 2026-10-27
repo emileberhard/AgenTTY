@@ -17,7 +17,8 @@ boundary. `CLAUDE.md`, `GEMINI.md` and `LLMS.md` link to this file.
 | `tools/agentty-host` | Pairing CLI, public-key installation and connector bootstrap |
 | `tools/agentty-notify`, `tools/agentty-host-connector` | Host hooks/notifications and persistent SSH relay connector |
 | `services/backend` | Pairing, device identities, relay, APNs, analytics and paid transcription admission |
-| `Config`, `Project.swift`, `Justfile`, `scripts` | Build identity, pinned inputs, commands and release tooling |
+| `AgenTTY.xcodeproj`, `Config`, `Justfile`, `scripts` | The committed JSON Xcode project and its package lock, build identity, entitlements, Info.plists, commands and release tooling |
+| `AppStore` | Committed App Store text per locale and the reviewed screenshots per placement group, applied by the release |
 
 App source paths above are relative to `AgenTTY/Sources`.
 
@@ -72,8 +73,9 @@ Use the Justfile; do not invoke xcodebuild directly. Load the local
 
 - `just ios-check`: public unsigned simulator build.
 - `just ios-test`: maintained unit tests on the configured iOS simulator.
-- `tuist test --build-only --skip-ui-tests --no-selective-testing --no-binary-cache`:
-  maintained test-bundle compile checkpoint.
+- `ARCHIVE_PATH=<new path> scripts/ios-public archive`: the unsigned Release
+  archive of the shipping app, the compile CI and the release run.
+- `python3 -m unittest discover -s scripts/tests`: release tooling checks.
 - `just backend-test`, `just notify-helper-test`, `just host-connector-test`,
   `just host-shell-test`: checks for their respective components.
 - `cd tools/agentty-host && bun install --frozen-lockfile && bun run test`:
@@ -90,10 +92,13 @@ fetches LFS. Preserve `scripts/ghostty-artifact.json` and
 `docs/licenses/GhosttyKit-NOTICES.txt`. Copy the complete Ghostty notices into
 the authoritative combined notice file whenever that asset changes.
 
-`Package.resolved` is canonical. Reinstall it after Tuist generation; test-only
-Tuist generation may remove install schemes, so regenerate the normal
-workspace before device delivery. Build outputs, operator files and local
-configuration remain ignored. Do not add code comments except required notices.
+The committed project is the source of truth: edit `project.xcproj` as JSON or
+in Xcode, and keep the app's `Package.resolved` in
+`AgenTTY.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/`. Builds read only
+that lock, so an upgrade is a reviewed change to it and to the pins in the
+project. `.xcode-version` names the Xcode that CI and the release build with.
+Build outputs, operator files and local configuration remain ignored. Do not
+add code comments except required notices.
 
 ## Guides
 
@@ -119,15 +124,17 @@ A bare annotated MAJOR.MINOR.PATCH tag on main, newer than every other version
 and every uploaded App Store/TestFlight version, is the version everywhere:
 app, TestFlight, App Store metadata, GitHub release, host runtime, npm pairing
 package, Rust build identity and Sentry release. Manifest versions of 0.0.0 are
-inert development placeholders, never manually bumped. Hosted CI passes first;
-release then builds the complete runtime and unsigned app, uses Xcode cloud
-signing with the `testflight` environment's ASC key, and lets Apple assign the
-build number. GitHub notes are the annotated tag message verbatim, a Markdown
-list of user-visible changes. npm uses OIDC and provenance. Metadata dispatch
-runs on that tag and targets that same version; App Review stays manual.
-See the CI guide for exact environment setup and the local signing fallback.
-Manual release recovery publishes only the verified original npm candidate on
-its version tag; it never rebuilds or uploads the app.
+inert development placeholders, never manually bumped. `release.yml` runs on
+every pushed tag and rejects anything but that tag; `admit` then waits for `main`'s
+CI on the same commit. `testflight` builds the complete runtime and the unsigned
+archive, ad-hoc signs each bundle, exports through Xcode cloud signing with the
+`testflight` environment's ASC key, checks the entitlements and uploads with a
+build number reserved from App Store Connect. `testflight-review` sets What to
+Test, `app-store` applies `AppStore/` to the prepared version, `github-release`
+publishes the tag message verbatim with the runtime assets, and `npm` publishes
+the pairing package with OIDC and provenance. App Review stays manual.
+Rerun a transiently failed job from the tag's own run while it is still the
+newest version; a fix ships as the next patch. See the CI guide for setup.
 
 Work in a locked worktree and preserve other agents' work. The task brief sets
 integration authority; do not merge, deploy or publish when assigned a

@@ -42,7 +42,7 @@ Host-key trust is managed by `AgenTTYTrustedHostKeyStore` (TOFU).
 
 Uses Swift-NIO + NIOSSH. `nonisolated final class @unchecked Sendable`, thread-safe via internal `DispatchQueue`.
 
-NIOSSH comes from AgenTTY's fork (`emileberhard/swift-nio-ssh`, branch `agentty-nio-ssh`), pinned by revision in `Project.swift`. See `nio-ssh-fork.md` for what it changes and why; the app-visible additions are RSA keys, `NIOSSHError.negotiationFailure` diagnostics, RFC 4253 §7.2 key expansion, per-offer signature algorithms, and `decryptFirstBlock(_:sequenceNumber:)`.
+NIOSSH comes from AgenTTY's fork (`emileberhard/swift-nio-ssh`, branch `agentty-nio-ssh`), pinned by revision in the Xcode project. See `nio-ssh-fork.md` for what it changes and why; the app-visible additions are RSA keys, `NIOSSHError.negotiationFailure` diagnostics, RFC 4253 §7.2 key expansion, per-offer signature algorithms, and `decryptFirstBlock(_:sequenceNumber:)`.
 
 **Connection flow:**
 1. `ClientBootstrap` with `NIOSSHHandler` pipeline, 5s connect timeout, `TCP_NODELAY`, TCP keepalive (15s idle / 5s interval / 3 probes), and the interactive `NET_SERVICE_TYPE_RD` socket service class

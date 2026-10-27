@@ -101,7 +101,7 @@ declared in `AgenTTYApp.body` also reclaims FR via `onDismiss` (sheets briefly
 hand FR to their text fields when the user taps in). See
 keyboard-architecture.md for the full hardware-key and `UIKeyInput` pipelines.
 
-`Project.swift` enables iPad — which supports both orientations — through three changes per iOS app target plus one
+The project enables iPad — which supports both orientations — through three changes per iOS app target plus one
 notification-service-extension change: `TARGETED_DEVICE_FAMILY` is `"1,2"`,
 `UIRequiresFullScreen` is omitted (so iPadOS 26 windowing can size the app),
 and a new `UISupportedInterfaceOrientations~ipad` key advertises all four
