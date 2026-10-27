@@ -10,7 +10,7 @@ if [[ ! -e "$secrets" && -s "$main_secrets" ]]; then
     echo "Copied local secrets from the main checkout"
 fi
 
-[[ -e "$secrets" ]] || install -m 600 <(echo '{}') "$secrets"
+[[ -e "$secrets" ]] || (umask 077 && echo '{}' > "$secrets")
 
 key_file="$HOME/.config/llm-router/agentty-ios.key"
 if [[ ! -s "$key_file" ]]; then
