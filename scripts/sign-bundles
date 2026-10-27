@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+import json
+import os
+import plistlib
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def run(*args):
+    return subprocess.run(args, capture_output=True, check=True).stdout
+
+
+def main(mode, app):
+    bundles = json.loads((ROOT / "Config/entitlements.json").read_text())
+    shipped = {"."} | {str(p.relative_to(app)) for pattern in ("*.app", "*.appex") for p in app.rglob(pattern)}
+    if set(bundles) != shipped:
+        raise SystemExit(f"The entitlement map must cover exactly the app bundles: {sorted(shipped)}")
+    for bundle, source in sorted(bundles.items(), key=lambda item: len(Path(item[0]).parts), reverse=True):
+        path = app / bundle
+        wanted = {}
+        if source is not None:
+            text = (ROOT / source).read_text()
+            for name in ("AGENTTY_APP_GROUP", "AGENTTY_CLOUDKIT_CONTAINER"):
+                text = text.replace(f"$({name})", os.environ[name])
+            if "$(" in text:
+                raise SystemExit(f"Resolve unsupported build-setting substitutions in {source}.")
+            wanted = plistlib.loads(text.encode())
+        if mode == "sign":
+            with tempfile.NamedTemporaryFile(suffix=".entitlements") as file:
+                file.write(plistlib.dumps(wanted))
+                file.flush()
+                run("codesign", "--force", "--sign", "-", "--entitlements", file.name, str(path))
+        else:
+            actual = plistlib.loads(run("codesign", "-d", "--entitlements", "-", "--xml", str(path)))
+            if "aps-environment" in wanted:
+                wanted["aps-environment"] = "production"
+            missing = {key: value for key, value in wanted.items() if actual.get(key) != value}
+            if missing:
+                raise SystemExit(f"Exported {bundle} lost required entitlements: {missing}")
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3 or sys.argv[1] not in {"sign", "check"}:
+        raise SystemExit("Usage: scripts/sign-bundles sign|check APP")
+    try:
+        main(sys.argv[1], Path(sys.argv[2]))
+    except subprocess.CalledProcessError as error:
+        raise SystemExit(error.stderr.decode())
