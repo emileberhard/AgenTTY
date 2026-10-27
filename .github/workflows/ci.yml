@@ -55,15 +55,18 @@ jobs:
   ios-archive:
     runs-on: xcode-27
     timeout-minutes: 60
+    env:
+      AGENTTY_APP_GROUP: group.com.example.AgenTTY
+      AGENTTY_CLOUDKIT_CONTAINER: iCloud.com.example.AgenTTY
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: scripts/select-xcode
-      - name: Archive the release configuration unsigned
-        env:
-          ARCHIVE_PATH: ${{ runner.temp }}/AgenTTY.xcarchive
-        run: scripts/ios-public archive
+      - run: echo "ARCHIVE_PATH=$RUNNER_TEMP/AgenTTY.xcarchive" >> "$GITHUB_ENV"
+      - run: scripts/ios-public archive
+      - name: Check that the entitlement map covers the archived bundles
+        run: scripts/sign-bundles sign "$ARCHIVE_PATH/Products/Applications/AgenTTY_iOS.app"
       - name: Remove build output
         if: always()
-        run: rm -rf "${{ runner.temp }}/AgenTTY.xcarchive"
+        run: rm -rf "$ARCHIVE_PATH"
