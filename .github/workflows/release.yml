@@ -2,46 +2,59 @@ name: Release
 
 on:
   push:
-    tags: ['[0-9]+.[0-9]+.[0-9]+']
-  workflow_dispatch:
-    inputs:
-      release_run_id:
-        description: Original release run containing the built npm candidate
-        required: true
-        type: string
+    tags: ['**']
 
 permissions:
   contents: read
 
-concurrency:
-  group: testflight
-  cancel-in-progress: false
-
 jobs:
-  guard:
-    if: github.event_name == 'push'
+  admit:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 40
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ github.ref_name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Verify release ref
-        env:
-          VERSION: ${{ github.ref_name }}
-        run: ./scripts/check-release-tag "$VERSION"
 
-  check:
-    needs: guard
-    uses: ./.github/workflows/ci.yml
+      - name: Check that this is the newest version on main
+        run: |
+          [[ $VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || { echo "::error::$VERSION is not MAJOR.MINOR.PATCH."; exit 1; }
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::$VERSION is not on main."; exit 1; }
+          [[ $(git cat-file -t "refs/tags/$VERSION") == tag ]] || { echo "::error::Release tags must be annotated."; exit 1; }
+          newest=$(git tag --list | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
+          [[ $newest == "$VERSION" ]] || { echo "::error::$newest is newer than $VERSION."; exit 1; }
+          [[ -n $(git cat-file tag "refs/tags/$VERSION" | sed '1,/^$/d') ]] || { echo "::error::The $VERSION tag has no release notes."; exit 1; }
+
+      - name: Wait for CI to pass on this commit
+        timeout-minutes: 35
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          started=$SECONDS
+          while :; do
+            state=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml --event push --commit "$GITHUB_SHA" --json status,conclusion \
+              --jq 'if any(.[]; .conclusion == "success") then "passed" elif any(.[]; .status != "completed") then "running" elif length > 0 then "failed" else "missing" end') \
+              || state=unknown
+            case $state in
+              passed) exit 0 ;;
+              failed) echo "::error::CI failed on $GITHUB_SHA."; exit 1 ;;
+              missing) (( SECONDS - started < 120 )) || { echo "::error::No CI run exists for $GITHUB_SHA; tag the commit a push to main ended on."; exit 1; } ;;
+            esac
+            sleep 10
+          done
 
   tmux:
-    needs: check
+    needs: admit
     uses: ./.github/workflows/build-tmux-runtime.yml
 
   npm-candidate:
-    needs: check
+    needs: admit
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -51,7 +64,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - run: npm install --global bun@1.4.3
       - name: Build the tagged pairing package
@@ -67,18 +79,19 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  build:
-    needs: [check, tmux, npm-candidate]
-    if: github.event_name == 'push'
-    permissions:
-      contents: read
-      actions: read
+  testflight:
+    needs: [admit, tmux, npm-candidate]
     runs-on: xcode-27
     environment: testflight
+    concurrency: testflight
+    outputs:
+      build: ${{ steps.build.outputs.number }}
     timeout-minutes: 90
+    permissions:
+      actions: read
+      contents: read
     env:
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      MARKETING_VERSION: ${{ github.ref_name }}
+      VERSION: ${{ github.ref_name }}
       DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
       AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
       AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
@@ -94,170 +107,192 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Configure official build
+
+      - run: scripts/select-xcode
+
+      - name: Configure
         env:
           APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+        run: |
+          scripts/configure-hosted-release
+          scripts/check-build-identity
+          plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$RUNNER_TEMP/AuthKey.p8"
+
+      - name: Select the next global build number
+        id: build
+        env:
+          APP_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: |
-          ./scripts/configure-hosted-release
-          ./scripts/check-build-identity
-          plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
-          export APP_STORE_CONNECT_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
-          umask 077
-          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
-          ./scripts/check-release-version "$MARKETING_VERSION"
-      - run: |
-          brew tap tuist/tuist
-          brew trust --tap tuist/tuist
-          brew install just tuist/tuist/tuist@4.212.0
-      - run: echo "$(brew --prefix tuist/tuist/tuist@4.212.0)/bin" >> "$GITHUB_PATH"
+          number=$(scripts/app-store-connect build-number)
+          echo "number=$number" >> "$GITHUB_OUTPUT"
+
+      - run: brew install just
+
       - name: Build host runtime
         env:
           GH_TOKEN: ${{ github.token }}
           AGENTTY_GH_CLI: gh
         run: |
           export PATH="$HOME/.cargo/bin:$PATH"
-          ./scripts/ensure-notify-helper-toolchain --install-missing
+          scripts/ensure-notify-helper-toolchain --install-missing
           just tmux-runtime-sync "$GITHUB_RUN_ID"
           just notify-helper-rebuild
           just host-connector-rebuild
-          ./scripts/package-release-runtime
-      - run: just ios-cloud-archive
-      - name: Preserve complete candidate
-        run: tar -czf build/release-candidate.tar.gz -C build AgenTTY.xcarchive release-runtime
+          scripts/package-release-runtime
+          (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
+
+      - name: Archive
+        env:
+          ARCHIVE_PATH: ${{ runner.temp }}/AgenTTY.xcarchive
+          MARKETING_VERSION: ${{ github.ref_name }}
+          CURRENT_PROJECT_VERSION: ${{ steps.build.outputs.number }}
+        run: |
+          scripts/ios-public archive
+          scripts/sign-bundles sign "$ARCHIVE_PATH/Products/Applications/AgenTTY_iOS.app"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-candidate
-          path: build/release-candidate.tar.gz
+          name: release-runtime
+          path: build/release-runtime
           retention-days: 3
           if-no-files-found: error
 
-  publish:
-    needs: build
-    if: github.event_name == 'push'
-    runs-on: xcode-27
-    environment: testflight
-    timeout-minutes: 30
-    permissions:
-      contents: write
-      actions: read
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_27.1.app/Contents/Developer
-      MARKETING_VERSION: ${{ github.ref_name }}
-      DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
-      AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
-      AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
-      AGENTTY_CLOUDKIT_CONTAINER: ${{ vars.AGENTTY_CLOUDKIT_CONTAINER }}
-      AGENTTY_KEYCHAIN_NAMESPACE: ${{ vars.AGENTTY_KEYCHAIN_NAMESPACE }}
-      AGENTTY_UNLOCK_PRODUCT_ID: ${{ vars.AGENTTY_UNLOCK_PRODUCT_ID }}
-      AGENTTY_RELAY_URL: ${{ vars.AGENTTY_RELAY_URL }}
-      AGENTTY_ARTIFACT_URL: ${{ vars.AGENTTY_ARTIFACT_URL }}
-      AGENTTY_RELEASE_ARTIFACT_URL: https://github.com/${{ github.repository }}/releases/download
-      AGENTTY_SENTRY_DSN: ${{ vars.AGENTTY_SENTRY_DSN }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - name: Restore verified candidate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          : "${RUNNER_TEMP:?}"
-          mkdir -p build
-          mkdir "$RUNNER_TEMP/agentty-release-candidate"
-          trap 'rm -rf "$RUNNER_TEMP/agentty-release-candidate"' EXIT
-          gh run download "$GITHUB_RUN_ID" --name release-candidate --dir "$RUNNER_TEMP/agentty-release-candidate"
-          tar -xzf "$RUNNER_TEMP/agentty-release-candidate/release-candidate.tar.gz" -C "$RUNNER_TEMP/agentty-release-candidate" AgenTTY.xcarchive release-runtime
-          mv "$RUNNER_TEMP/agentty-release-candidate/AgenTTY.xcarchive" "$RUNNER_TEMP/agentty-release-candidate/release-runtime" build/
-          (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
-          ./scripts/configure-hosted-release
-          plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
-      - run: brew install just
-      - run: npm install --global @sentry/cli@3.8.1
       - name: Upload Sentry symbols
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
         run: |
-          sentry-cli releases new "$MARKETING_VERSION"
-          sentry-cli debug-files upload --include-sources build/AgenTTY.xcarchive/dSYMs
-          sentry-cli releases finalize "$MARKETING_VERSION"
-      - name: Stage complete runtime release
+          npm install --global @sentry/cli@3.8.1
+          sentry-cli releases new "$VERSION"
+          sentry-cli debug-files upload --include-sources "$RUNNER_TEMP/AgenTTY.xcarchive/dSYMs"
+          sentry-cli releases finalize "$VERSION"
+
+      - name: Sign, check the entitlements and upload to TestFlight
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          export_archive() {
+            xcodebuild -exportArchive -archivePath "$RUNNER_TEMP/AgenTTY.xcarchive" -exportPath "$RUNNER_TEMP/$1" \
+              -exportOptionsPlist "$RUNNER_TEMP/$1.plist" -allowProvisioningUpdates \
+              -authenticationKeyPath "$RUNNER_TEMP/AuthKey.p8" -authenticationKeyID "$KEY_ID" -authenticationKeyIssuerID "$ISSUER_ID"
+          }
+          plutil -replace destination -string export -o "$RUNNER_TEMP/check.plist" Config/ExportOptions.plist
+          cp Config/ExportOptions.plist "$RUNNER_TEMP/upload.plist"
+          export_archive check
+          unzip -q "$RUNNER_TEMP/check/AgenTTY_iOS.ipa" -d "$RUNNER_TEMP/check"
+          app="$RUNNER_TEMP/check/Payload/AgenTTY_iOS.app"
+          scripts/sign-bundles check "$app"
+          plutil -extract CFBundleShortVersionString raw "$app/Info.plist"
+          plutil -extract CFBundleVersion raw "$app/Info.plist"
+          export_archive upload
+
+  testflight-review:
+    needs: testflight
+    runs-on: ubuntu-24.04
+    environment: testflight
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ github.ref_name }}
+      BUILD_NUMBER: ${{ needs.testflight.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set What to Test
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          ./scripts/release-notes "$MARKETING_VERSION" > build/release-notes.md
-          gh release create "$MARKETING_VERSION" --draft --verify-tag --title "$MARKETING_VERSION" --notes-file build/release-notes.md
-          touch build/created-release-draft
-          gh release upload "$MARKETING_VERSION" build/release-runtime/*
-      - name: Sign and upload
-        env:
+          APP_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
           APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
           APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: |
-          export APP_STORE_CONNECT_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
-          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
           umask 077
           printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
-          ./scripts/check-release-version "$MARKETING_VERSION"
-          just ios-cloud-export
-      - name: Publish runtime after successful TestFlight upload
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag" --jq .message > "$RUNNER_TEMP/notes.md"
+          scripts/app-store-connect testflight "$VERSION" "$BUILD_NUMBER" "$RUNNER_TEMP/notes.md"
+
+  app-store:
+    needs: testflight
+    runs-on: ubuntu-24.04
+    environment: testflight
+    concurrency: app-store
+    timeout-minutes: 60
+    env:
+      VERSION: ${{ github.ref_name }}
+      BUILD_NUMBER: ${{ needs.testflight.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Prepare the App Store version
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release edit "$MARKETING_VERSION" --draft=false
-      - name: Remove an unpublished draft after failure
-        if: failure()
-        env:
-          GH_TOKEN: ${{ github.token }}
+          APP_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
         run: |
-          if [[ -f build/created-release-draft && $(gh release view "$MARKETING_VERSION" --json isDraft --jq .isDraft) == true ]]; then
-            gh release delete "$MARKETING_VERSION" --yes
-          fi
+          umask 077
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          tag=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --jq .object.sha)
+          gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag" --jq .message > "$RUNNER_TEMP/notes.md"
+          scripts/app-store-connect app-store "$VERSION" "$BUILD_NUMBER" AppStore/metadata AppStore/screenshots "$RUNNER_TEMP/notes.md"
+
+  github-release:
+    needs: [admit, testflight]
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - name: Publish the tag message as the release notes with the host runtime
+        shell: bash
+        run: |
+          gh run download "$GITHUB_RUN_ID" --name release-runtime --dir "$RUNNER_TEMP/release-runtime"
+          (cd "$RUNNER_TEMP/release-runtime" && shasum -a 256 -c SHA256SUMS)
+          tag=$(gh api "repos/$GH_REPO/git/ref/tags/$VERSION" --jq .object.sha)
+          gh api "repos/$GH_REPO/git/tags/$tag" --jq .message > "$RUNNER_TEMP/notes.md"
+          [[ -s $RUNNER_TEMP/notes.md ]] || { echo "::error::The $VERSION tag has no message to publish."; exit 1; }
+          newest=$(gh api --paginate "repos/$GH_REPO/git/matching-refs/tags" --jq '.[].ref | ltrimstr("refs/tags/")' \
+            | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
+          latest=()
+          [[ $VERSION == "$newest" ]] || latest=(--latest=false)
+          gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" "${latest[@]}" "$RUNNER_TEMP"/release-runtime/*
 
   npm:
-    needs: publish
-    if: ${{ !cancelled() && (needs.publish.result == 'success' || (github.event_name == 'workflow_dispatch' && github.ref_type == 'tag')) }}
+    needs: [github-release, npm-candidate]
     runs-on: ubuntu-24.04
     environment: testflight
     timeout-minutes: 10
     permissions:
-      contents: read
       actions: read
+      contents: read
       id-token: write
     env:
       GH_TOKEN: ${{ github.token }}
-      VERSION: ${{ github.ref_name }}
-      RELEASE_RUN_ID: ${{ inputs.release_run_id || github.run_id }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '24'
       - name: Restore the built pairing package
-        run: |
-          ./scripts/check-release-tag "$VERSION"
-          [[ "$RELEASE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
-          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID" > release-run.json
-          python3 - "$VERSION" "$(git rev-parse HEAD)" <<'PY'
-          import json
-          import sys
-          run = json.load(open("release-run.json"))
-          expected = {"event": "push", "path": ".github/workflows/release.yml", "head_branch": sys.argv[1], "head_sha": sys.argv[2]}
-          if any(run.get(key) != value for key, value in expected.items()):
-              raise SystemExit("npm candidate must come from this tag's release run")
-          PY
-          [[ "$(gh release view "$VERSION" --json isDraft --jq .isDraft)" == false ]]
-          gh run download "$RELEASE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name npm-candidate --dir package
+        run: gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name npm-candidate --dir package
       - name: Publish with npm OIDC and provenance
         run: |
-          node -e 'if (+process.versions.node.split(".")[0] < 22) process.exit(1)'
           npm install --global npm@11.6.2
           npm publish ./package/*.tgz --provenance --access public --ignore-scripts
