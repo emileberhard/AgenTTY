@@ -1,6 +1,6 @@
 # Self-hosting
 
-You need an Apple Silicon Mac with Xcode 27.1, Tuist 4.212.0, Just, an Apple Developer account,
+You need an Apple Silicon Mac with Xcode 27.1, Just, an Apple Developer account,
 and a reachable SSH host. Start with `just ios-check`; this unsigned simulator
 build needs no private files. The simulator cannot establish device delivery,
 push or cloud-signing behavior.
@@ -17,14 +17,12 @@ leave it empty. The signing commands reject example identities.
 Register the app/extension IDs, App Group, APNs capability and CloudKit
 container in your Apple account. Only containing apps receive CloudKit
 entitlements; notification extensions do not. Select the appropriate profiles
-in Xcode. Default signing is automatic; the `AGENTTY_*_SIGN_STYLE` and profile
-settings support locally installed manual profiles. The optional library stays
+in Xcode. Default signing is automatic; the `AGENTTY_DEV_*` sign-style and profile
+settings support locally installed manual development profiles. The optional library stays
 off unless enabled in Settings. The official app's identifiers are not a
 self-hoster's credentials or entitlement grants.
 
-Generate the workspace with `tuist generate --no-open`, then
-`./scripts/install-release-package-lock --install`. Open the workspace and run
-`AgenTTY-iOS-Dev` on your signed device. Maintainer delivery recipes that use
+Open `AgenTTY.xcodeproj` and run `AgenTTY-iOS-Dev` on your signed device. Maintainer delivery recipes that use
 private signing/install helpers are separate conveniences; they are not
 prerequisites for `ios-check`, `ios-test`, or building in Xcode.
 

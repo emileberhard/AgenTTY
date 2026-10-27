@@ -11,7 +11,7 @@ Upstream `swift-nio-ssh` supports Ed25519 and ECDSA only, and it reports every u
 - **Repo:** `https://github.com/emileberhard/swift-nio-ssh.git`
 - **Branch:** `agentty-nio-ssh` (the default branch; upstream history is preserved)
 - **Base:** `3ec281496f28a3b6581afd946b759e2642f5cd8d`, upstream tag `0.15.0`
-- **Pinned by revision** in `Project.swift`, recorded in `Package.resolved`
+- **Pinned by revision** in `AgenTTY.xcodeproj`, recorded in its `Package.resolved`
 
 Pinning by revision rather than branch is deliberate: `Package.resolved` is the canonical lock for local builds and releases, and a moving branch would let an unreviewed fork commit into a TestFlight archive.
 
@@ -87,5 +87,4 @@ With Xcode 27.1, swift-nio 2.104.0 compiles for the iOS simulator from clean
 DerivedData. If `SocketChannel.swift` reports `IOError.Error` or `IOError.error`
 as private while `NIOCore/IO.swift` declares them `package`, repeat the maintained
 test scheme with a fresh, task-owned `-derivedDataPath` before changing pins.
-`--no-binary-cache` disables Tuist's cache; Xcode still reuses DerivedData.
 An incremental pass does not prove the dependency sources were recompiled.

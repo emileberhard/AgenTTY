@@ -46,8 +46,8 @@ from App Store builds and from this repository.
 
 ## Development
 
-Use an Apple Silicon Mac with Xcode 27.1, Tuist 4.212.0 and Just. Rust helpers use `rust-toolchain.toml`;
-the pairing CLI uses Bun 1.3.10. Dependencies are pinned in `Project.swift`,
+Use an Apple Silicon Mac with Xcode 27.1 and Just. Rust helpers use `rust-toolchain.toml`;
+the pairing CLI uses Bun 1.3.10. Dependencies are pinned in `AgenTTY.xcodeproj` and its
 `Package.resolved`, and the package lockfiles.
 
 ```bash

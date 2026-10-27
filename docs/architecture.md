@@ -86,8 +86,9 @@ license. Public CI never runs on an operator's personal machine.
 
 Hosted cloud signing is attempted only for distribution export of an unsigned
 archive. App Groups/CloudKit/extension provisioning must be proved with the
-actual Apple account; a locally provisioned Fastlane release remains available
-until that external capability boundary has been verified. App Store metadata
-uses the same tag version as the app, TestFlight, runtime and npm package.
+actual Apple account, as the tag releases since 2.12.0 have done. App Store
+text and screenshots are committed under `AppStore/` and applied to the version
+the tag prepares, which carries the same version as the app, TestFlight, runtime
+and npm package.
 
-New main builds resolve their matching host-runtime manifest from the same GitHub release tag. The tag workflow builds tmux and both helpers, packages checksums/notices, and stages a draft only after the app archive and runtime pass. Public release follows the TestFlight upload. Dev/Exp keep the mutable local artifact channel, and previously shipped immutable static-host URLs remain intact.
+New main builds resolve their matching host-runtime manifest from the same GitHub release tag. The tag workflow builds tmux and both helpers, packages checksums/notices, and attaches them to the release only after the app archive and runtime pass. The GitHub release with the runtime follows the TestFlight upload. Dev/Exp keep the mutable local artifact channel, and previously shipped immutable static-host URLs remain intact.

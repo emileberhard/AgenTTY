@@ -21,7 +21,7 @@ case "$operation" in
     if [[ -n "${CURRENT_PROJECT_VERSION:-}" ]]; then versions+=(CURRENT_PROJECT_VERSION="$CURRENT_PROJECT_VERSION"); fi
     xcodebuild archive "${common[@]}" -scheme AgenTTY-iOS -configuration Release \
       -destination 'generic/platform=iOS' -archivePath "$ARCHIVE_PATH" \
-      "${versions[@]}" CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
+      ${versions[@]+"${versions[@]}"} CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO
     ;;
   *) echo "Unknown operation: $operation" >&2; exit 2 ;;
 esac
