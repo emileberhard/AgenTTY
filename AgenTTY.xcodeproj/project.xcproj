@@ -91,6 +91,12 @@
               "path": "Resources",
               "children": [
                 {
+                  "path": "AgenTTYLocalSecrets.json",
+                  "target-membership": [
+                    "AgenTTY-iOS-Dev/resources",
+                    "AgenTTY-iOS-Exp/resources",
+                  ],
+                }, {
                   "path": "AgenTTYLocalSecrets.example.json",
                   "target-membership": [
                     "AgenTTY-iOS/resources",

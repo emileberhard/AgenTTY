@@ -6,10 +6,12 @@ operation="${1:?Use build, test, or archive}"
 common=(-project AgenTTY.xcodeproj -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -skipMacroValidation -jobs 4)
 case "$operation" in
   build)
+    ./scripts/sync-local-llm-router-key
     xcodebuild build "${common[@]}" -scheme AgenTTY-iOS-Dev -configuration Debug \
       -destination 'generic/platform=iOS Simulator' ARCHS=arm64 CODE_SIGNING_ALLOWED=NO
     ;;
   test)
+    ./scripts/sync-local-llm-router-key
     simulator_id="$(AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME=latest ./scripts/resolve-release-simulator)"
     xcodebuild test "${common[@]}" -scheme AgenTTY-iOS-Tests -configuration Debug \
       -destination "platform=iOS Simulator,id=$simulator_id" CODE_SIGNING_ALLOWED=NO

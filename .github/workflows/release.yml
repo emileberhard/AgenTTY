@@ -29,7 +29,10 @@ jobs:
           [[ $(git cat-file -t "refs/tags/$VERSION") == tag ]] || { echo "::error::Release tags must be annotated."; exit 1; }
           newest=$(git tag --list | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
           [[ $newest == "$VERSION" ]] || { echo "::error::$newest is newer than $VERSION."; exit 1; }
-          [[ -n $(git cat-file tag "refs/tags/$VERSION" | sed '1,/^$/d') ]] || { echo "::error::The $VERSION tag has no release notes."; exit 1; }
+          notes=$(git cat-file tag "refs/tags/$VERSION" | sed '1,/^$/d')
+          if [[ -z $notes ]] || grep -qvE '^(- .+|)$' <<< "$notes"; then
+            echo "::error::The $VERSION tag message must be a Markdown list of user-visible changes."; exit 1
+          fi
 
       - name: Wait for CI to pass on this commit
         timeout-minutes: 35
@@ -77,7 +80,7 @@ jobs:
           name: npm-candidate
           path: tools/agentty-host/*.tgz
           if-no-files-found: error
-          retention-days: 3
+          retention-days: 30
 
   testflight:
     needs: [admit, tmux, npm-candidate]
@@ -92,6 +95,7 @@ jobs:
       contents: read
     env:
       VERSION: ${{ github.ref_name }}
+      MARKETING_VERSION: ${{ github.ref_name }}
       DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
       AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
       AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
@@ -150,7 +154,6 @@ jobs:
       - name: Archive
         env:
           ARCHIVE_PATH: ${{ runner.temp }}/AgenTTY.xcarchive
-          MARKETING_VERSION: ${{ github.ref_name }}
           CURRENT_PROJECT_VERSION: ${{ steps.build.outputs.number }}
         run: |
           scripts/ios-public archive
@@ -163,13 +166,14 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+      - run: npm install --global @sentry/cli@3.8.1
+
       - name: Upload Sentry symbols
         env:
           SENTRY_AUTH_TOKEN: ${{ secrets.SENTRY_AUTH_TOKEN }}
           SENTRY_ORG: ${{ vars.SENTRY_ORG }}
           SENTRY_PROJECT: ${{ vars.SENTRY_PROJECT }}
         run: |
-          npm install --global @sentry/cli@3.8.1
           sentry-cli releases new "$VERSION"
           sentry-cli debug-files upload --include-sources "$RUNNER_TEMP/AgenTTY.xcarchive/dSYMs"
           sentry-cli releases finalize "$VERSION"
@@ -202,7 +206,7 @@ jobs:
           done
           export_archive upload
 
-  testflight-review:
+  testflight-notes:
     needs: testflight
     runs-on: ubuntu-24.04
     environment: testflight
