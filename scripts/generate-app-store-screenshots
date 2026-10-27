@@ -11,7 +11,6 @@ cd "$repo_root"
 
 ./scripts/fetch-apple-bezels
 device_inventory="$(./scripts/ensure-app-store-screenshot-simulators)"
-tuist generate --no-open
 
 screenshot_devices="${AGENTTY_SCREENSHOT_DEVICES:-ipad}"
 # Per-scene budget for the app to reach its ready marker. Cold simulator
@@ -22,7 +21,7 @@ ipad_id="$(printf '%s\n' "$device_inventory" | awk -F '\t' '$1 == "iPad Pro 13-i
 build_simulator_id="$ipad_id"
 
 build_json="$(xcodebuildmcp simulator build \
-  --workspace-path "$repo_root/AgenTTY.xcworkspace" \
+  --project-path "$repo_root/AgenTTY.xcodeproj" \
   --scheme AgenTTY-iOS-Dev \
   --simulator-id "$build_simulator_id" \
   --configuration Debug \
@@ -32,7 +31,7 @@ build_json="$(xcodebuildmcp simulator build \
 printf '%s\n' "$build_json" | jq -e '.didError == false' >/dev/null
 
 app_json="$(xcodebuildmcp simulator get-app-path \
-  --workspace-path "$repo_root/AgenTTY.xcworkspace" \
+  --project-path "$repo_root/AgenTTY.xcodeproj" \
   --scheme AgenTTY-iOS-Dev \
   --simulator-id "$build_simulator_id" \
   --configuration Debug \
@@ -116,3 +115,17 @@ mkdir -p ../ascelerate/media
 unzip -q -o output/agentty-app-store-screenshots.zip -d ../ascelerate/media
 AGENTTY_SCREENSHOT_DEVICES="$screenshot_devices" \
   ../scripts/validate-app-store-screenshots ../ascelerate/media
+
+cd "$repo_root"
+publish_set() {
+  local source_directory="$1" placement_group="$2"
+  rm -rf "AppStore/screenshots/$placement_group"
+  mkdir -p "AppStore/screenshots/$placement_group"
+  cp "$source_directory"/*.png "AppStore/screenshots/$placement_group/"
+}
+if [[ ",$screenshot_devices," == *,iphone,* ]]; then
+  publish_set ascelerate/media/en-US/APP_IPHONE_69 IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE
+fi
+if [[ ",$screenshot_devices," == *,ipad,* ]]; then
+  publish_set ascelerate/media/en-US/APP_IPAD_PRO_3GEN_129 IPAD_13_PROFILE
+fi

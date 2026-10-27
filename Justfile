@@ -33,9 +33,6 @@
 #   just host-runtime-ensure-release V  Publish or verify/reuse immutable host-runtime release V
 #   just host-runtime-publish-latest    Publish/update the mutable latest host-runtime channel
 #   just host-runtime-deploy-local      Install/reload an operator-owned static artifact host
-#   just release-toolchain-check        Verify the pinned Xcode release toolchain
-#   just release-package-lock-check     Install and strictly resolve the tracked Swift package lock
-#   just release-test-build             Build the maintained iOS tests with the pinned stable simulator
 #   just xcode-clean                     Clean Xcode build artifacts
 #   just ghostty-reset-sources           Remove cloned Ghostty/libxev source repos
 #
@@ -56,7 +53,7 @@ build_only := "false"
 
 sources := "Vendor/sources"
 xcframework := "Vendor/GhosttyKit.xcframework"
-workspace := "AgenTTY.xcworkspace"
+project := "AgenTTY.xcodeproj"
 scheme := "AgenTTY-iOS-Dev"
 xcode_log_filter := "./scripts/filter-xcodebuild-output"
 backend_runner := "./services/backend/scripts/run-backend"
@@ -77,7 +74,6 @@ host_runtime_artifact_root := "./HostRuntimeArtifacts/bin"
 notify_helper_resource_root := host_runtime_artifact_root
 tmux_runtime_builder := "./scripts/build-tmux-runtime"
 host_runtime_publish_script := "./scripts/publish-host-runtime-artifacts"
-release_package_lock_script := "./scripts/install-release-package-lock"
 release_simulator_resolver := "./scripts/resolve-release-simulator"
 
 # Default command
@@ -117,102 +113,15 @@ backend-deploy-local:
     : "${AGENTTY_BACKEND_DEPLOY_SCRIPT:?AGENTTY_BACKEND_DEPLOY_SCRIPT must point to the local backend deploy script}"
     "$AGENTTY_BACKEND_DEPLOY_SCRIPT"
 
-# Verify the deterministic toolchain used by TestFlight releases
-release-toolchain-check:
-    #!/bin/bash
-    set -euo pipefail
-    expected_macos_version="${AGENTTY_RELEASE_MACOS_VERSION:-27.0.1}"
-    expected_macos_build="${AGENTTY_RELEASE_MACOS_BUILD:-26A434}"
-    expected_xcode_version="${AGENTTY_RELEASE_XCODE_VERSION:-27.2}"
-    expected_xcode_build="${AGENTTY_RELEASE_XCODE_BUILD:-27B48}"
-    expected_ios_sdk_version="${AGENTTY_RELEASE_IOS_SDK_VERSION:-27.2}"
-    expected_ios_simulator_runtime="${AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME:-27.0}"
-    expected_ios_simulator_device="${AGENTTY_RELEASE_IOS_SIMULATOR_DEVICE:-iPhone 17 Pro}"
-    release_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
-    xcodebuild_bin="$release_developer_dir/usr/bin/xcodebuild"
-    actual_macos_version="$(sw_vers -productVersion)"
-    actual_macos_build="$(sw_vers -buildVersion)"
-    if [[ "$actual_macos_version" != "$expected_macos_version" || "$actual_macos_build" != "$expected_macos_build" ]]; then
-        echo "FATAL: release host does not match the pinned macOS runner." >&2
-        echo "Expected: macOS $expected_macos_version ($expected_macos_build)" >&2
-        echo "Actual:   macOS $actual_macos_version ($actual_macos_build)" >&2
-        exit 1
-    fi
-    [ -x "$xcodebuild_bin" ] || {
-        echo "FATAL: release Xcode is missing: $xcodebuild_bin" >&2
-        exit 1
-    }
-    actual_xcode="$("$xcodebuild_bin" -version)"
-    expected_xcode="$(printf 'Xcode %s\nBuild version %s' "$expected_xcode_version" "$expected_xcode_build")"
-    if [[ "$actual_xcode" != "$expected_xcode" ]]; then
-        echo "FATAL: release Xcode does not match the pinned toolchain." >&2
-        printf 'Expected:\n%s\nActual:\n%s\n' "$expected_xcode" "$actual_xcode" >&2
-        exit 1
-    fi
-    if ! "$xcodebuild_bin" -checkFirstLaunchStatus; then
-        echo "FATAL: release Xcode first-launch components are not ready." >&2
-        echo "Run Xcode's first-launch setup for $release_developer_dir before releasing." >&2
-        exit 1
-    fi
-    actual_ios_sdk_version="$(DEVELOPER_DIR="$release_developer_dir" xcrun --sdk iphoneos --show-sdk-version)"
-    if [[ "$actual_ios_sdk_version" != "$expected_ios_sdk_version" ]]; then
-        echo "FATAL: release iOS SDK does not match the pinned toolchain." >&2
-        echo "Expected: iOS $expected_ios_sdk_version" >&2
-        echo "Actual:   iOS $actual_ios_sdk_version" >&2
-        exit 1
-    fi
-    simulator_id="$(DEVELOPER_DIR="$release_developer_dir" {{ release_simulator_resolver }})"
-    printf 'Release toolchain verified: macOS %s (%s), Xcode %s (%s), iOS SDK %s, iOS %s simulator %s (%s)\n' \
-        "$expected_macos_version" "$expected_macos_build" \
-        "$expected_xcode_version" "$expected_xcode_build" "$expected_ios_sdk_version" \
-        "$expected_ios_simulator_runtime" "$expected_ios_simulator_device" "$simulator_id"
-
-# Install the canonical package lock and prove Xcode accepts it without updates
-release-package-lock-check:
-    #!/bin/bash
-    set -euo pipefail
-    {{ release_package_lock_script }} --install
-    xcodebuild -resolvePackageDependencies \
-        -workspace "{{ workspace }}" \
-        -scheme "AgenTTY-iOS" \
-        -disableAutomaticPackageResolution \
-        -onlyUsePackageVersionsFromResolvedFile \
-        -skipPackageUpdates
-    {{ release_package_lock_script }} --check-installed
-
-# Compile the maintained test bundle, then restore the canonical locked workspace
-release-test-build: release-toolchain-check
-    #!/bin/bash
-    set -euo pipefail
-    export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
-    just --justfile Justfile host-shell-test
-    tuist generate --no-open
-    just --justfile Justfile release-package-lock-check
-    simulator_id="$({{ release_simulator_resolver }})"
-    tuist test AgenTTY-iOS-Tests \
-        --build-only \
-        --skip-ui-tests \
-        --no-selective-testing \
-        --no-binary-cache \
-        -- \
-        -destination "platform=iOS Simulator,id=$simulator_id" \
-        -disableAutomaticPackageResolution \
-        -onlyUsePackageVersionsFromResolvedFile \
-        -skipPackageUpdates
-    # `tuist test` may leave a test-only workspace without app schemes.
-    tuist generate --no-open
-    {{ release_package_lock_script }} --install
-    {{ release_package_lock_script }} --check-installed
-
 # Run the opt-in live Gemini structured-output regression test.
 ios-llm-integration-test:
     #!/bin/bash
     set -euo pipefail
     ./scripts/sync-local-llm-router-key
-    tuist test AgenTTY-iOS-LLM-IntegrationTests \
-        --skip-ui-tests \
-        --no-selective-testing \
-        --no-binary-cache
+    simulator_id="$({{ release_simulator_resolver }})"
+    xcodebuild test -project "{{ project }}" -scheme AgenTTY-iOS-LLM-IntegrationTests \
+        -destination "platform=iOS Simulator,id=$simulator_id" \
+        -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates
 
 notify-helper-test:
     #!/bin/bash
@@ -381,67 +290,19 @@ _ensure-latest-host-runtime-published:
 _ensure-release-host-runtime-published:
     just --justfile Justfile _ensure-host-runtime-published release
 
-# Ensure Tuist project is generated and SPM packages resolve cleanly.
+# Ensure SPM packages resolve cleanly from the committed lock.
 
 # Auto-recovers from stale SPM caches; gives clear errors for auth/network issues.
 [private]
 _ensure-project:
     #!/bin/bash
     set -euo pipefail
-    project_file="AgenTTY.xcodeproj/project.pbxproj"
-    workspace_file="{{ workspace }}/contents.xcworkspacedata"
-    resource_paths_stamp="AgenTTY.xcodeproj/.agentty-resource-paths.sha256"
-    needs_generate=false
-
-    resource_paths_hash() {
-        if [ ! -d "AgenTTY/Resources" ]; then
-            printf 'no-resources\n'
-            return 0
-        fi
-        find "AgenTTY/Resources" -type f -print | LC_ALL=C sort | shasum -a 256 | awk '{print $1}'
-    }
-
-    workspace_has_expected_scheme() {
-        xcodebuild -list -workspace "{{ workspace }}" 2>/dev/null | grep -Fq "{{ scheme }}"
-    }
-
-    if [ ! -f "$project_file" ] || [ ! -f "$workspace_file" ]; then
-        needs_generate=true
-    elif [ "Project.swift" -nt "$project_file" ]; then
-        needs_generate=true
-    elif [ -d "Tuist" ] && find "Tuist" -type f -newer "$project_file" -print -quit | grep -q .; then
-        needs_generate=true
-    elif [ ! -f "$resource_paths_stamp" ]; then
-        needs_generate=true
-    elif [ "$(cat "$resource_paths_stamp")" != "$(resource_paths_hash)" ]; then
-        needs_generate=true
-    fi
-
-    if [ "$needs_generate" = true ]; then
-        echo "xcodeproj is missing or stale — running tuist generate..."
-        if ! command -v tuist >/dev/null 2>&1; then
-            echo "FATAL: tuist is not installed." >&2
-            echo "  Install with: brew install tuist" >&2
-            exit 1
-        fi
-        tuist generate --no-open
-        resource_paths_hash > "$resource_paths_stamp"
-    fi
-
-    if ! workspace_has_expected_scheme; then
-        echo "workspace is missing scheme {{ scheme }} — regenerating normal tuist workspace..."
-        tuist generate --no-open
-        resource_paths_hash > "$resource_paths_stamp"
-    fi
-
-    {{ release_package_lock_script }} --install
-
     # --- SPM: resolve packages (auto-recover from stale caches) ---
     resolve_log="$(mktemp -t agentty-spm-resolve.XXXXXX)"
     trap 'rm -f "$resolve_log"' EXIT
     set +e
     xcodebuild -resolvePackageDependencies \
-        -workspace "{{ workspace }}" \
+        -project "{{ project }}" \
         -scheme "{{ scheme }}" \
         -disableAutomaticPackageResolution \
         -onlyUsePackageVersionsFromResolvedFile \
@@ -468,7 +329,7 @@ _ensure-project:
         echo "  retrying package resolve..."
         set +e
         xcodebuild -resolvePackageDependencies \
-            -workspace "{{ workspace }}" \
+            -project "{{ project }}" \
             -scheme "{{ scheme }}" \
             -disableAutomaticPackageResolution \
             -onlyUsePackageVersionsFromResolvedFile \
@@ -686,7 +547,7 @@ ios-deliver-dev $app_path:
 ios-build-install-dev: _validate-ios-dev-delivery _sync-local-llm-router-key _ensure-latest-host-runtime-published _ensure-xcframework _ensure-project _ensure-ios-dev-signing
     #!/bin/bash
     set -euo pipefail
-    build_args=(--workspace "{{ workspace }}" --scheme "{{ scheme }}" --allow-provisioning-updates)
+    build_args=(--project "{{ project }}" --scheme "{{ scheme }}" --allow-provisioning-updates)
     if [ "{{ build_only }}" = true ]; then
         common_root="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
         artifact_root="$common_root/.local/iphone-builds/$(uuidgen)"
@@ -756,7 +617,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
         local skip_build_flag="${1:-no}"
         local -a install_cmd=(
             "$HOME/configs/skills/swift-development/scripts/ios-install-device"
-            --workspace "{{ workspace }}"
+            --project "{{ project }}"
             --scheme "AgenTTY-iOS"
         )
         if [ -n "{{ iphone_udid }}" ]; then install_cmd+=(--device "{{ iphone_udid }}"); fi
@@ -828,7 +689,7 @@ ios-build-install-main: _ensure-release-host-runtime-published _ensure-xcframewo
     if ! ./scripts/ios-devicectl-app-target "${launch_args[@]}"; then
         echo "warning: build and install succeeded, but auto-launch failed; open the app manually if needed" >&2
     fi
-    if ! ./scripts/upload-sentry-local-dsyms --workspace "{{ workspace }}" --scheme "AgenTTY-iOS"; then
+    if ! ./scripts/upload-sentry-local-dsyms --project "{{ project }}" --scheme "AgenTTY-iOS"; then
         echo "warning: local Sentry dSYM upload failed; symbolication for this side-loaded main build may be incomplete" >&2
     fi
 
@@ -843,7 +704,7 @@ ios-build-install-dev-ipad: _sync-local-llm-router-key _ensure-latest-host-runti
     trap 'rm -f "$install_log_raw" "$install_log_filtered" "$install_log_extra"' EXIT
     set +e
     "$HOME/configs/skills/swift-development/scripts/ios-install-device" \
-        --workspace "{{ workspace }}" \
+        --project "{{ project }}" \
         --scheme "{{ scheme }}" \
         --device-type ipad \
         --allow-provisioning-updates \
@@ -888,7 +749,7 @@ ios-build-install-exp: _sync-local-llm-router-key _ensure-latest-host-runtime-pu
     install_log_filtered="$(mktemp -t agentty-ios-build-install-exp.filtered.XXXXXX)"
     install_log_extra="$(mktemp -t agentty-ios-build-install-exp.extra.XXXXXX)"
     trap 'rm -f "$install_log_raw" "$install_log_filtered" "$install_log_extra"' EXIT
-    install_args=(--workspace "{{ workspace }}" --scheme "AgenTTY-iOS-Exp" --allow-provisioning-updates)
+    install_args=(--project "{{ project }}" --scheme "AgenTTY-iOS-Exp" --allow-provisioning-updates)
     if [ -n "{{ iphone_udid }}" ]; then install_args+=(--device "{{ iphone_udid }}"); fi
     set +e
     "$HOME/configs/skills/swift-development/scripts/ios-install-device" \
@@ -948,8 +809,8 @@ xcode-clean:
     #!/bin/bash
     set -euo pipefail
     echo "Cleaning Xcode artifacts..."
-    if [ -d "{{ workspace }}" ]; then
-        xcodebuild -workspace "{{ workspace }}" -scheme "{{ scheme }}" clean -quiet 2>/dev/null || true
+    if [ -d "{{ project }}" ]; then
+        xcodebuild -project "{{ project }}" -scheme "{{ scheme }}" clean -quiet 2>/dev/null || true
     fi
     echo "Done."
 
@@ -1110,40 +971,9 @@ _install-xcframework:
     just --justfile Justfile ghostty-validate-xcframework
     echo "▸ xcframework installed, module maps verified"
 
-ios-check: _ensure-xcframework
+ios-check:
     ./scripts/ios-public build
 
-ios-test: _ensure-xcframework
+ios-test:
     ./scripts/ios-public test
 
-ios-cloud-archive: _ensure-xcframework
-    ./scripts/ios-public archive
-
-ios-cloud-export:
-    ./scripts/ios-public export
-
-maintainer-testflight version run_id:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    ./scripts/check-release-tag "{{ version }}"
-    ./scripts/check-build-identity
-    export AGENTTY_APP_IDENTIFIER="${AGENTTY_APP_IDENTIFIER:-$(sed -n 's/^AGENTTY_BUNDLE_ID *= *//p' Config/Local.xcconfig)}"
-    ./scripts/check-release-version "{{ version }}"
-    just release-toolchain-check
-    export MARKETING_VERSION="{{ version }}"
-    export GITHUB_REPOSITORY="$(ghp repo view --json nameWithOwner --jq .nameWithOwner)"
-    [[ "$(ghp api "repos/$GITHUB_REPOSITORY/actions/runs/{{ run_id }}" --jq .head_sha)" == "$(git rev-parse HEAD)" ]]
-    mkdir -p build
-    rm -rf build/release-candidate.tar.gz build/release-runtime
-    ghp run download "{{ run_id }}" --repo "$GITHUB_REPOSITORY" --name release-candidate --dir build
-    tar -xzf build/release-candidate.tar.gz -C build release-runtime
-    (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
-    export BUNDLE_PATH="${BUNDLE_PATH:-$HOME/Library/Caches/agentty-fastlane-bundle}"
-    bundle _4.0.16_ install --quiet
-    bundle _4.0.16_ clean
-    bundle _4.0.16_ exec fastlane ios beta version:"{{ version }}"
-    ./scripts/release-notes "{{ version }}" > build/release-notes.md
-    ghp release create "{{ version }}" --draft --verify-tag --title "{{ version }}" --notes-file build/release-notes.md
-    ghp release upload "{{ version }}" build/release-runtime/*
-    ghp release edit "{{ version }}" --draft=false
-    rm -f AgenTTY_iOS.ipa AgenTTY_iOS.app.dSYM.zip
