@@ -101,3 +101,43 @@ class MetadataTests(unittest.TestCase):
                 asc.apply_metadata("app", "version", Path(temporary), "- Fixed it.")
         self.assertEqual([("PATCH", "appStoreVersionLocalizations/loc")], [call for call in calls if call[0] == "PATCH"])
         self.assertNotIn("appInfoLocalizations", " ".join(path for _, path in calls))
+
+
+class VersionAndMetadataTests(unittest.TestCase):
+    def test_a_version_at_or_below_an_uploaded_one_is_refused_before_the_build(self):
+        responses = [[{"attributes": {"versionString": "2.13.0", "appVersionState": "READY_FOR_DISTRIBUTION"}},
+                      {"attributes": {"versionString": "2.14.0", "appVersionState": "PREPARE_FOR_SUBMISSION"}}],
+                     [{"attributes": {"version": "2.13.1"}}]]
+        for version, accepted in (("2.13.1", False), ("2.13.0", False), ("2.13.2", True)):
+            with self.subTest(version=version), patch.object(asc, "api", side_effect=list(responses)):
+                if accepted:
+                    asc.check_version("app", version)
+                else:
+                    with self.assertRaisesRegex(SystemExit, "must exceed"):
+                        asc.check_version("app", version)
+
+    def test_an_editable_app_info_is_patched_and_whats_new_only_follows_a_release(self):
+        calls = []
+
+        def api(method, path, data=None, **params):
+            calls.append((method, path, data and data["attributes"]))
+            if path.endswith("/appStoreVersionLocalizations"):
+                return [{"id": "loc", "attributes": {"locale": "en-US", "description": "same", "whatsNew": "old"}}]
+            if path.endswith("/appInfos"):
+                return [{"id": "info", "attributes": {"state": "PREPARE_FOR_SUBMISSION"}}]
+            if path.endswith("/appInfoLocalizations"):
+                return [{"id": "infoloc", "attributes": {"locale": "en-US", "name": "Old"}}]
+            return None
+
+        with tempfile.TemporaryDirectory() as temporary:
+            locale = Path(temporary) / "en-US"
+            locale.mkdir()
+            (locale / "description.txt").write_text("same")
+            (locale / "name.txt").write_text("New")
+            with patch.object(asc, "api", side_effect=api):
+                asc.apply_metadata("app", "version", Path(temporary), None)
+                asc.apply_metadata("app", "version", Path(temporary), "- Fixed it.")
+        patches = [call for call in calls if call[0] == "PATCH"]
+        self.assertEqual([("PATCH", "appInfoLocalizations/infoloc", {"name": "New"}),
+                          ("PATCH", "appStoreVersionLocalizations/loc", {"whatsNew": "- Fixed it."}),
+                          ("PATCH", "appInfoLocalizations/infoloc", {"name": "New"})], patches)
