@@ -42,11 +42,12 @@ commit a push to `main` ended on, after its CI passed.
 3. `testflight` refuses a version not above every released App Store and uploaded
    TestFlight version, reserves one build number above every App Store Connect build
    and pending upload, builds the host helpers and the complete runtime,
-   archives unsigned with the tag as `MARKETING_VERSION`, ad-hoc signs each
-   bundle with its entitlements (`Config/entitlements.json`), uploads the Sentry
+   archives unsigned with the tag as `MARKETING_VERSION`, ad-hoc signs embedded
+   frameworks from the inside out and then each app bundle with its entitlements
+   (`Config/entitlements.json`), uploads the Sentry
    symbols, exports through Xcode cloud signing, checks the exported
-   entitlements and that the app and every embedded framework carry the team's
-   signature, and uploads. Its build-number output makes the later jobs select
+   entitlements and that every embedded framework carries the team's Apple
+   Distribution signature, and uploads. Its build-number output makes the later jobs select
    that exact build, also on retries.
 4. `testflight-notes` sets What to Test from the tag message. The workflow
    never distributes to beta groups or submits for beta review.

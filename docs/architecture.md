@@ -86,7 +86,11 @@ license. Public CI never runs on an operator's personal machine.
 
 Hosted cloud signing is attempted only for distribution export of an unsigned
 archive. App Groups/CloudKit/extension provisioning must be proved with the
-actual Apple account; the export is checked for entitlements and for every embedded framework carrying the team's signature before anything uploads. App Store
+actual Apple account. Every embedded framework is ad-hoc signed before its
+containing app so cloud export replaces linker-generated signatures. The export
+is checked for entitlements and for every embedded framework carrying the team's
+Apple Distribution signature before anything uploads. A matching team alone does
+not establish a distribution signature. App Store
 text and screenshots are committed under `AppStore/` and applied to the version
 the tag prepares, which carries the same version as the app, TestFlight, runtime
 and npm package.
