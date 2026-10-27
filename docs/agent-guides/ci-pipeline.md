@@ -17,7 +17,8 @@ compiler macros from those reviewed, locked package revisions. TestFlight uses X
 select the matching developer directory explicitly. Never weaken strict
 concurrency to make a new toolchain compile. Public simulator tests select the
 newest installed iOS runtime with an available iPhone; the maintainer
-release preflight keeps its explicit local runtime contract.
+release preflight keeps its explicit local runtime contract and uses Xcode 27.2 RC
+(27B48) on the maintainer Macs.
 
 ## Hosted release
 

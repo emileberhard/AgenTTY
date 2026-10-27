@@ -123,12 +123,12 @@ release-toolchain-check:
     set -euo pipefail
     expected_macos_version="${AGENTTY_RELEASE_MACOS_VERSION:-27.0.1}"
     expected_macos_build="${AGENTTY_RELEASE_MACOS_BUILD:-26A434}"
-    expected_xcode_version="${AGENTTY_RELEASE_XCODE_VERSION:-27.1}"
-    expected_xcode_build="${AGENTTY_RELEASE_XCODE_BUILD:-27A9275}"
-    expected_ios_sdk_version="${AGENTTY_RELEASE_IOS_SDK_VERSION:-27.1}"
+    expected_xcode_version="${AGENTTY_RELEASE_XCODE_VERSION:-27.2}"
+    expected_xcode_build="${AGENTTY_RELEASE_XCODE_BUILD:-27B48}"
+    expected_ios_sdk_version="${AGENTTY_RELEASE_IOS_SDK_VERSION:-27.2}"
     expected_ios_simulator_runtime="${AGENTTY_RELEASE_IOS_SIMULATOR_RUNTIME:-27.0}"
     expected_ios_simulator_device="${AGENTTY_RELEASE_IOS_SIMULATOR_DEVICE:-iPhone 17 Pro}"
-    release_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.1.0.app/Contents/Developer}"
+    release_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
     xcodebuild_bin="$release_developer_dir/usr/bin/xcodebuild"
     actual_macos_version="$(sw_vers -productVersion)"
     actual_macos_build="$(sw_vers -buildVersion)"
@@ -184,7 +184,7 @@ release-package-lock-check:
 release-test-build: release-toolchain-check
     #!/bin/bash
     set -euo pipefail
-    export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-27.1.0.app/Contents/Developer}"
+    export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
     just --justfile Justfile host-shell-test
     tuist generate --no-open
     just --justfile Justfile release-package-lock-check
@@ -1018,7 +1018,7 @@ _check-ghostty-toolchain:
     #!/bin/bash
     set -euo pipefail
     zig_bin="$({{ ghostty_zig_toolchain_script }})"
-    ghostty_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.1.0.app/Contents/Developer}"
+    ghostty_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
     xcodebuild_bin="$ghostty_developer_dir/usr/bin/xcodebuild"
     [ -x "$xcodebuild_bin" ] || {
         echo "FATAL: Ghostty Xcode toolchain is missing: $xcodebuild_bin" >&2
@@ -1047,7 +1047,7 @@ _build-xcframework:
     #!/bin/bash
     set -euo pipefail
     zig_bin="$({{ ghostty_zig_toolchain_script }})"
-    ghostty_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.1.0.app/Contents/Developer}"
+    ghostty_developer_dir="${DEVELOPER_DIR:-/Applications/Xcode-27.2.0-release.candidate.app/Contents/Developer}"
     xcodebuild_bin="$ghostty_developer_dir/usr/bin/xcodebuild"
     [ -x "$xcodebuild_bin" ] || {
         echo "FATAL: Ghostty Xcode toolchain is missing: $xcodebuild_bin" >&2
