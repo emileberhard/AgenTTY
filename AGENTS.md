@@ -2,7 +2,7 @@
 
 Ghostty-based SSH terminal for iPhone and iPad, iOS 26+. The macOS target is a
 scaffold. Read [docs/architecture.md](docs/architecture.md) before changing a
-boundary. `CLAUDE.md`, `GEMINI.md` and `LLMS.md` link to this file.
+boundary. `CLAUDE.md` links to this file.
 
 ## Ownership
 
@@ -127,8 +127,9 @@ package, Rust build identity and Sentry release. Manifest versions of 0.0.0 are
 inert development placeholders, never manually bumped. `release.yml` runs on
 every pushed tag and rejects anything but that tag; `admit` then waits for `main`'s
 CI on the same commit. `testflight` builds the complete runtime and the unsigned
-archive, ad-hoc signs each bundle, exports through Xcode cloud signing with the
-`testflight` environment's ASC key, checks the entitlements and uploads with a
+archive, ad-hoc signs embedded frameworks deepest first and then app bundles,
+exports through Xcode cloud signing with the `testflight` environment's ASC key,
+checks entitlements and each framework's Apple Distribution signature, and uploads with a
 build number reserved from App Store Connect. `testflight-notes` sets What to
 Test, `app-store` applies `AppStore/` to the prepared version, `github-release`
 publishes the tag message verbatim with the runtime assets, and `npm` publishes
