@@ -1,4 +1,4 @@
-workspace: AgenTTY.xcworkspace
+project: AgenTTY.xcodeproj
 scheme: AgenTTY-iOS-Dev
 devices:
   - simulator: AgenTTY iPhone 17 Pro Max Screenshots iOS 26.5

@@ -51,23 +51,7 @@ DerivedData/
 *.perspectivev3
 !default.perspectivev3
 
-### Xcode Patch ###
-*.xcodeproj/*
-!*.xcodeproj/project.pbxproj
-!*.xcodeproj/xcshareddata/
-!*.xcworkspace/contents.xcworkspacedata
 /*.gcno
-
-### Projects ###
-*.xcodeproj
-*.xcworkspace
-
-### Tuist derived files ###
-graph.dot
-Derived/
-
-### Tuist managed dependencies ###
-Tuist/.build
 
 ### Local vendor artifacts ###
 Vendor/*
@@ -108,14 +92,9 @@ services/notify-relay/target/
 services/backend/target/
 tools/agentty-host-connector/target/
 
-### Fastlane ###
-fastlane/report.xml
-# sigh drops downloaded profiles here when repairing signing (install_ios_profiles).
-*.mobileprovision
 .worktrees/
 
-Config/Local.xcconfig
-fastlane/screenshots/
+Local.xcconfig
 
 tools/agentty-host/LICENSE
 tools/agentty-host/THIRD-PARTY-NOTICES.txt

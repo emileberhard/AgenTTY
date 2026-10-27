@@ -10,7 +10,7 @@ repo_root="$(
     pwd
 )"
 
-workspace="$repo_root/AgenTTY.xcworkspace"
+project="$repo_root/AgenTTY.xcodeproj"
 scheme="AgenTTY-iOS-Dev"
 team_id="NNP2B278S6"
 expected_bundle_id="${AGENTTY_DEV_BUNDLE_ID:-dev.tuist.agentty.iOS.dev}"
@@ -107,7 +107,7 @@ fi
 archive_started_at="$(date +%s)"
 archive_cmd=(
     xcodebuild
-    -workspace "$workspace"
+    -project "$project"
     -scheme "$scheme"
     -configuration Release
     -destination "generic/platform=iOS"
