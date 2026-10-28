@@ -126,8 +126,13 @@ app, TestFlight, App Store metadata, GitHub release, host runtime, npm pairing
 package, Rust build identity and Sentry release. Manifest versions of 0.0.0 are
 inert development placeholders, never manually bumped. `release.yml` runs on
 every pushed tag and rejects anything but that tag; `admit` then waits for `main`'s
-CI on the same commit. `testflight` builds the complete runtime and the unsigned
-archive, ad-hoc signs embedded frameworks deepest first and then app bundles,
+CI on the same commit. The workflow-wide `testflight` concurrency fence serializes
+build-number selection through publication without cancelling a running release.
+`runtime` builds and checksums the four-target host runtime without release
+credentials, alongside `archive`, which reserves the build number, builds unsigned
+and ad-hoc signs embedded frameworks deepest first and then app bundles.
+The archive crosses jobs as a tar file to preserve signatures and symlinks.
+Only after both jobs succeed, `testflight` restores that same-run archive,
 exports through Xcode cloud signing with the `testflight` environment's ASC key,
 checks entitlements and each framework's Apple Distribution signature, and uploads with a
 build number reserved from App Store Connect. `testflight-notes` sets What to

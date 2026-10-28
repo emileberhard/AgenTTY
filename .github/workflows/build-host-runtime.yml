@@ -1,0 +1,56 @@
+name: Host runtime
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/workflows/build-host-runtime.yml
+      - .github/workflows/build-tmux-runtime.yml
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  tmux:
+    uses: ./.github/workflows/build-tmux-runtime.yml
+
+  package:
+    needs: tmux
+    runs-on: xcode-27
+    timeout-minutes: 45
+    permissions:
+      actions: read
+      contents: read
+    env:
+      MARKETING_VERSION: ${{ inputs.version || '0.0.0' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - run: brew install just
+
+      - name: Build host runtime
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENTTY_GH_CLI: gh
+        run: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          scripts/ensure-notify-helper-toolchain --install-missing
+          just tmux-runtime-sync "$GITHUB_RUN_ID"
+          just notify-helper-rebuild
+          just host-connector-rebuild
+          scripts/package-release-runtime
+          (cd build/release-runtime && shasum -a 256 -c SHA256SUMS)
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-runtime
+          path: build/release-runtime
+          retention-days: 3
+          if-no-files-found: error
