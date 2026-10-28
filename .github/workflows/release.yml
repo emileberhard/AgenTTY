@@ -286,7 +286,14 @@ jobs:
             | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' | sort -V | tail -1)
           latest=false
           [[ $VERSION == "$newest" ]] && latest=true
-          gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" --latest="$latest" "$RUNNER_TEMP"/release-runtime/*
+          if gh release view "$VERSION" --json name,body,isDraft > "$RUNNER_TEMP/release.json" 2>/dev/null; then
+            jq -e --arg version "$VERSION" --rawfile notes "$RUNNER_TEMP/notes.md" \
+              '.name == $version and .body == $notes and .isDraft == false' "$RUNNER_TEMP/release.json" >/dev/null \
+              || { echo "::error::The existing $VERSION release is a draft or has different title or notes."; exit 1; }
+            echo "Release $VERSION is already published with matching title and notes."
+          else
+            gh release create "$VERSION" --verify-tag --title "$VERSION" --notes-file "$RUNNER_TEMP/notes.md" --latest="$latest" "$RUNNER_TEMP"/release-runtime/*
+          fi
 
   npm:
     needs: [github-release, npm-candidate]

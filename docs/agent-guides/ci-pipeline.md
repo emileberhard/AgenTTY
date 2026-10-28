@@ -60,7 +60,9 @@ commit a push to `main` ended on, after its CI passed.
 6. `github-release` attaches the complete runtime in its `gh release create`
    call, which stages the assets before publication. The release uses the bare
    version, the annotated tag message verbatim as its notes, and Latest only
-   while it is the newest version tag. Published assets are immutable.
+   while it is the newest version tag. Published assets are immutable. A retry
+   skips a published release with the same title and notes, and fails on a
+   mismatch without editing it.
 7. `npm` publishes the candidate with OIDC and provenance.
 
 Submitting for App Review and releasing on the App Store stay manual. Rerun a
