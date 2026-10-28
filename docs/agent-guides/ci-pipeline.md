@@ -48,7 +48,9 @@ commit a push to `main` ended on, after its CI passed.
    and ad-hoc signs embedded frameworks from the inside out and then each app
    bundle with its entitlements (`Config/entitlements.json`). A tar artifact
    preserves the archive's permissions, signatures and symlinks. `testflight`
-   joins both successful build jobs, restores that same-run archive, uploads
+   joins both successful build jobs, restores that same-run archive, rechecks
+   that Apple has no upload of this version (also when retrying only this job),
+   uploads
    the Sentry symbols, exports through Xcode cloud signing, checks the exported
    entitlements and that every embedded framework carries the team's Apple
    Distribution signature, and uploads. Its build-number output makes the later jobs select

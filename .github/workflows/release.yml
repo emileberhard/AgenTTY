@@ -191,6 +191,19 @@ jobs:
           tar -xf "$RUNNER_TEMP/AgenTTY.xcarchive.tar" -C "$RUNNER_TEMP"
           plutil -insert teamID -string "$DEVELOPMENT_TEAM" Config/ExportOptions.plist
 
+      - name: Refuse an existing upload, including when retrying only this job
+        env:
+          APP_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+          APP_STORE_CONNECT_KEY_P8: ${{ secrets.APP_STORE_CONNECT_KEY_P8 }}
+          APP_STORE_CONNECT_KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APP_STORE_CONNECT_KEY_PATH: ${{ runner.temp }}/AuthKey.p8
+        run: |
+          umask 077
+          trap 'rm -f "$APP_STORE_CONNECT_KEY_PATH"' EXIT
+          printf '%s' "$APP_STORE_CONNECT_KEY_P8" > "$APP_STORE_CONNECT_KEY_PATH"
+          scripts/app-store-connect check-version "$VERSION"
+
       - run: npm install --global @sentry/cli@3.8.1
 
       - name: Upload Sentry symbols
