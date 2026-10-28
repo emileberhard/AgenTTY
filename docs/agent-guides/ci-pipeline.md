@@ -37,15 +37,19 @@ commit a push to `main` ended on, after its CI passed.
 1. `admit` checks the tag, that it is the newest version and on `main`, and
    that its annotation is a Markdown list of release notes, then waits for the successful push CI
    run of the same commit. It never reruns CI.
-2. `tmux` builds the four tmux runtimes, and `npm-candidate` builds the tagged
-   pairing package. Neither holds release credentials.
-3. `testflight` refuses a version not above every released App Store and uploaded
+2. `runtime` calls `build-host-runtime.yml`: its `tmux` jobs build the four tmux
+   targets, then its packaging job builds both Rust helpers, verifies source
+   fingerprints and checksums the complete runtime. It has no release environment
+   or credentials. `npm-candidate` builds the tagged pairing package alongside it.
+3. `archive` waits for admission and the npm candidate, independently of the
+   runtime. It refuses a version not above every released App Store and uploaded
    TestFlight version, reserves one build number above every App Store Connect build
-   and pending upload, builds the host helpers and the complete runtime,
-   archives unsigned with the tag as `MARKETING_VERSION`, ad-hoc signs embedded
-   frameworks from the inside out and then each app bundle with its entitlements
-   (`Config/entitlements.json`), uploads the Sentry
-   symbols, exports through Xcode cloud signing, checks the exported
+   and pending upload, archives unsigned with the tag as `MARKETING_VERSION`,
+   and ad-hoc signs embedded frameworks from the inside out and then each app
+   bundle with its entitlements (`Config/entitlements.json`). A tar artifact
+   preserves the archive's permissions, signatures and symlinks. `testflight`
+   joins both successful build jobs, restores that same-run archive, uploads
+   the Sentry symbols, exports through Xcode cloud signing, checks the exported
    entitlements and that every embedded framework carries the team's Apple
    Distribution signature, and uploads. Its build-number output makes the later jobs select
    that exact build, also on retries.
@@ -64,6 +68,13 @@ commit a push to `main` ended on, after its CI passed.
    skips a published release with the same title and notes, and fails on a
    mismatch without editing it.
 7. `npm` publishes the candidate with OIDC and provenance.
+
+The workflow-wide `testflight` concurrency group covers build-number reservation,
+archive handoff and upload, with cancellation disabled. Splitting jobs therefore
+does not admit overlapping release uploads. Every checkout uses the triggering
+commit; downloads stay in the same run. Release credentials remain in the archive
+job that selects the build number and the jobs that sign or publish; the runtime
+build receives only the read-only Actions token.
 
 Submitting for App Review and releasing on the App Store stay manual. Rerun a
 transiently failed job from the tag's own run, only while that tag is still the
@@ -99,7 +110,7 @@ boundaries: after an uncertain failure inspect all three before retrying.
 ## Host runtime and deployment boundary
 
 `build-tmux-runtime.yml` runs manually or as a reusable release job and builds
-all four Darwin/Linux ARM64/x86_64 tmux targets. The `testflight` job builds
+all four Darwin/Linux ARM64/x86_64 tmux targets. The `runtime` job builds
 both Rust helpers, checks source fingerprints, adds notices and packages a
 manifest, per-target binaries, terminfo and SHA256SUMS. The immutable manifest
 lives at
@@ -107,6 +118,10 @@ lives at
 New main-flavor apps resolve that tag's manifest; Dev/Exp use the configured
 mutable artifact host. Older installed apps retain their previously compiled
 URLs, whose existing immutable releases must remain available unchanged.
+
+Changes to the three release workflows also exercise the complete reusable
+host-runtime build on pull requests with version `0.0.0`, alongside ordinary
+unsigned iOS CI. That path has no release credentials and publishes no release.
 
 The runtime is built and checksummed before the app is exported, and the
 release that publishes it follows a successful TestFlight upload; the build
