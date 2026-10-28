@@ -4,12 +4,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
-    open-pull-requests-limit: 1
-    groups:
-      dependencies:
-        patterns: ["*"]
+    open-pull-requests-limit: 2
     cooldown:
       default-days: 1
+    groups:
+      actions:
+        patterns: ['*']
   - package-ecosystem: cargo
     directories: [/services/backend, /tools/agentty-notify, /tools/agentty-host-connector]
     schedule:
