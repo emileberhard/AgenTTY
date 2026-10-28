@@ -58,6 +58,9 @@ jobs:
 
   runtime:
     needs: admit
+    permissions:
+      actions: read
+      contents: read
     uses: ./.github/workflows/build-host-runtime.yml
     with:
       version: ${{ github.ref_name }}
@@ -169,6 +172,8 @@ jobs:
       VERSION: ${{ github.ref_name }}
       DEVELOPMENT_TEAM: ${{ vars.DEVELOPMENT_TEAM }}
       AGENTTY_BUNDLE_ID: ${{ vars.AGENTTY_BUNDLE_ID }}
+      AGENTTY_APP_GROUP: ${{ vars.AGENTTY_APP_GROUP }}
+      AGENTTY_CLOUDKIT_CONTAINER: ${{ vars.AGENTTY_CLOUDKIT_CONTAINER }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
