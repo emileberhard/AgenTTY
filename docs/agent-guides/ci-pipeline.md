@@ -57,9 +57,10 @@ commit a push to `main` ended on, after its CI passed.
    sets What's New from the tag message from the second release on, places the
    screenshots in `AppStore/screenshots/<placement group>/` when present,
    and attaches the build. A version in review is left pending with a notice.
-6. `github-release` attaches the runtime to the release it publishes, titled
-   with the bare version, with the annotated tag message verbatim as its notes,
-   and marks it Latest only while it is the newest version tag.
+6. `github-release` attaches the complete runtime in its `gh release create`
+   call, which stages the assets before publication. The release uses the bare
+   version, the annotated tag message verbatim as its notes, and Latest only
+   while it is the newest version tag. Published assets are immutable.
 7. `npm` publishes the candidate with OIDC and provenance.
 
 Submitting for App Review and releasing on the App Store stay manual. Rerun a
