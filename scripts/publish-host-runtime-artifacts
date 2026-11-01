@@ -12,6 +12,10 @@ EOF
 }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+r2_config="${AGENTTY_HOST_RUNTIME_R2_CONFIG:-$HOME/.config/agentty-r2/rclone.conf}"
+if [[ "${AGENTTY_R2_LOCAL_STAGE:-}" != 1 && -z "${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-}" && -f "$r2_config" && "${1:-}" != --help && "${1:-}" != -h ]]; then
+  exec "$script_dir/publish-host-runtime-r2" "$@"
+fi
 repo_root="$(cd "$script_dir/.." && pwd)"
 source_root="$repo_root/HostRuntimeArtifacts/bin"
 public_root="${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-$HOME/.agentty/public/host-runtime}"

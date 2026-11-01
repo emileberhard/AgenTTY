@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+CONFIG = Path(os.environ.get('AGENTTY_HOST_RUNTIME_R2_CONFIG', Path.home() / '.config/agentty-r2/rclone.conf'))
+REMOTE = os.environ.get('AGENTTY_HOST_RUNTIME_R2_REMOTE', 'agentty-assets:agentty-host-runtime/host-runtime').rstrip('/')
+RCLONE = os.environ.get('AGENTTY_RCLONE', str(Path.home() / '.local/bin/rclone'))
+MAX_BYTES = 20 * 1024**3
+PREVIOUS_LATEST = 16
+
+
+def command(*args, capture=False, env=None, cwd=None):
+    result = subprocess.run(args, check=True, text=True, capture_output=capture, env=env, cwd=cwd)
+    return result.stdout.strip() if capture else ''
+
+
+def rclone(*args, capture=False):
+    return command(RCLONE, '--config', str(CONFIG), '--s3-no-check-bucket', *args, capture=capture)
+
+
+def remote_file(path):
+    metadata = json.loads(rclone('lsjson', '--stat', path, capture=True))
+    return not metadata['IsDir']
+
+
+def local_publish(args, directory):
+    env = {**os.environ, 'AGENTTY_HOST_RUNTIME_PUBLIC_ROOT': str(directory), 'AGENTTY_R2_LOCAL_STAGE': '1'}
+    command(str(ROOT / 'scripts/publish-host-runtime-artifacts'), *args, env=env, cwd=ROOT)
+
+
+def publish_release(version, directory):
+    if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|latest-[a-f0-9]{12}', version):
+        raise ValueError('Invalid release directory')
+    source = directory / 'releases' / version
+    target = REMOTE + '/releases/' + version
+    if remote_file(target + '/manifest.json'):
+        rclone('check', str(source), target)
+        return
+    flags = ['--checksum', '--immutable', '--header-upload', 'Cache-Control: public, max-age=31536000, immutable']
+    rclone(*flags, '--exclude', '/manifest.json', 'copy', str(source), target)
+    rclone('--exclude', '/manifest.json', 'check', str(source), target)
+    rclone(*flags, 'copyto', str(source / 'manifest.json'), target + '/manifest.json')
+    rclone('check', str(source), target)
+
+
+def retain_latest(current):
+    raw = rclone('lsjson', '--recursive', '--files-only', REMOTE + '/releases', capture=True)
+    manifests = []
+    for entry in json.loads(raw):
+        match = re.fullmatch(r'(latest-[a-f0-9]{12})/manifest\.json', entry['Path'])
+        if match:
+            manifests.append((datetime.fromisoformat(entry['ModTime'].replace('Z', '+00:00')), match.group(1)))
+    previous = sorted((item for item in manifests if item[1] != current), reverse=True)
+    for _, version in previous[PREVIOUS_LATEST:]:
+        rclone('delete', REMOTE + '/releases/' + version)
+    size = json.loads(rclone('size', '--json', REMOTE.rsplit('/', 1)[0], capture=True))['bytes']
+    if size > MAX_BYTES:
+        raise RuntimeError(f'Host runtime bucket exceeds its {MAX_BYTES} byte limit: {size} bytes')
+    print(f'Host runtime bucket: {size} of {MAX_BYTES} bytes')
+
+
+def main(args):
+    if ('--latest' in args) == ('--version' in args):
+        raise ValueError('Choose exactly one of --latest or --version')
+    if '--latest' in args:
+        mode = 'latest'
+        version = None
+    elif '--version' in args and args.index('--version') + 1 < len(args):
+        mode = 'release'
+        version = args[args.index('--version') + 1]
+        if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version):
+            raise ValueError('Invalid release version')
+    else:
+        raise ValueError('Expected --latest or --version MAJOR.MINOR.PATCH')
+    lock_path = CONFIG.parent / 'publish.lock'
+    with lock_path.open('a') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with tempfile.TemporaryDirectory(prefix='agentty-host-runtime-') as temporary:
+            directory = Path(temporary)
+            if mode == 'latest' and remote_file(REMOTE + '/latest.json'):
+                rclone('copyto', REMOTE + '/latest.json', str(directory / 'latest.json'))
+                version = json.loads((directory / 'latest.json').read_text())['runtime_version']
+                if not re.fullmatch(r'latest-[a-f0-9]{12}', version):
+                    raise ValueError('Invalid current latest runtime')
+            if version and remote_file(REMOTE + '/releases/' + version + '/manifest.json'):
+                rclone('copy', REMOTE + '/releases/' + version, str(directory / 'releases' / version))
+            local_publish(args, directory)
+            if '--verify-existing-release' in args:
+                return
+            if mode == 'latest':
+                version = json.loads((directory / 'latest.json').read_text())['runtime_version']
+            assert version is not None
+            publish_release(version, directory)
+            if mode == 'latest':
+                rclone('--checksum', '--header-upload', 'Cache-Control: no-cache', 'copyto', str(directory / 'latest.json'), REMOTE + '/latest.json')
+            current = json.loads(rclone('cat', REMOTE + '/latest.json', capture=True))['runtime_version']
+            if not re.fullmatch(r'latest-[a-f0-9]{12}', current):
+                raise ValueError('Invalid current latest runtime')
+            retain_latest(current)
+
+
+if __name__ == '__main__':
+    try:
+        main(sys.argv[1:])
+    except subprocess.CalledProcessError as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(error.returncode) from error
+    except (OSError, ValueError, RuntimeError) as error:
+        raise SystemExit(str(error)) from error
