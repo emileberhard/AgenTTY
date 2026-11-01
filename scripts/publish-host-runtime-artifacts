@@ -13,7 +13,11 @@ EOF
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 r2_config="${AGENTTY_HOST_RUNTIME_R2_CONFIG:-$HOME/.config/agentty-r2/rclone.conf}"
-if [[ "${AGENTTY_R2_LOCAL_STAGE:-}" != 1 && -z "${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-}" && -f "$r2_config" && "${1:-}" != --help && "${1:-}" != -h ]]; then
+if [[ "${AGENTTY_R2_LOCAL_STAGE:-}" != 1 && -z "${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-}" && "${1:-}" != --help && "${1:-}" != -h ]]; then
+  if [[ ! -f "$r2_config" ]]; then
+    echo "Missing R2 publisher config $r2_config; restore the scoped credential or set AGENTTY_HOST_RUNTIME_PUBLIC_ROOT for a local static host." >&2
+    exit 1
+  fi
   exec "$script_dir/publish-host-runtime-r2" "$@"
 fi
 repo_root="$(cd "$script_dir/.." && pwd)"

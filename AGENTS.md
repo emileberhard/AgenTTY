@@ -26,7 +26,7 @@ App source paths above are relative to `AgenTTY/Sources`.
 
 The existing `just host-runtime-publish-*` commands build the platform artifacts
 on the Mac and publish to the bucket configured by
-`~/.config/agentty-r2/rclone.conf` when it exists. The bucket token is scoped to
+`~/.config/agentty-r2/rclone.conf`; a missing config fails publication. The bucket token is scoped to
 that bucket and is readable only by the publisher. Self-hosters can set
 `AGENTTY_HOST_RUNTIME_PUBLIC_ROOT` to keep the local static-host workflow.
 
