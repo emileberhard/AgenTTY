@@ -5,13 +5,14 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
-COMPOSE = ROOT / 'services/backend/deploy/compose.yaml'
+COMPOSE = Path('/var/lib/agentty-runtime/compose.yaml')
 CONTROL = r'''import json,socket,sys
 s=socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect('/state/control/socket')
 method='GET' if sys.argv[1]=='status' else 'POST'
@@ -62,6 +63,20 @@ def settings(image):
 
 def compose(env, *args):
     run('docker', 'compose', '-p', 'agentty', '-f', str(COMPOSE), *args, env=env)
+
+
+def stage_compose(env):
+    source = ROOT / 'services/backend/deploy/compose.yaml'
+    with tempfile.NamedTemporaryFile(dir=COMPOSE.parent, prefix='.compose-', delete=False) as temporary:
+        path = Path(temporary.name)
+        try:
+            temporary.write(source.read_bytes())
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            run('docker', 'compose', '-p', 'agentty', '-f', str(path), 'config', '--quiet', env=env)
+            os.replace(path, COMPOSE)
+        finally:
+            path.unlink(missing_ok=True)
 
 
 def control(container, uid, action):
@@ -197,7 +212,7 @@ def deploy(version, sha):
         print(f'Backend already runs {version} ({sha})')
         return
     preflight(image, old_image, config, current, version, old_version)
-    compose(env, 'config', '--quiet')
+    stage_compose(env)
     pending = 'agentty-pending-rollback'
     previous = 'agentty-rollback'
     docker('create', '--name', pending, old_image, capture=True)
