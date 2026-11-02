@@ -61,4 +61,4 @@ else:
     version = os.environ.get('SSH_ORIGINAL_COMMAND', '')
     check_version(version)
     unit = 'agentty-deploy'
-    subprocess.run(['/usr/bin/systemd-run', '--user', '--wait', '--collect', f'--unit={unit}', '/usr/bin/python3', '-I', '/usr/local/libexec/agentty-deploy-gateway', '--worker', version], env=env, check=True)
+    subprocess.run(['/usr/bin/systemd-run', '--user', '--wait', '--collect', '--property=WorkingDirectory=/var/lib/agentty-runtime', f'--unit={unit}', '/usr/bin/python3', '-I', '/usr/local/libexec/agentty-deploy-gateway', '--worker', version], env=env, check=True)
