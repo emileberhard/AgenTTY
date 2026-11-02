@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh AgenTTY rootless firewall guard
+After=network-online.target tailscaled.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl start agentty-rootless-start@%i.service
+ExecStart=/usr/local/libexec/agentty-rootless-guard %i start

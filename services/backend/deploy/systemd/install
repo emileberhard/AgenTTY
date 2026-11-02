@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $(id -u) == 0 ]] || { echo 'Run as root' >&2; exit 1; }
+source_dir=$(cd "$(dirname "$0")" && pwd)
+uid=$(id -u agentty-backend)
+[[ "$uid" == 11003 ]] || { echo 'Unexpected AgenTTY service UID' >&2; exit 1; }
+if ! grep -q '^agentty-backend:' /etc/subuid && ! grep -q '^agentty-backend:' /etc/subgid; then
+  start=$(python3 - <<'PY'
+from pathlib import Path
+ranges=[]
+for file in ('/etc/subuid','/etc/subgid'):
+    for line in Path(file).read_text().splitlines():
+        _, start, count = line.split(':')
+        ranges.append((int(start), int(start)+int(count)))
+start=100000
+while any(start < end and start+65536 > begin for begin,end in ranges):
+    start=max(end for begin,end in ranges if start < end and start+65536 > begin)
+print(start)
+PY
+)
+  end=$((start+65535))
+  usermod --add-subuids "$start-$end" --add-subgids "$start-$end" agentty-backend
+elif ! grep -q '^agentty-backend:' /etc/subuid || ! grep -q '^agentty-backend:' /etc/subgid; then
+  echo 'Incomplete AgenTTY subordinate UID/GID ranges' >&2
+  exit 1
+fi
+usermod --home /var/lib/agentty-runtime --shell /bin/sh agentty-backend
+install -d -o agentty-backend -g agentty-backend -m 0700 /var/lib/agentty-runtime
+install -d -o agentty-backend -g agentty-backend -m 0700 /var/lib/agentty-runtime/.config /var/lib/agentty-runtime/.config/systemd /var/lib/agentty-runtime/.config/systemd/user /var/lib/agentty-runtime/.config/docker
+install -o root -g root -m 0644 "$source_dir/agentty-docker.service" /var/lib/agentty-runtime/.config/systemd/user/agentty-docker.service
+install -o agentty-backend -g agentty-backend -m 0600 "$source_dir/daemon.json" /var/lib/agentty-runtime/.config/docker/daemon.json
+install -o root -g root -m 0755 "$source_dir/agentty-rootless-guard" /usr/local/libexec/agentty-rootless-guard
+for unit in agentty-rootless-guard@.service agentty-rootless-start@.service agentty-rootless-refresh@.service agentty-rootless-refresh@.timer; do
+  install -o root -g root -m 0644 "$source_dir/$unit" "/etc/systemd/system/$unit"
+done
+install -o root -g root -m 0755 "$source_dir/../gateway" /usr/local/libexec/agentty-deploy-gateway
+loginctl enable-linger agentty-backend
+systemctl daemon-reload
+systemctl enable --now "agentty-rootless-start@$uid.service" "agentty-rootless-refresh@$uid.timer"

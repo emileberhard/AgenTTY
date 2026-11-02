@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh AgenTTY rootless firewall guard periodically
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Unit=agentty-rootless-refresh@%i.service
+
+[Install]
+WantedBy=timers.target
