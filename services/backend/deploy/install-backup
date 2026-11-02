@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && "$1" == /* && -d "$1" ]] || { echo 'Usage: install-backup ABSOLUTE_STAGING_DIRECTORY' >&2; exit 1; }
+source_dir=$(cd "$(dirname "$0")" && pwd)
+install -m 0700 "$source_dir/backup" "$1/agentty-backend.dump"
+install -m 0600 "$source_dir/backup.policy" "$1/agentty-backend.policy"

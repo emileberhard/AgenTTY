@@ -165,7 +165,10 @@ guides accurate in the same change.
 
 The backend runs as a single writer on Linux. Its state is under
 `/srv/services/agentty-backend`, with SQLite snapshots in the host service-state
-backup. Secrets are provisioned separately as service-user-only files.
+backup using the SQLite backup API. Stage its policy and hook with
+`services/backend/deploy/install-backup ABSOLUTE_STAGING_DIRECTORY`, then
+install them under the host backup lock. Secrets are provisioned separately as
+service-user-only files.
 The public repository never runs on a self-hosted runner: its tag job joins
 the tailnet using its dedicated federated identity and invokes the forced SSH
 gateway with only a version. The gateway fetches and verifies the annotated
