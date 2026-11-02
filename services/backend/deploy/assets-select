@@ -1,0 +1,51 @@
+#!/usr/bin/env python3
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+root = Path('/srv/services/agentty-assets')
+manifest_paths = sorted((root / 'releases').glob('*/manifest.json')) + [root / 'latest.json']
+expected = {}
+for manifest_path in manifest_paths:
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise SystemExit(f'Missing asset manifest: {manifest_path}')
+    manifest = json.loads(manifest_path.read_text())
+
+    def collect(value):
+        if isinstance(value, dict):
+            url, digest = value.get('url'), value.get('sha256')
+            if isinstance(url, str) and isinstance(digest, str):
+                parsed = urlsplit(url)
+                if parsed.scheme != 'https' or parsed.hostname not in {'agentty-assets.esmadil.se', 'your-agentty-assets.example'} or not parsed.path.startswith('/host-runtime/'):
+                    raise ValueError('Unexpected host-runtime asset URL')
+                relative = Path(unquote(parsed.path.removeprefix('/host-runtime/')))
+                if relative.is_absolute() or '..' in relative.parts or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+                    raise ValueError('Invalid host-runtime asset path or hash')
+                previous = expected.setdefault(relative, digest.lower())
+                if previous != digest.lower():
+                    raise ValueError(f'Conflicting host-runtime asset hashes: {relative}')
+            for item in value.values():
+                collect(item)
+        elif isinstance(value, list):
+            for item in value:
+                collect(item)
+
+    collect(manifest)
+if not expected or len(manifest_paths) < 2:
+    raise SystemExit('Host-runtime mirror has no release artifacts')
+paths = set(manifest_paths)
+for relative, digest in expected.items():
+    path = root / relative
+    if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
+        raise SystemExit(f'Missing or unsafe host-runtime asset: {relative}')
+    with path.open('rb') as source:
+        actual = hashlib.file_digest(source, 'sha256').hexdigest()
+    if actual != digest:
+        raise SystemExit(f'Host-runtime checksum mismatch: {relative}')
+    paths.add(path)
+for path in sorted(paths):
+    sys.stdout.buffer.write(os.fsencode(path) + b'\0')
