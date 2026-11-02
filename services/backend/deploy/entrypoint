@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+set -a
+. /run/secrets/backend.env
+set +a
+exec /usr/local/bin/agentty-backend

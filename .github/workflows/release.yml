@@ -56,6 +56,36 @@ jobs:
             sleep 10
           done
 
+  backend:
+    needs: admit
+    runs-on: ubuntu-24.04
+    environment: agentty-backend-production
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      VERSION: ${{ github.ref_name }}
+    steps:
+      - name: Join the tailnet
+        uses: tailscale/github-action@064b10558093f38325e838ddea35486bdc6b1d5c # v4.4.0
+        with:
+          oauth-client-id: ${{ vars.AGENTTY_TS_CLIENT_ID }}
+          audience: ${{ vars.AGENTTY_TS_AUDIENCE }}
+          tags: tag:agentty-ci
+          version: 1.104.4
+      - name: Deploy the independently verified release
+        env:
+          SSH_KEY: ${{ secrets.AGENTTY_DEPLOY_SSH_KEY }}
+          HOST_KEY: ${{ vars.AGENTTY_DEPLOY_HOST_KEY }}
+        run: |
+          [[ $VERSION =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          umask 077
+          mkdir -p "$HOME/.ssh"
+          printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/agentty-deploy"
+          printf '%s\n' "$HOST_KEY" > "$HOME/.ssh/known_hosts"
+          ssh -i "$HOME/.ssh/agentty-deploy" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes agentty-deploy@emils-linux.tail4df694.ts.net "$VERSION"
+
   runtime:
     needs: admit
     permissions:

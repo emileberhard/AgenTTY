@@ -1,0 +1,17 @@
+services:
+  backend:
+    image: ${AGENTTY_IMAGE:?}
+    user: ${AGENTTY_UID:?}:${AGENTTY_UID:?}
+    restart: unless-stopped
+    stop_grace_period: 60s
+    ports:
+      - 127.0.0.1:${AGENTTY_PORT:?}:${AGENTTY_CONTAINER_PORT:?}
+    volumes:
+      - ${AGENTTY_STATE:?}:/state
+      - ${AGENTTY_ENV_FILE:?}:/run/secrets/backend.env:ro
+      - ${AGENTTY_APNS_KEY:?}:/run/secrets/apns.p8:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: '3'

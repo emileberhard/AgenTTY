@@ -1,0 +1,30 @@
+#!/usr/bin/python3
+import os
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+version = os.environ.get('SSH_ORIGINAL_COMMAND', '')
+if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
+    raise SystemExit('Expected a plain MAJOR.MINOR.PATCH version')
+env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/var/lib/agentty-deploy', 'LANG': 'C.UTF-8', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0'}
+
+def git(*args: str) -> str:
+    return subprocess.run(['git', *args], env=env, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+
+with tempfile.TemporaryDirectory(prefix='release-', dir='/var/lib/agentty-deploy') as temporary:
+    repo = Path(temporary) / 'repo'
+    git('clone', '--quiet', '--no-checkout', 'https://github.com/emileberhard/AgenTTY.git', str(repo))
+    def at(*args: str) -> str:
+        return git('-C', str(repo), *args)
+    if at('cat-file', '-t', f'refs/tags/{version}') != 'tag':
+        raise SystemExit('Release tag must be annotated')
+    tags = [tag for tag in at('tag', '--list').splitlines() if re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)]
+    if not tags or max(tags, key=lambda tag: tuple(map(int, tag.split('.')))) != version:
+        raise SystemExit('Release tag must be the newest version')
+    sha = at('rev-parse', f'refs/tags/{version}^{{commit}}')
+    at('merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main')
+    at('checkout', '--quiet', '--detach', sha)
+    subprocess.run(['/usr/bin/python3', str(repo / 'services/backend/deploy/deploy'), version, sha], env=env, cwd=repo, check=True)

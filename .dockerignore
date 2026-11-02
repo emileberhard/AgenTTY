@@ -1,0 +1,10 @@
+**
+!.git
+!.git/**
+!rust-toolchain.toml
+!scripts
+!scripts/resolve-build-metadata
+!services
+!services/backend
+!services/backend/**
+services/backend/target

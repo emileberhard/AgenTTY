@@ -160,3 +160,19 @@ Work in a locked worktree and preserve other agents' work. The task brief sets
 integration authority; do not merge, deploy or publish when assigned a
 review-only or implementation-only scope. Keep these instructions and affected
 guides accurate in the same change.
+
+## Backend deployment and host moves
+
+The backend runs as a single writer on Linux. Its state is under
+`/srv/services/agentty-backend`, with SQLite snapshots in the host service-state
+backup. Secrets are provisioned separately as service-user-only files.
+The public repository never runs on a self-hosted runner: its tag job joins
+the tailnet using its dedicated federated identity and invokes the forced SSH
+gateway with only a version. The gateway fetches and verifies the annotated
+tag and main ancestry itself, then runs the checked-out deployment. Before
+switching images, deployment checks an isolated SQLite copy and drains live
+sessions; rollback never replaces accepted state with an old snapshot.
+
+To move hosts, restore the state directory, provision the same secrets and
+service configuration, then deploy the verified version tag. Move the dedicated
+tunnel and federated SSH target only after the restored service is healthy.

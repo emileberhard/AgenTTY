@@ -1,0 +1,257 @@
+#!/usr/bin/python3
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+import uuid
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[3]
+COMPOSE = ROOT / 'services/backend/deploy/compose.yaml'
+CONTROL = r'''import json,socket,sys
+s=socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect('/state/control/socket')
+method='GET' if sys.argv[1]=='status' else 'POST'
+s.sendall((method+' /'+sys.argv[1]+' HTTP/1.0\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n').encode())
+r=b''
+while True:
+ b=s.recv(4096)
+ if not b: break
+ r+=b
+head,body=r.split(b'\r\n\r\n',1)
+if b' 200 ' not in head.split(b'\r\n',1)[0]: raise RuntimeError('control request failed')
+print(body.decode())'''
+SCHEMA = r'''import hashlib,sqlite3,sys
+c=sqlite3.connect('file:'+sys.argv[1]+'?mode=ro',uri=True)
+assert c.execute('pragma integrity_check').fetchone()==('ok',)
+rows=c.execute("select type,name,sql from sqlite_master where sql is not null order by type,name").fetchall()
+print(hashlib.sha256(repr(rows).encode()).hexdigest())'''
+SNAPSHOT = r'''import os,sqlite3,sys
+p=sys.argv[1]; os.makedirs(p,mode=0o700)
+a=sqlite3.connect('file:/state/notify-relay.sqlite3?mode=ro',uri=True)
+b=sqlite3.connect(p+'/notify-relay.sqlite3'); a.backup(b); b.close(); a.close()'''
+HEALTH = "import json,sys,urllib.request; print(json.load(urllib.request.urlopen('http://127.0.0.1:'+sys.argv[1]+'/healthz',timeout=3))['version'])"
+
+
+def run(*args, capture=False, env=None, timeout=1800):
+    p = subprocess.run(args, check=True, text=True, capture_output=capture, env=env, timeout=timeout)
+    return p.stdout.strip() if capture else ''
+
+
+def docker(*args, capture=False):
+    return run('docker', *args, capture=capture)
+
+
+def settings(image):
+    config = json.loads(Path('/etc/agentty/deploy.json').read_text())
+    required = {'uid', 'port', 'container_port', 'state', 'env_file', 'apns_key', 'health_urls'}
+    if set(config) != required or type(config['uid']) is not int or config['uid'] <= 0:
+        raise ValueError('Invalid deploy configuration')
+    if any(type(config[k]) is not int or not 1 <= config[k] <= 65535 for k in ('port', 'container_port')):
+        raise ValueError('Invalid port')
+    if any(not isinstance(config[k], str) or not Path(config[k]).is_absolute() for k in ('state', 'env_file', 'apns_key')):
+        raise ValueError('State and secret paths must be absolute')
+    if not isinstance(config['health_urls'], list) or not config['health_urls'] or any(not isinstance(u, str) or not u.startswith('https://') for u in config['health_urls']):
+        raise ValueError('Health URLs must use HTTPS')
+    env = {**os.environ, 'AGENTTY_IMAGE': image, 'AGENTTY_UID': str(config['uid']), 'AGENTTY_PORT': str(config['port']), 'AGENTTY_CONTAINER_PORT': str(config['container_port']), 'AGENTTY_STATE': config['state'], 'AGENTTY_ENV_FILE': config['env_file'], 'AGENTTY_APNS_KEY': config['apns_key']}
+    return config, env
+
+
+def compose(env, *args):
+    run('docker', 'compose', '-p', 'agentty', '-f', str(COMPOSE), *args, env=env)
+
+
+def control(container, uid, action):
+    return json.loads(docker('exec', '--user', f'{uid}:{uid}', container, 'python', '-c', CONTROL, action, capture=True))
+
+
+def preflight(image, old_image, config, current, version, old_version):
+    uid = str(config['uid'])
+    name = 'agentty-preflight-' + uuid.uuid4().hex
+    relative = '.deploy/' + name
+    path = '/state/' + relative
+    host_path = str(Path(config['state']) / relative)
+    try:
+        docker('exec', '--user', f'{uid}:{uid}', current, 'python', '-c', SNAPSHOT, path)
+        before = docker('exec', '--user', f'{uid}:{uid}', current, 'python', '-c', SCHEMA, path + '/notify-relay.sqlite3', capture=True)
+        docker('run', '-d', '--name', name, '--network', 'none', '--user', f'{uid}:{uid}', '--mount', f'type=bind,src={host_path},dst=/state', '--mount', f"type=bind,src={config['env_file']},dst=/run/secrets/backend.env,readonly", '--mount', f"type=bind,src={config['apns_key']},dst=/run/secrets/apns.p8,readonly", image, capture=True)
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                actual = docker('exec', '--user', f'{uid}:{uid}', name, 'python', '-c', HEALTH, str(config['container_port']), capture=True)
+                if actual == version:
+                    break
+            except subprocess.CalledProcessError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Isolated candidate failed its health check')
+            time.sleep(1)
+        after = docker('exec', '--user', f'{uid}:{uid}', name, 'python', '-c', SCHEMA, '/state/notify-relay.sqlite3', capture=True)
+        if before != after:
+            raise RuntimeError('Candidate changes SQLite schema; a separate migration is required')
+        docker('rm', '-f', name, capture=True)
+        docker('run', '-d', '--name', name, '--network', 'none', '--user', f'{uid}:{uid}', '--mount', f'type=bind,src={host_path},dst=/state', '--mount', f"type=bind,src={config['env_file']},dst=/run/secrets/backend.env,readonly", '--mount', f"type=bind,src={config['apns_key']},dst=/run/secrets/apns.p8,readonly", old_image, capture=True)
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                actual = docker('exec', '--user', f'{uid}:{uid}', name, 'python', '-c', HEALTH, str(config['container_port']), capture=True)
+                if actual == old_version:
+                    break
+            except subprocess.CalledProcessError:
+                pass
+            if time.monotonic() >= deadline:
+                raise RuntimeError('Previous image cannot start with candidate state')
+            time.sleep(1)
+    finally:
+        subprocess.run(['docker', 'rm', '-f', name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        docker('run', '--rm', '--network', 'none', '--user', f'{uid}:{uid}', '--mount', f"type=bind,src={config['state']},dst=/state", '--entrypoint', 'python', image, '-c', 'import pathlib,shutil,sys; p=pathlib.Path(sys.argv[1]); shutil.rmtree(p) if p.exists() else None', path)
+
+
+def fence_idle(container, uid):
+    deadline = time.monotonic() + 120
+    idle_since = None
+    while time.monotonic() < deadline:
+        status = control(container, uid, 'status')
+        if status['draining']:
+            raise RuntimeError('Backend is already fenced')
+        if status['active_ssh_sessions']:
+            idle_since = None
+        elif idle_since is None:
+            idle_since = time.monotonic()
+        elif time.monotonic() - idle_since >= 10:
+            status = control(container, uid, 'fence')
+            if status['active_ssh_sessions'] == 0:
+                return
+            control(container, uid, 'resume')
+            idle_since = None
+        time.sleep(2)
+    raise RuntimeError('Backend did not become idle')
+
+
+def wait_health(url, version):
+    request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0 AgenTTY-Deploy'})
+    end = time.monotonic() + 45
+    while time.monotonic() < end:
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                if json.load(response).get('version') == version:
+                    return
+        except (OSError, ValueError):
+            pass
+        time.sleep(1)
+    raise RuntimeError(f'{url} did not report version {version}')
+
+
+def trim_images(keep):
+    containers = docker('ps', '-aq', capture=True).splitlines()
+    protected = {keep}
+    if containers:
+        protected.update(docker('inspect', '--format', '{{.Config.Image}}', *containers, capture=True).splitlines())
+    rows = docker('image', 'ls', 'agentty-backend', '--format', '{{json .}}', capture=True).splitlines()
+    tags = [json.loads(row)['Tag'] for row in rows]
+    images = [f'agentty-backend:{tag}' for tag in tags if re.fullmatch(r'[0-9a-f]{40}', tag)]
+    selected = {image for image in images if image in protected}
+    for image in images:
+        if len(selected) >= 4:
+            break
+        selected.add(image)
+    for image in images:
+        if image not in selected:
+            docker('image', 'rm', image)
+    if len(selected) > 4:
+        print(f'Cannot meet four-image retention: {len(selected)} revisions are in use', file=sys.stderr)
+
+
+def deploy(version, sha):
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version) or not re.fullmatch(r'[0-9a-f]{40}', sha):
+        raise ValueError('Invalid version or revision')
+    if run('git', '-C', str(ROOT), 'rev-parse', 'HEAD', capture=True) != sha:
+        raise RuntimeError('Checkout differs from verified revision')
+    image = 'agentty-backend:' + sha
+    result = subprocess.run(['docker', 'image', 'inspect', image], capture_output=True, text=True)
+    if result.returncode == 0:
+        labels = json.loads(result.stdout)[0]['Config'].get('Labels') or {}
+        if labels.get('org.opencontainers.image.revision') != sha:
+            raise RuntimeError('Existing image has a mismatched revision label')
+    else:
+        run('docker', 'build', '--label', f'org.opencontainers.image.revision={sha}', '-f', str(ROOT / 'services/backend/deploy/Dockerfile'), '-t', image, str(ROOT))
+    config, env = settings(image)
+    current = 'agentty-backend-1'
+    info = json.loads(docker('inspect', current, capture=True))[0]
+    if not info['State']['Running']:
+        raise RuntimeError('Backend is not running; use the recovery procedure')
+    mounts = {item['Destination']: item['Source'] for item in info['Mounts']}
+    if any(mounts.get(dest) != config[key] for dest, key in [('/state', 'state'), ('/run/secrets/backend.env', 'env_file'), ('/run/secrets/apns.p8', 'apns_key')]):
+        raise RuntimeError('Running container mounts do not match configuration')
+    old_image = info['Config']['Image']
+    if not re.fullmatch(r'agentty-backend:[0-9a-f]{40}', old_image):
+        raise RuntimeError('Running image is not a revision tag')
+    old_version = docker('exec', '--user', f"{config['uid']}:{config['uid']}", current, 'python', '-c', HEALTH, str(config['container_port']), capture=True)
+    old_env = settings(old_image)[1]
+    if old_image == image:
+        for url in config['health_urls']:
+            wait_health(url, version)
+        print(f'Backend already runs {version} ({sha})')
+        return
+    preflight(image, old_image, config, current, version, old_version)
+    compose(env, 'config', '--quiet')
+    pending = 'agentty-pending-rollback'
+    previous = 'agentty-rollback'
+    docker('create', '--name', pending, old_image, capture=True)
+    fenced = False
+    keep_pending = False
+    try:
+        fence_idle(current, config['uid'])
+        fenced = True
+        try:
+            compose(env, 'up', '-d', '--no-build', '--force-recreate')
+            fenced = False
+            for url in config['health_urls']:
+                wait_health(url, version)
+        except BaseException:
+            keep_pending = True
+            result = subprocess.run(['docker', 'inspect', current], capture_output=True, text=True)
+            running = json.loads(result.stdout)[0] if result.returncode == 0 else None
+            if running and running['State']['Running']:
+                running_image = running['Config']['Image']
+                if running_image == old_image:
+                    if fenced:
+                        control(current, config['uid'], 'resume')
+                        fenced = False
+                    keep_pending = False
+                    raise
+                if running_image != image:
+                    raise RuntimeError('Unexpected running image; leaving it and the rollback pin intact')
+                fenced = False
+                fence_idle(current, config['uid'])
+                fenced = True
+            compose(old_env, 'up', '-d', '--no-build', '--force-recreate')
+            fenced = False
+            for url in config['health_urls']:
+                wait_health(url, old_version)
+            keep_pending = False
+            raise
+        if subprocess.run(['docker', 'inspect', previous], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+            docker('rm', previous, capture=True)
+        docker('rename', pending, previous)
+        try:
+            trim_images(image)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            print(f'Image retention failed after deployment: {error}', file=sys.stderr)
+        print(f'Backend runs {version} ({sha})')
+    finally:
+        if fenced:
+            control(current, config['uid'], 'resume')
+        if not keep_pending:
+            subprocess.run(['docker', 'rm', pending], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) != 3:
+        raise SystemExit('Usage: deploy VERSION REVISION')
+    with open('/var/lib/agentty-deploy/deploy.lock', 'w') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        deploy(sys.argv[1], sys.argv[2])
