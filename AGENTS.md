@@ -169,7 +169,9 @@ backup. Secrets are provisioned separately as service-user-only files.
 The public repository never runs on a self-hosted runner: its tag job joins
 the tailnet using its dedicated federated identity and invokes the forced SSH
 gateway with only a version. The gateway fetches and verifies the annotated
-tag and main ancestry itself, then runs the checked-out deployment. Before
+tag and main ancestry itself, then runs the checked-out deployment. The SSH
+account uses `services/backend/deploy/systemd/sshd-agentty.conf` and a
+root-owned authorized-keys file with a restricted forced-command key. Before
 switching images, deployment checks an isolated SQLite copy and drains live
 sessions; rollback never replaces accepted state with an old snapshot.
 
