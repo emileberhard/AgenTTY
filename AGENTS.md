@@ -36,8 +36,10 @@ Semver releases remain available for installed apps; the latest channel retains
 its current and 16 previous releases. Publication reports an error if the bucket
 exceeds 20 GiB. `latest.json` uses no-cache; release objects are immutable. The
 Linux `agentty-assets` selective backup verifies and saves the mirrored
-manifest-referenced files. Keep that mirror current whenever publishing; the
-current publication workflow does not yet synchronize it automatically.
+manifest-referenced files. The publisher updates a public index of retained
+releases; the Linux timer pulls its manifests and checksum-verified payloads,
+then replaces the mirror under the service backup lock. Semver releases remain
+mirrored, and the latest channel follows the publisher's bounded retention.
 
 ## Invariants
 

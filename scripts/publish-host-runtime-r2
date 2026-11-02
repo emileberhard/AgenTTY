@@ -54,13 +54,23 @@ def publish_release(version, directory):
 def retain_latest(current):
     raw = rclone('lsjson', '--recursive', '--files-only', REMOTE + '/releases', capture=True)
     manifests = []
+    versions = set()
     for entry in json.loads(raw):
+        release = re.fullmatch(r'((?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))/manifest\.json', entry['Path'])
+        if release:
+            versions.add(release.group(1))
         match = re.fullmatch(r'(latest-[a-f0-9]{12})/manifest\.json', entry['Path'])
         if match:
             manifests.append((datetime.fromisoformat(entry['ModTime'].replace('Z', '+00:00')), match.group(1)))
     previous = sorted((item for item in manifests if item[1] != current), reverse=True)
     for _, version in previous[PREVIOUS_LATEST:]:
         rclone('delete', REMOTE + '/releases/' + version)
+    versions.add(current)
+    versions.update(version for _, version in previous[:PREVIOUS_LATEST])
+    with tempfile.TemporaryDirectory(prefix='agentty-assets-index-') as temporary:
+        index = Path(temporary) / 'index.json'
+        index.write_text(json.dumps({'versions': sorted(versions)}) + '\n')
+        rclone('--header-upload', 'Cache-Control: no-cache', 'copyto', str(index), REMOTE + '/index.json')
     size = json.loads(rclone('size', '--json', REMOTE.rsplit('/', 1)[0], capture=True))['bytes']
     if size > MAX_BYTES:
         raise RuntimeError(f'Host runtime bucket exceeds its {MAX_BYTES} byte limit: {size} bytes')

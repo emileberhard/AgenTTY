@@ -1,0 +1,19 @@
+[Unit]
+Description=Mirror published AgenTTY host runtime assets for backup
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=agentty-backend
+Group=agentty-backend
+UMask=0077
+Environment=AGENTTY_ASSETS_ROOT=/srv/services/agentty-assets
+Environment=AGENTTY_ASSETS_URL=https://agentty-assets.esmadil.se/host-runtime
+Environment=AGENTTY_BACKUP_LOCK=/run/lock/emils-linux-services-backup.lock
+ExecStart=/usr/local/libexec/agentty-assets-sync
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/srv/services/agentty-assets

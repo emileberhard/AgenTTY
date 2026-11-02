@@ -1,0 +1,142 @@
+#!/usr/bin/env python3
+import concurrent.futures
+import fcntl
+import hashlib
+import json
+import os
+import re
+import shutil
+import tempfile
+import threading
+import urllib.request
+from pathlib import Path
+from urllib.parse import unquote, urlsplit
+
+ROOT = Path(os.environ['AGENTTY_ASSETS_ROOT'])
+BASE = os.environ['AGENTTY_ASSETS_URL'].rstrip('/')
+BACKUP_LOCK = Path(os.environ['AGENTTY_BACKUP_LOCK'])
+VERSION = re.compile(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|latest-[a-f0-9]{12}')
+DIGEST = re.compile(r'[0-9a-fA-F]{64}')
+MAX_BYTES = 20 * 1024**3
+
+
+def fetch(path):
+    request = urllib.request.Request(BASE + '/' + path, headers={'User-Agent': 'Mozilla/5.0 AgenTTY-Assets-Mirror'})
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read(4 * 1024 * 1024 + 1)
+
+
+def manifest(version, data):
+    if len(data) > 4 * 1024 * 1024:
+        raise ValueError('Manifest is too large')
+    value = json.loads(data)
+    if value.get('schema_version') != 1 or value.get('runtime_version') != version:
+        raise ValueError(f'Invalid manifest for {version}')
+    expected = {}
+
+    def collect(item):
+        if isinstance(item, dict):
+            url, digest = item.get('url'), item.get('sha256')
+            if 'url' in item or 'sha256' in item:
+                if not isinstance(url, str) or not isinstance(digest, str):
+                    raise ValueError(f'Invalid asset descriptor in {version}')
+                parsed = urlsplit(url)
+                path = Path(unquote(parsed.path.removeprefix('/host-runtime/')))
+                if (parsed.scheme != 'https' or parsed.hostname not in {'agentty-assets.esmadil.se', 'your-agentty-assets.example'}
+                        or not parsed.path.startswith('/host-runtime/') or path.is_absolute() or '..' in path.parts
+                        or path.parts[:2] != ('releases', version) or not DIGEST.fullmatch(digest)):
+                    raise ValueError(f'Invalid asset descriptor in {version}')
+                previous = expected.setdefault(path, digest.lower())
+                if previous != digest.lower():
+                    raise ValueError(f'Conflicting asset hashes: {path}')
+            for child in item.values():
+                collect(child)
+        elif isinstance(item, list):
+            for child in item:
+                collect(child)
+
+    collect(value)
+    if not expected:
+        raise ValueError(f'No assets in manifest for {version}')
+    return expected
+
+
+def download(item):
+    path, digest, destination, budget = item
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    request = urllib.request.Request(BASE + '/' + path.as_posix(), headers={'User-Agent': 'Mozilla/5.0 AgenTTY-Assets-Mirror'})
+    actual = hashlib.sha256()
+    with urllib.request.urlopen(request, timeout=120) as response, destination.open('xb') as output:
+        while block := response.read(1024 * 1024):
+            with budget['lock']:
+                budget['bytes'] += len(block)
+                if budget['bytes'] > MAX_BYTES:
+                    raise ValueError(f'Asset mirror exceeds {MAX_BYTES} bytes')
+            output.write(block)
+            actual.update(block)
+        output.flush()
+        os.fsync(output.fileno())
+    if actual.hexdigest() != digest:
+        raise ValueError(f'Asset checksum mismatch: {path}')
+
+
+def main():
+    ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with (ROOT / '.sync.lock').open('a') as sync_lock:
+        fcntl.flock(sync_lock, fcntl.LOCK_EX)
+        for stale in ROOT.glob('.staging-*'):
+            if stale.is_dir() and not stale.is_symlink():
+                shutil.rmtree(stale)
+        index = fetch('index.json')
+        if len(index) > 4 * 1024 * 1024:
+            raise ValueError('Asset index is too large')
+        versions = json.loads(index)['versions']
+        if not isinstance(versions, list) or not versions or any(not isinstance(v, str) or not VERSION.fullmatch(v) for v in versions) or len(set(versions)) != len(versions):
+            raise ValueError('Invalid asset index')
+        latest_data = fetch('latest.json')
+        latest = json.loads(latest_data)['runtime_version']
+        if latest not in versions or not latest.startswith('latest-'):
+            raise ValueError('Latest manifest and asset index disagree')
+        latest_assets = manifest(latest, latest_data)
+        releases = ROOT / 'releases'
+        releases.mkdir(mode=0o700, exist_ok=True)
+        existing = {p.name for p in releases.iterdir() if p.is_dir() and not p.is_symlink()}
+        missing_semver = {v for v in existing - set(versions) if VERSION.fullmatch(v) and not v.startswith('latest-')}
+        if missing_semver:
+            raise ValueError('Asset index omits previously mirrored semver releases')
+        missing = sorted(set(versions) - existing)
+        size = sum(p.stat().st_size for p in ROOT.rglob('*') if p.is_file() and not p.is_symlink())
+        budget = {'bytes': size + len(latest_data), 'lock': threading.Lock()}
+        with tempfile.TemporaryDirectory(prefix='.staging-', dir=ROOT) as temporary:
+            staging = Path(temporary)
+            with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
+                contents = pool.map(lambda version: fetch(f'releases/{version}/manifest.json'), missing)
+                manifests = {version: (data, manifest(version, data)) for version, data in zip(missing, contents)}
+                current_manifest = manifests[latest][0] if latest in manifests else (releases / latest / 'manifest.json').read_bytes()
+                if manifest(latest, current_manifest) != latest_assets:
+                    raise ValueError('Latest manifest does not match its release')
+                downloads = []
+                for version, (data, expected) in manifests.items():
+                    target = staging / 'releases' / version
+                    target.mkdir(parents=True)
+                    (target / 'manifest.json').write_bytes(data)
+                    budget['bytes'] += len(data)
+                    downloads.extend((path, digest, staging / path, budget) for path, digest in expected.items())
+                if budget['bytes'] > MAX_BYTES:
+                    raise ValueError(f'Asset mirror exceeds {MAX_BYTES} bytes')
+                list(pool.map(download, downloads))
+            latest_path = staging / 'latest.json'
+            latest_path.write_bytes(latest_data)
+            with BACKUP_LOCK.open('r') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                for version in missing:
+                    os.rename(staging / 'releases' / version, releases / version)
+                os.replace(latest_path, ROOT / 'latest.json')
+                for version in existing - set(versions):
+                    if VERSION.fullmatch(version) and version.startswith('latest-'):
+                        shutil.rmtree(releases / version)
+        print(f"Asset mirror: {len(versions)} releases, {len(missing)} added, {budget['bytes']} bytes")
+
+
+if __name__ == '__main__':
+    main()

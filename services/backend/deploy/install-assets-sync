@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ $# == 1 && "$1" == /* && -d "$1" ]] || { echo 'Usage: install-assets-sync ABSOLUTE_STAGING_DIRECTORY' >&2; exit 1; }
+source_dir=$(cd "$(dirname "$0")" && pwd)
+install -m 0755 "$source_dir/assets-sync" "$1/agentty-assets-sync"
+install -m 0644 "$source_dir/systemd/agentty-assets-sync.service" "$1/agentty-assets-sync.service"
+install -m 0644 "$source_dir/systemd/agentty-assets-sync.timer" "$1/agentty-assets-sync.timer"
