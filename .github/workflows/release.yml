@@ -85,7 +85,7 @@ jobs:
           mkdir -p "$HOME/.ssh"
           printf '%s\n' "$SSH_KEY" > "$HOME/.ssh/agentty-deploy"
           printf '%s\n' "$HOST_KEY" > "$HOME/.ssh/known_hosts"
-          ssh -i "$HOME/.ssh/agentty-deploy" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes agentty-deploy@emils-linux.tail4df694.ts.net "$VERSION"
+          ssh -i "$HOME/.ssh/agentty-deploy" -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes agentty-backend@emils-linux.tail4df694.ts.net "$VERSION"
 
   runtime:
     needs: admit
