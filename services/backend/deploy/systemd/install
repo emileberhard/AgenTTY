@@ -4,6 +4,7 @@ set -euo pipefail
 source_dir=$(cd "$(dirname "$0")" && pwd)
 uid=$(id -u agentty-backend)
 [[ "$uid" == 11003 ]] || { echo 'Unexpected AgenTTY service UID' >&2; exit 1; }
+setfacl -m u:agentty-backend:--x /srv/services
 if ! grep -q '^agentty-backend:' /etc/subuid && ! grep -q '^agentty-backend:' /etc/subgid; then
   start=$(python3 - <<'PY'
 from pathlib import Path
