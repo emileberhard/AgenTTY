@@ -5,6 +5,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+TimeoutStartSec=30min
 User=agentty-backend
 Group=agentty-backend
 UMask=0077
