@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::extract::ws::{CloseFrame, Message, close_code};
 use serde::Serialize;
@@ -48,6 +48,7 @@ struct RelayBrokerState {
     sessions_by_id: HashMap<String, LiveRelaySession>,
     next_control_connection_id: u64,
     draining: bool,
+    drain_deadline: Option<Instant>,
 }
 
 #[derive(Clone)]
@@ -160,12 +161,21 @@ impl RelayBroker {
     pub fn fence(&self) -> DrainStatus {
         let mut state = self.inner.lock().expect("relay broker lock poisoned");
         state.draining = true;
+        state.drain_deadline = None;
+        state.drain_status()
+    }
+
+    pub fn fence_for(&self, duration: Duration) -> DrainStatus {
+        let mut state = self.inner.lock().expect("relay broker lock poisoned");
+        state.draining = true;
+        state.drain_deadline = Some(Instant::now() + duration);
         state.drain_status()
     }
 
     pub fn resume(&self) -> DrainStatus {
         let mut state = self.inner.lock().expect("relay broker lock poisoned");
         state.draining = false;
+        state.drain_deadline = None;
         state.drain_status()
     }
 
@@ -250,7 +260,7 @@ impl RelayBroker {
     ) -> Result<(), RelayBrokerError> {
         let mut state = self.inner.lock().expect("relay broker lock poisoned");
         state.cleanup_expired_sessions();
-        if state.draining {
+        if state.is_draining() {
             return Err(RelayBrokerError::Draining);
         }
         if state.sessions_by_id.len() >= 32
@@ -302,7 +312,7 @@ impl RelayBroker {
     ) -> Result<(), RelayBrokerError> {
         let mut state = self.inner.lock().expect("relay broker lock poisoned");
         state.cleanup_expired_sessions();
-        let draining = state.draining;
+        let draining = state.is_draining();
         let existing_control = state.connectors_by_relay_host.clone();
         let session = state
             .sessions_by_id
@@ -348,7 +358,7 @@ impl RelayBroker {
     ) -> Result<(), RelayBrokerError> {
         let mut state = self.inner.lock().expect("relay broker lock poisoned");
         state.cleanup_expired_sessions();
-        let draining = state.draining;
+        let draining = state.is_draining();
         let session = state
             .sessions_by_id
             .get_mut(relay_session_id)
@@ -439,10 +449,17 @@ impl RelayBroker {
 }
 
 impl RelayBrokerState {
+    fn is_draining(&self) -> bool {
+        self.draining
+            && self
+                .drain_deadline
+                .is_none_or(|deadline| Instant::now() < deadline)
+    }
+
     fn drain_status(&self) -> DrainStatus {
         DrainStatus {
             process_id: std::process::id(),
-            draining: self.draining,
+            draining: self.is_draining(),
             active_ssh_sessions: self
                 .sessions_by_id
                 .values()
@@ -527,6 +544,23 @@ mod tests {
         assert!(!broker.resume().draining);
         let (pending, _pending_rx) = relay_peer_channel();
         broker.attach_app("pending", pending).unwrap();
+    }
+
+    #[test]
+    fn expired_deploy_fence_reopens_admission() {
+        let broker = RelayBroker::default();
+        assert!(!broker.fence_for(Duration::ZERO).draining);
+        assert!(
+            broker
+                .create_session(
+                    "host".to_owned(),
+                    "new".to_owned(),
+                    FUTURE_EXPIRY_EPOCH_SECONDS,
+                    "token".to_owned(),
+                    "wss://relay.test".to_owned(),
+                )
+                .is_ok()
+        );
     }
 
     #[test]

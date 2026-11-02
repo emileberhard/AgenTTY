@@ -1,0 +1,15 @@
+[Unit]
+Description=Firewall guard for AgenTTY rootless Docker
+Requires=user@%i.service
+Wants=network-online.target tailscaled.service
+After=user@%i.service network-online.target tailscaled.service
+Before=agentty-rootless-start@%i.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=15
+ExecStart=/usr/local/libexec/agentty-rootless-guard %i start
+ExecStop=/usr/local/libexec/agentty-rootless-guard %i stop

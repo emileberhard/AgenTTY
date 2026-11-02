@@ -88,7 +88,7 @@ async fn status(State(broker): State<RelayBroker>) -> Json<DrainStatus> {
 }
 
 async fn fence(State(broker): State<RelayBroker>) -> Json<DrainStatus> {
-    Json(broker.fence())
+    Json(broker.fence_for(std::time::Duration::from_secs(300)))
 }
 
 async fn resume(State(broker): State<RelayBroker>) -> Json<DrainStatus> {

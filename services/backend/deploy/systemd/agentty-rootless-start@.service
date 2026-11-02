@@ -1,0 +1,17 @@
+[Unit]
+Description=Start AgenTTY rootless Docker after its firewall guard
+BindsTo=agentty-rootless-guard@%i.service
+After=agentty-rootless-guard@%i.service network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Restart=on-failure
+RestartSec=15
+ExecStart=/usr/sbin/runuser -u agentty-backend -- /usr/bin/env HOME=/var/lib/agentty-runtime XDG_RUNTIME_DIR=/run/user/%i DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus /usr/bin/systemctl --user start agentty-docker.service
+ExecStop=/usr/sbin/runuser -u agentty-backend -- /usr/bin/env HOME=/var/lib/agentty-runtime XDG_RUNTIME_DIR=/run/user/%i DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%i/bus /usr/bin/systemctl --user stop agentty-docker.service
+
+[Install]
+WantedBy=multi-user.target

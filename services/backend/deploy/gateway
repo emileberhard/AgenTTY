@@ -4,27 +4,61 @@ import re
 import subprocess
 import sys
 import tempfile
+import shutil
 from pathlib import Path
 
-version = os.environ.get('SSH_ORIGINAL_COMMAND', '')
-if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', version):
-    raise SystemExit('Expected a plain MAJOR.MINOR.PATCH version')
-env = {'PATH': '/usr/local/bin:/usr/bin:/bin', 'HOME': '/var/lib/agentty-deploy', 'LANG': 'C.UTF-8', 'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_TERMINAL_PROMPT': '0'}
+VERSION = r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+UID = os.getuid()
+env = {
+    'PATH': '/usr/local/bin:/usr/bin:/bin',
+    'HOME': '/var/lib/agentty-runtime',
+    'LANG': 'C.UTF-8',
+    'GIT_CONFIG_NOSYSTEM': '1',
+    'GIT_CONFIG_GLOBAL': '/dev/null',
+    'GIT_TERMINAL_PROMPT': '0',
+    'XDG_RUNTIME_DIR': f'/run/user/{UID}',
+    'DBUS_SESSION_BUS_ADDRESS': f'unix:path=/run/user/{UID}/bus',
+    'DOCKER_HOST': 'unix:///run/agentty-docker/docker.sock',
+}
 
-def git(*args: str) -> str:
-    return subprocess.run(['git', *args], env=env, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
 
-with tempfile.TemporaryDirectory(prefix='release-', dir='/var/lib/agentty-deploy') as temporary:
-    repo = Path(temporary) / 'repo'
-    git('clone', '--quiet', '--no-checkout', 'https://github.com/emileberhard/AgenTTY.git', str(repo))
-    def at(*args: str) -> str:
-        return git('-C', str(repo), *args)
-    if at('cat-file', '-t', f'refs/tags/{version}') != 'tag':
-        raise SystemExit('Release tag must be annotated')
-    tags = [tag for tag in at('tag', '--list').splitlines() if re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', tag)]
-    if not tags or max(tags, key=lambda tag: tuple(map(int, tag.split('.')))) != version:
-        raise SystemExit('Release tag must be the newest version')
-    sha = at('rev-parse', f'refs/tags/{version}^{{commit}}')
-    at('merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main')
-    at('checkout', '--quiet', '--detach', sha)
-    subprocess.run(['/usr/bin/python3', str(repo / 'services/backend/deploy/deploy'), version, sha], env=env, cwd=repo, check=True)
+def check_version(version):
+    if not re.fullmatch(VERSION, version):
+        raise SystemExit('Expected a plain MAJOR.MINOR.PATCH version')
+
+
+def worker(version):
+    def git(*args):
+        return subprocess.run(['git', *args], env=env, check=True, text=True, stdout=subprocess.PIPE).stdout.strip()
+
+    for stale in Path('/var/lib/agentty-runtime').glob('release-*'):
+        if stale.is_dir() and not stale.is_symlink():
+            shutil.rmtree(stale)
+    with tempfile.TemporaryDirectory(prefix='release-', dir='/var/lib/agentty-runtime') as temporary:
+        repo = Path(temporary) / 'repo'
+        git('clone', '--quiet', '--no-checkout', '--filter=blob:none', 'https://github.com/emileberhard/AgenTTY.git', str(repo))
+
+        def at(*args):
+            return git('-C', str(repo), *args)
+
+        if at('cat-file', '-t', f'refs/tags/{version}') != 'tag':
+            raise SystemExit('Release tag must be annotated')
+        tags = [tag for tag in at('tag', '--list').splitlines() if re.fullmatch(VERSION, tag)]
+        if not tags or max(tags, key=lambda tag: tuple(map(int, tag.split('.')))) != version:
+            raise SystemExit('Release tag must be the newest version')
+        sha = at('rev-parse', f'refs/tags/{version}^{{commit}}')
+        at('merge-base', '--is-ancestor', sha, 'refs/remotes/origin/main')
+        at('checkout', '--quiet', '--detach', sha)
+        subprocess.run(['/usr/bin/python3', str(repo / 'services/backend/deploy/deploy'), version, sha], env=env, cwd=repo, check=True)
+
+
+if len(sys.argv) == 3 and sys.argv[1] == '--worker':
+    check_version(sys.argv[2])
+    worker(sys.argv[2])
+else:
+    if len(sys.argv) != 1:
+        raise SystemExit('Unexpected gateway arguments')
+    version = os.environ.get('SSH_ORIGINAL_COMMAND', '')
+    check_version(version)
+    unit = 'agentty-deploy'
+    subprocess.run(['/usr/bin/systemd-run', '--user', '--wait', '--collect', f'--unit={unit}', '/usr/bin/python3', '-I', '/usr/local/libexec/agentty-deploy-gateway', '--worker', version], env=env, check=True)

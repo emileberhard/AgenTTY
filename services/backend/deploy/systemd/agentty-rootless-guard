@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+uid="${1:?expected service UID}"
+action="${2:?expected start or stop}"
+[[ "$uid" =~ ^[1-9][0-9]*$ ]] && [[ "$(id -u agentty-backend)" == "$uid" ]]
+case "$action" in
+  start)
+    engine_scope="meta skuid $uid socket cgroupv2 level 2 \"user.slice/user-${uid}.slice\""
+    nft -f - <<RULES
+destroy table inet agentty_rootless
+table inet agentty_rootless {
+  chain input {
+    type filter hook input priority -10; policy accept;
+    ct state established,related return
+    iifname != { "lo", "tailscale0" } meta l4proto { tcp, udp } socket cgroupv2 level 2 "user.slice/user-${uid}.slice" counter drop
+  }
+  chain output {
+    type filter hook output priority -10; policy accept;
+    ct state established,related return
+    $engine_scope ip daddr 127.0.0.53 meta l4proto { tcp, udp } th dport 53 counter return
+    $engine_scope meta l4proto { tcp, udp } th dport 53 counter drop
+    $engine_scope fib daddr type local counter drop
+    $engine_scope ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } counter drop
+    $engine_scope ip6 daddr { ::/128, ::1/128, fc00::/7, fe80::/10, ff00::/8 } counter drop
+  }
+}
+RULES
+    install -d -o agentty-backend -g agentty-backend -m 0700 /run/agentty-docker
+    install -m 0644 /dev/null /run/agentty-rootless-guard.ready
+    ;;
+  stop)
+    rm /run/agentty-rootless-guard.ready
+    nft destroy table inet agentty_rootless
+    ;;
+  *) exit 2 ;;
+esac
