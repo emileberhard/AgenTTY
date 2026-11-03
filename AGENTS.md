@@ -155,9 +155,9 @@ Only after both jobs succeed, `testflight` restores that same-run archive,
 exports through Xcode cloud signing with the `testflight` environment's ASC key,
 checks entitlements and each framework's Apple Distribution signature, and uploads with a
 build number reserved from App Store Connect. `testflight-notes` sets What to
-Test, `app-store` applies `AppStore/` to the prepared version, `github-release`
+Test, `app-store` applies `AppStore/` to the prepared version and submits it for App Review, `github-release`
 publishes the tag message verbatim with the runtime assets, and `npm` publishes
-the pairing package with OIDC and provenance. App Review stays manual.
+the pairing package with OIDC and provenance. App Store release stays manual.
 Rerun a transiently failed job from the tag's own run while it is still the
 newest version; a fix ships as the next patch. See the CI guide for setup.
 
