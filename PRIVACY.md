@@ -108,9 +108,12 @@ AgenTTY keeps a bounded 512 MiB local producer spool and retains pending or
 held originals when publication fails or account ownership is uncertain.
 Changing iCloud accounts never assigns another account's captures to the new
 account. Recording Recovery lets you confirm ownership of unverified captures.
-The explicit Free Uploaded Local Audio action releases acknowledged local
-originals; it does not delete the iCloud originals. Successful insertion into
-the terminal does not by itself delete archival audio.
+When the spool is over half full, publication automatically releases the oldest
+uploaded local originals after checking that their iCloud records still exist.
+Unuploaded or held audio is kept. The explicit Free Uploaded Local Audio action
+can also release acknowledged local originals; neither action deletes the iCloud
+originals. Successful insertion into the terminal does not by itself delete
+archival audio.
 
 ## Crash and operational diagnostics
 

@@ -202,8 +202,7 @@ final class AgenTTYDictationLibrary {
             let snapshot = try await store.refresh()
             profileAccount = await store.accountSession()
             profile = snapshot?.profile
-            try await store.publishPending()
-            let publication = try await store.status()
+            let publication = try await store.publishPending()
             publicationNotice = publication.heldCaptureCount > 0 ? "\(publication.heldCaptureCount) recording(s) are held on this device until their ownership is resolved." : nil
         } catch {
             publicationNotice = "Library sync needs attention: \(error.localizedDescription)"
