@@ -44376,7 +44376,7 @@ Located in ./vendor/QRCode
 
 ==============================================================================
 SpeechKit
-Source: https://github.com/emileberhard/SpeechKit/tree/d9b9a5d38524d6d4a3b338590fe1c90946f30052
+Source: https://github.com/emileberhard/SpeechKit/tree/b19151541c70788b6ebed9dc808edfce42da8e86
 ==============================================================================
 
 MIT License
@@ -58283,7 +58283,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 ==============================================================================
-Swift: speechkit @ d9b9a5d38524d6d4a3b338590fe1c90946f30052
+Swift: speechkit @ b19151541c70788b6ebed9dc808edfce42da8e86
 Source: https://github.com/emileberhard/SpeechKit.git
 ==============================================================================
 
