@@ -57,7 +57,7 @@ commit a push to `main` ended on, after its CI passed.
    that exact build, also on retries.
 4. `testflight-notes` sets What to Test from the tag message. The workflow
    never distributes to beta groups or submits for beta review.
-5. `app-store` prepares the App Store version with manual release, short of App
+5. `app-store` prepares the App Store version with release after approval, short of App
    Review: it applies `AppStore/metadata/<locale>/*.txt` (description, keywords,
    promotional text, support URL, and the app's name, subtitle and privacy URL),
    sets What's New from the tag message from the second release on, places the
@@ -78,7 +78,7 @@ commit; downloads stay in the same run. Release credentials remain in the archiv
 job that selects the build number and the jobs that sign or publish; the runtime
 build receives only the read-only Actions token.
 
-Submitting for App Review and releasing on the App Store stay manual. Rerun a
+Submitting for App Review stays manual; Apple's approval releases the version. Rerun a
 transiently failed job from the tag's own run, only while that tag is still the
 newest version; a fix ships as the next patch. Candidate artifacts expire after
 30 days. A tag whose upload Apple may already have recorded is not rerun: the
