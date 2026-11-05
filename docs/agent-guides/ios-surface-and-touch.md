@@ -149,11 +149,13 @@ refuse card selection.
 
 While AgenTTY is retrying on its own, `TerminalReconnectScreenPresenter` takes
 the terminal over. It renders inside Ghostty — a braille spinner, a
-`Connecting to <host>` / `Reconnecting to <host>` headline, an
-`attempt N · retrying in Ns` detail line, and a dim
-`Shell switching is paused until AgenTTY reconnects.` footer — as escape
-sequences written locally through the same `injectTerminalOutputLocally` path as
-the ASCII onboarding screen. Nothing is sent over SSH.
+`Connecting to <host>` / `Reconnecting to <host>` headline, a detail line
+(`attempt N · retrying in Ns` during backoff, the connection stage such as
+`attempt N · preparing host…` while an attempt is in flight), and, once a retry
+failed, the notice from `AgenTTYSSHRecoveryGuidance.retryNotice` as a headline
+plus a dim hint — as escape sequences written locally through the same
+`injectTerminalOutputLocally` path as the ASCII onboarding screen. Nothing is
+sent over SSH.
 
 Behavior worth knowing before changing it:
 - **It is not the only disconnected state.** `reconnectScreenPhase` returns nil
@@ -166,14 +168,17 @@ Behavior worth knowing before changing it:
 - **It owns the screen while up.** `emitStatusLine` drops `[agentty]` lines to
   the log instead of writing them, because a status line would scroll the
   centered block apart.
-- **Layout degrades by row count** (`full` → `compact` → `minimal`) and every
-  line is truncated to the column count, so tiny grids still render.
+- **Layout degrades by row count**: the full block, then the compact block with
+  only the notice headline, then spinner, headline, detail and notice headline,
+  then just spinner, headline and detail. Notice lines wrap at word boundaries
+  (hard-splitting words longer than a line); other lines are truncated to the
+  column count, so tiny grids still render.
 - **Ticking is foreground-only** (`isAnimating: isApplicationActive`) and drops
   to a 1s interval under Reduce Motion. The timer runs in `.common` mode so the
   spinner keeps stepping during touch tracking.
 - Steady-state ticks repaint only the spinner and detail rows via absolute
-  cursor addressing; a full repaint happens only when columns, rows, or the
-  headline change.
+  cursor addressing, as do countdown and progress changes; a full repaint
+  happens only when columns, rows, the headline, or the notice change.
 
 ## Touch Scroll (`TerminalTouchScrollController`)
 
