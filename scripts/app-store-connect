@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import random
+import re
 import subprocess
 import sys
 import time
@@ -14,10 +15,11 @@ import urllib.request
 from pathlib import Path
 
 API = "https://api.appstoreconnect.apple.com/v1/"
-EDITABLE = {"PREPARE_FOR_SUBMISSION", "READY_FOR_REVIEW", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"}
+EDITABLE = {"PREPARE_FOR_SUBMISSION", "DEVELOPER_REJECTED", "REJECTED", "METADATA_REJECTED", "INVALID_BINARY"}
 IN_REVIEW = {"WAITING_FOR_REVIEW", "IN_REVIEW"}
 OPEN_SUBMISSIONS = "READY_FOR_REVIEW,WAITING_FOR_REVIEW,IN_REVIEW,UNRESOLVED_ISSUES,CANCELING"
 RELEASED = {"READY_FOR_DISTRIBUTION", "PROCESSING_FOR_DISTRIBUTION", "REPLACED_WITH_NEW_VERSION"}
+IN_BETA = {"WAITING_FOR_BETA_REVIEW", "IN_BETA_REVIEW", "BETA_APPROVED", "READY_FOR_BETA_TESTING", "IN_BETA_TESTING"}
 DEADLINE = time.monotonic() + 40 * 60
 
 
@@ -215,13 +217,39 @@ def wait(description, check):
     return result
 
 
+def uploaded_build_numbers(app, version):
+    builds = api("GET", "builds", **{"filter[app]": app, "filter[preReleaseVersion.version]": version,
+                 "filter[preReleaseVersion.platform]": "IOS", "fields[builds]": "version", "limit": 200})
+    uploads = api("GET", f"apps/{app}/buildUploads", **{"filter[cfBundleShortVersionString]": version, "filter[platform]": "IOS",
+                  "fields[buildUploads]": "cfBundleVersion,state", "limit": 200})
+    return [b["attributes"]["version"] for b in builds] + [u["attributes"]["cfBundleVersion"] for u in uploads
+                                                           if u["attributes"]["state"]["state"] in {"PROCESSING", "COMPLETE"}]
+
+
+def reserve_build(app, version, reserved, fenced):
+    if not fenced:
+        return max(next_build_number(app), int(reserved)), False
+    deadline = time.monotonic() + 15 * 60
+    while not (numbers := [number for number in uploaded_build_numbers(app, version)
+                           if build_components(number) >= build_components(reserved)]):
+        if time.monotonic() >= deadline:
+            sys.exit(f"An earlier attempt started uploading {version}, but App Store Connect shows no build for it after 15 minutes. Inspect App Store Connect; do not upload again blindly.")
+        time.sleep(20)
+    return max(numbers, key=build_components), True
+
+
+def build_components(number):
+    if not isinstance(number, str) or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){0,2}", number):
+        sys.exit(f"App Store Connect contains an unrecognized CFBundleVersion: {number!r}.")
+    parts = tuple(int(part) for part in number.split("."))
+    return parts + (0,) * (3 - len(parts))
+
+
 def next_build_number(app):
     builds = api("GET", "builds", **{"filter[app]": app, "fields[builds]": "version", "limit": 200})
     uploads = api("GET", f"apps/{app}/buildUploads", **{"fields[buildUploads]": "cfBundleVersion", "limit": 200})
     versions = [b["attributes"]["version"] for b in builds] + [u["attributes"]["cfBundleVersion"] for u in uploads]
-    if any(not version.isdecimal() for version in versions):
-        sys.exit("Use integer build numbers; App Store Connect contains a non-integer build version.")
-    return max((int(version) for version in versions), default=0) + 1
+    return max((build_components(version)[0] for version in versions), default=0) + 1
 
 
 def processed_build(app, version, number):
@@ -244,6 +272,38 @@ def set_test_notes(app, build, notes):
             "id": localization["id"], "attributes": {"whatsNew": notes}})
 
 
+def submit_beta(app, version, build):
+    groups = api("GET", "betaGroups", limit=200, **{"filter[app]": app, "filter[isInternalGroup]": "false"})
+    if not groups:
+        print(f"The {version} build reaches the internal testers; the app has no external group to submit it to.", file=sys.stderr)
+        return
+    api("POST", f"builds/{build}/relationships/betaGroups", [{"type": "betaGroups", "id": g["id"]} for g in groups])
+    state = api("GET", f"builds/{build}/buildBetaDetail")["attributes"]["externalBuildState"]
+    if state == "READY_FOR_BETA_SUBMISSION":
+        api("POST", "betaAppReviewSubmissions", {"type": "betaAppReviewSubmissions", "relationships": {"build": link("builds", build)}})
+        print(f"Submitted the {version} build for TestFlight review for {', '.join(g['attributes']['name'] for g in groups)}.", file=sys.stderr)
+    elif state in IN_BETA:
+        print(f"The {version} build is already {state} in TestFlight.", file=sys.stderr)
+    else:
+        sys.exit(f"The {version} build is {state} in TestFlight, so it cannot go to external testers.")
+
+
+def wait_for_screenshots(placements):
+    ready = {"ACTIVE", "PARENT_PREPARE_FOR_SUBMISSION", "PARENT_READY_FOR_REVIEW",
+             "PARENT_WAITING_FOR_REVIEW", "PARENT_IN_REVIEW", "PARENT_APPROVED"}
+    while True:
+        attributes = {p: api("GET", f"appAssetLibraryPlacements/{p}")["attributes"] for p in placements}
+        failed = [a["stateDetails"] for a in attributes.values() if a["state"] == "FAILED"]
+        if failed:
+            sys.exit(f"App Store Connect could not process a screenshot: {failed}")
+        states = {p: a["state"] for p, a in attributes.items()}
+        if all(state in ready for state in states.values()):
+            return
+        if time.monotonic() > DEADLINE:
+            sys.exit(f"The screenshots did not finish processing within 40 minutes of the start. Last placement states: {states}.")
+        time.sleep(20)
+
+
 VERSION_FIELDS = {"description": "description", "keywords": "keywords", "promotional_text": "promotionalText", "support_url": "supportUrl"}
 INFO_FIELDS = {"name": "name", "subtitle": "subtitle", "privacy_url": "privacyPolicyUrl"}
 
@@ -264,22 +324,22 @@ def update(kind, record, current, wanted):
 
 
 def apply_metadata(app, version_id, root, notes):
-    locales = sorted(directory for directory in root.iterdir() if directory.is_dir()) if root.is_dir() else []
+    directories = {directory.name: directory for directory in root.iterdir() if directory.is_dir()} if root.is_dir() else {}
     existing = {entry["attributes"]["locale"]: entry for entry in
                 api("GET", f"appStoreVersions/{version_id}/appStoreVersionLocalizations", limit=50)}
-    infos = [info for info in api("GET", f"apps/{app}/appInfos") if info["attributes"]["state"] in EDITABLE]
+    infos = [info for info in api("GET", f"apps/{app}/appInfos") if info["attributes"]["state"] in EDITABLE] if directories else []
     info_locales = {entry["attributes"]["locale"]: entry for entry in
                     api("GET", f"appInfos/{infos[0]['id']}/appInfoLocalizations", limit=50)} if infos else {}
-    for directory in locales:
-        locale = directory.name
-        wanted = read_fields(directory, VERSION_FIELDS) | ({"whatsNew": notes} if notes else {})
+    for locale in sorted(directories.keys() | existing.keys()):
+        directory = directories.get(locale)
+        wanted = (read_fields(directory, VERSION_FIELDS) if directory else {}) | ({"whatsNew": notes} if notes else {})
         if locale not in existing:
             api("POST", "appStoreVersionLocalizations", {"type": "appStoreVersionLocalizations", "attributes": {"locale": locale} | wanted,
                 "relationships": {"appStoreVersion": link("appStoreVersions", version_id)}})
             changed = sorted(wanted)
         else:
             changed = update("appStoreVersionLocalizations", existing[locale]["id"], existing[locale]["attributes"], wanted)
-        wanted_info = read_fields(directory, INFO_FIELDS)
+        wanted_info = read_fields(directory, INFO_FIELDS) if directory else {}
         if locale in info_locales:
             changed += update("appInfoLocalizations", info_locales[locale]["id"], info_locales[locale]["attributes"], wanted_info)
         elif wanted_info and not infos:
@@ -291,74 +351,71 @@ def apply_metadata(app, version_id, root, notes):
         print(f"Updated {', '.join(changed) or 'nothing'} for {locale}.", file=sys.stderr)
 
 
-def processed_screenshots(placements):
-    attributes = [api("GET", f"appAssetLibraryPlacements/{p}")["attributes"] for p in placements]
-    failed = [a["stateDetails"] for a in attributes if a["state"] == "FAILED"]
-    if failed:
-        sys.exit(f"App Store Connect could not process a screenshot: {failed}")
-    return None if any(a["state"] == "ASSET_PROCESSING" for a in attributes) else True
-
-
 def check_version(app, version):
     released = [v["attributes"]["versionString"] for v in api("GET", f"apps/{app}/appStoreVersions", **{"filter[platform]": "IOS", "limit": 200})
                 if v["attributes"]["appVersionState"] in RELEASED]
     uploaded = [v["attributes"]["version"] for v in api("GET", "preReleaseVersions", **{"filter[app]": app, "filter[platform]": "IOS", "limit": 200})]
-    newest = max(released + uploaded, key=parse, default=None)
-    if newest and parse(version) <= parse(newest):
-        sys.exit(f"{version} must exceed the App Store and TestFlight version {newest}.")
+    if version in released:
+        sys.exit(f"App Store version {version} is already released.")
+    newer = sorted({v for v in released + uploaded if parse(v) > parse(version)}, key=parse)
+    if newer:
+        sys.exit(f"{version} must exceed the App Store and TestFlight version {newer[-1]}.")
+
+
+def what_to_test(app, version, number, notes):
+    build = wait(f"The {version} build", lambda: processed_build(app, version, number))
+    set_test_notes(app, build, notes)
+    print(f"Set What to Test for the {version} build; TestFlight distribution stays manual.", file=sys.stderr)
 
 
 def testflight(app, version, number, notes):
     build = wait(f"The {version} build", lambda: processed_build(app, version, number))
     set_test_notes(app, build, notes)
-    print(f"Set What to Test for the {version} build; TestFlight distribution stays manual.", file=sys.stderr)
+    submit_beta(app, version, build)
 
 
 def app_store(app, version, number, metadata, screenshots, notes):
     root = Path(screenshots)
     slides = {directory.name: sorted(p for p in directory.glob("*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"})
               for directory in sorted(root.iterdir()) if directory.is_dir()} if root.is_dir() else {}
-    slides = {display: files for display, files in slides.items() if files}
+    if not slides:
+        sys.exit(f"Capture the screenshots into one {root} subdirectory per placement group first.")
     for display, files in slides.items():
-        if len(files) > 10:
+        if not 1 <= len(files) <= 10:
             sys.exit(f"Provide 1–10 PNG or JPEG screenshots in {display}.")
     version_id, released = draft_version(app, version)
     if version_id is None:
         return
     apply_metadata(app, version_id, Path(metadata), notes if released else None)
+    library = api("GET", f"apps/{app}/assetLibrary")["id"]
+    images = {}
+    created = queue.SimpleQueue()
+    placements, displaced = [], set()
+    try:
+        with concurrent.futures.ThreadPoolExecutor(sum(map(len, slides.values()))) as pool:
+            for display, files in slides.items():
+                images[display] = list(pool.map(lambda slide: upload(library, slide, created), files))
+        for localization in api("GET", f"appStoreVersions/{version_id}/appStoreVersionLocalizations", limit=50):
+            for display, identifiers in images.items():
+                placed, replaced = place(localization["id"], identifiers, display)
+                placements += placed
+                displaced |= replaced
+                print(f"Placed {len(identifiers)} {display} screenshots on {localization['attributes']['locale']}.", file=sys.stderr)
+    except BaseException:
+        try:
+            reserved = []
+            while not created.empty():
+                reserved.append(created.get_nowait())
+            delete_unplaced(reserved)
+        except RequestFailed as failure:
+            print(f"Could not remove this run's unplaced screenshots: {failure}", file=sys.stderr)
+        raise
+    delete_unplaced(displaced)
     if not released:
         print("Left What's New empty, because the App Store shows it only from the second release.", file=sys.stderr)
-    placements = []
-    if slides:
-        library = api("GET", f"apps/{app}/assetLibrary")["id"]
-        images = {}
-        created = queue.SimpleQueue()
-        displaced = set()
-        try:
-            with concurrent.futures.ThreadPoolExecutor(sum(map(len, slides.values()))) as pool:
-                for display, files in slides.items():
-                    images[display] = list(pool.map(lambda slide: upload(library, slide, created), files))
-            for localization in api("GET", f"appStoreVersions/{version_id}/appStoreVersionLocalizations", limit=50):
-                for display, identifiers in images.items():
-                    placed, replaced = place(localization["id"], identifiers, display)
-                    placements += placed
-                    displaced |= replaced
-                    print(f"Placed {len(identifiers)} {display} screenshots on {localization['attributes']['locale']}.", file=sys.stderr)
-        except BaseException:
-            try:
-                reserved = []
-                while not created.empty():
-                    reserved.append(created.get_nowait())
-                delete_unplaced(reserved)
-            except RequestFailed as failure:
-                print(f"Could not remove this run's unplaced screenshots: {failure}", file=sys.stderr)
-            raise
-        delete_unplaced(displaced)
-    else:
-        print("No screenshots are committed, so the version keeps the ones it already has.", file=sys.stderr)
     build = wait(f"The {version} build", lambda: processed_build(app, version, number))
     api("PATCH", f"appStoreVersions/{version_id}/relationships/build", {"type": "builds", "id": build})
-    wait("The screenshots", lambda: processed_screenshots(placements))
+    wait_for_screenshots(placements)
     if released:
         submit_for_review(app, version_id, version)
     else:
@@ -373,24 +430,35 @@ def main(command, *arguments):
     apps = api("GET", "apps", **{"filter[bundleId]": os.environ["APP_BUNDLE_ID"]})
     if not apps:
         sys.exit(f"No app has the bundle ID {os.environ['APP_BUNDLE_ID']}.")
-    if command == "build-number":
+    if command == "next-build-number":
         print(next_build_number(apps[0]["id"]))
         return
     if command == "check-version":
         check_version(apps[0]["id"], arguments[0])
         return
+    if command == "build-number":
+        version, reserved, fence = arguments
+        if fence not in {"fenced", "open"}:
+            sys.exit("The upload fence must be fenced or open.")
+        if not reserved.isdigit():
+            sys.exit("The reserved build number must be an integer.")
+        number, uploaded = reserve_build(apps[0]["id"], version, reserved, fence == "fenced")
+        print(number, "uploaded" if uploaded else "new")
+        return
     version, number, *paths = arguments
     notes = Path(paths[-1]).read_text().strip()
-    if command == "testflight":
+    if command == "what-to-test":
+        what_to_test(apps[0]["id"], version, number, notes)
+    elif command == "testflight":
         testflight(apps[0]["id"], version, number, notes)
     else:
         app_store(apps[0]["id"], version, number, *paths[:2], notes)
 
 
 if __name__ == "__main__":
-    counts = {"build-number": 2, "check-version": 3, "testflight": 5, "app-store": 7}
+    counts = {"next-build-number": 2, "check-version": 3, "build-number": 5, "what-to-test": 5, "testflight": 5, "app-store": 7}
     if len(sys.argv) != counts.get(sys.argv[1] if len(sys.argv) > 1 else "", 0):
-        sys.exit("Usage: scripts/app-store-connect build-number\n       scripts/app-store-connect check-version VERSION\n       scripts/app-store-connect testflight VERSION BUILD NOTES\n       scripts/app-store-connect app-store VERSION BUILD METADATA SCREENSHOTS NOTES")
+        sys.exit("Usage: scripts/app-store-connect next-build-number\n       scripts/app-store-connect check-version VERSION\n       scripts/app-store-connect build-number VERSION RESERVED fenced|open\n       scripts/app-store-connect what-to-test VERSION BUILD NOTES\n       scripts/app-store-connect testflight VERSION BUILD NOTES\n       scripts/app-store-connect app-store VERSION BUILD METADATA SCREENSHOTS NOTES")
     try:
         main(*sys.argv[1:])
     except RequestFailed as failure:
