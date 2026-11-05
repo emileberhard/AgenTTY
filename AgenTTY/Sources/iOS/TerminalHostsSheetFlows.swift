@@ -2590,9 +2590,7 @@ struct AutomaticHostSetupView: View {
             } catch is CancellationError {
                 throw CancellationError()
             } catch {
-                verificationResult = .failed(
-                    SSHClientSession.connectFailureOutcome(for: error, rawReason: error.localizedDescription)
-                )
+                verificationResult = .failed(SSHClientSession.preflightFailureOutcome(for: error))
             }
             switch verificationResult {
             case .succeeded:
