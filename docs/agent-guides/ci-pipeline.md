@@ -37,52 +37,60 @@ commit a push to `main` ended on, after its CI passed.
 1. `admit` checks the tag, that it is the newest version and on `main`, and
    that its annotation is a Markdown list of release notes, then waits for the successful push CI
    run of the same commit. It never reruns CI.
-2. `runtime` calls `build-host-runtime.yml`: its `tmux` jobs build the four tmux
+2. `backend` deploys the tag to the Linux host over the tailnet (see
+   [backend deployment](../backend.md)). The app, the GitHub release and the
+   npm package all need it, so no client ships before its server.
+3. `runtime` calls `build-host-runtime.yml`: its `tmux` jobs build the four tmux
    targets, then its packaging job builds both Rust helpers, verifies source
    fingerprints and checksums the complete runtime. It has no release environment
    or credentials. `npm-candidate` builds the tagged pairing package alongside it.
-3. `archive` waits for admission and the npm candidate, independently of the
-   runtime. It refuses a version not above every released App Store and uploaded
-   TestFlight version, reserves one build number above every App Store Connect build
-   and pending upload, archives unsigned with the tag as `MARKETING_VERSION`,
-   and ad-hoc signs embedded frameworks from the inside out and then each app
-   bundle with its entitlements (`Config/entitlements.json`). A tar artifact
-   preserves the archive's permissions, signatures and symlinks. `testflight`
-   joins both successful build jobs, restores that same-run archive, rechecks
-   that Apple has no upload of this version (also when retrying only this job),
-   uploads
-   the Sentry symbols, exports through Xcode cloud signing, checks the exported
-   entitlements and that every embedded framework carries the team's Apple
-   Distribution signature, and uploads. Its build-number output makes the later jobs select
-   that exact build, also on retries.
-4. `testflight-notes` sets What to Test from the tag message. The workflow
+4. `numbers` refuses a version that is already released or below a released App
+   Store or uploaded TestFlight version, then reserves one build number above
+   every App Store Connect build and pending upload. A rerun of the same tag
+   passes and keeps the reservation.
+5. `archive` archives unsigned with the tag as `MARKETING_VERSION` and the
+   reserved build number, and ad-hoc signs embedded frameworks from the inside
+   out and then each app bundle with its entitlements (`Config/entitlements.json`).
+   It holds no App Store Connect key. A tar artifact preserves the archive's
+   permissions, signatures and symlinks.
+6. `testflight` joins the build jobs and the backend. GitHub's step history
+   fences any earlier attempt that started `Upload to TestFlight`: such a rerun
+   reuses that build, or waits up to 15 minutes for Apple to list it, and never
+   uploads again. Otherwise it restores the same-run archive, waits until the
+   public `/healthz` reports this version or newer, uploads the Sentry symbols,
+   exports once through Xcode cloud signing, checks that export's entitlements,
+   versions and every embedded framework's Apple Distribution signature, and
+   uploads exactly that IPA with `altool`. Its build-number output makes the
+   later jobs select that exact build.
+7. `testflight-notes` sets What to Test from the tag message. The workflow
    never distributes to beta groups or submits for beta review.
-5. `app-store` prepares the App Store version with manual release: it applies `AppStore/metadata/<locale>/*.txt` (description, keywords,
-   promotional text, support URL, and the app's name, subtitle and privacy URL),
-   sets What's New from the tag message from the second release on, places the
-   screenshots in `AppStore/screenshots/<placement group>/` when present,
-   and attaches the build, then, once the app has a release, submits it for App Review, withdrawing
-   an older version still in review.
-6. `github-release` attaches the complete runtime in its `gh release create`
+8. `app-store` captures fresh screenshots (`AppStore/capture app-store`) and
+   prepares the App Store version with manual release: it applies
+   `AppStore/metadata/<locale>/*.txt` (description, keywords, promotional text,
+   support URL, and the app's name, subtitle and privacy URL), sets What's New
+   from the tag message from the second release on, replaces the screenshots of
+   every captured placement group and attaches the build, then, once the app
+   has a release, submits it for App Review, withdrawing an older version still
+   in review.
+9. `github-release` attaches the complete runtime in its `gh release create`
    call, which stages the assets before publication. The release uses the bare
    version, the annotated tag message verbatim as its notes, and Latest only
    while it is the newest version tag. Published assets are immutable. A retry
    skips a published release with the same title and notes, and fails on a
    mismatch without editing it.
-7. `npm` publishes the candidate with OIDC and provenance.
+10. `npm` publishes the candidate with OIDC and provenance.
 
 The workflow-wide `testflight` concurrency group covers build-number reservation,
 archive handoff and upload, with cancellation disabled. Splitting jobs therefore
 does not admit overlapping release uploads. Every checkout uses the triggering
-commit; downloads stay in the same run. Release credentials remain in the archive
-job that selects the build number and the jobs that sign or publish; the runtime
-build receives only the read-only Actions token.
+commit; downloads stay in the same run. Release credentials remain in the jobs
+that reserve numbers, sign or publish; the archive and runtime builds receive
+only the read-only Actions token.
 
-The first App Review submission and every App Store release stay manual. Rerun a
-transiently failed job from the tag's own run, only while that tag is still the
-newest version; a fix ships as the next patch. Candidate artifacts expire after
-30 days. A tag whose upload Apple may already have recorded is not rerun: the
-`testflight` check refuses it, and the fix ships as the next patch.
+The first App Review submission and every App Store release stay manual. Rerun
+the failed jobs of the tag's own run, only while that tag is still the newest
+version; the upload fence makes that safe after an upload. A fix ships as the
+next patch. Candidate artifacts expire after 30 days.
 
 ## Environment setup
 
@@ -93,7 +101,11 @@ The `testflight` environment, limited to version tags, holds the variables
 `SENTRY_ORG` and optionally `AGENTTY_SENTRY_DSN` and `SENTRY_PROJECT`, and the
 secrets `APP_STORE_CONNECT_KEY_P8` (the P8 file's contents),
 `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and
-`SENTRY_AUTH_TOKEN`. `scripts/configure-hosted-release` writes the ignored
+`SENTRY_AUTH_TOKEN`. The `agentty-backend-production` environment, also limited
+to version tags, holds `AGENTTY_DEPLOY_SSH_KEY`; the repository variables
+`AGENTTY_DEPLOY_TARGET`, `AGENTTY_DEPLOY_HOST_KEY`, `AGENTTY_TS_CLIENT_ID` and
+`AGENTTY_TS_AUDIENCE` name the forced-command SSH account, its host key and the
+tailnet identity. `scripts/configure-hosted-release` writes the ignored
 `Config/Local.xcconfig` from the variables. Official identifiers must exactly
 match previously shipped apps, including their Keychain and iCloud boundaries.
 The App Group and capabilities must be registered on the portal for the app and

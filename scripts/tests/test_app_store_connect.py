@@ -13,18 +13,33 @@ loader.exec_module(asc)
 
 
 class ScreenshotProcessingTests(unittest.TestCase):
-    def test_a_draft_screenshot_finishes_at_the_documented_parent_state(self):
-        for state in ("ACTIVE", "PARENT_PREPARE_FOR_SUBMISSION"):
-            with self.subTest(state=state):
-                with patch.object(asc, "api", return_value={"attributes": {"state": state}}):
-                    self.assertTrue(asc.processed_screenshots(["screenshot"]))
+    def test_ready_placements_need_no_further_processing(self):
+        for state in ("ACTIVE", "PARENT_PREPARE_FOR_SUBMISSION", "PARENT_READY_FOR_REVIEW",
+                      "PARENT_WAITING_FOR_REVIEW", "PARENT_IN_REVIEW", "PARENT_APPROVED"):
+            with self.subTest(state=state), patch.object(asc, "api", return_value={"attributes": {"state": state}}), \
+                 patch.object(asc.time, "sleep", side_effect=AssertionError("A ready placement must not wait")):
+                asc.wait_for_screenshots(["screenshot"])
 
-    def test_processing_is_pending_and_failed_processing_is_reported(self):
-        with patch.object(asc, "api", return_value={"attributes": {"state": "ASSET_PROCESSING"}}):
-            self.assertIsNone(asc.processed_screenshots(["screenshot"]))
+    def test_unknown_and_processing_states_wait_until_the_deadline(self):
+        for state in ("ASSET_PROCESSING", "PENDING", "UPLOAD_COMPLETE", "PARENT_FUTURE_STATE"):
+            with self.subTest(state=state), patch.object(asc, "api", return_value={"attributes": {"state": state}}), \
+                 patch.object(asc, "DEADLINE", 1), patch.object(asc.time, "monotonic", return_value=2):
+                with self.assertRaisesRegex(SystemExit, f"40 minutes.*screenshot.*{state}"):
+                    asc.wait_for_screenshots(["screenshot"])
+
+    def test_pending_placements_are_polled_until_every_screenshot_is_ready(self):
+        with patch.object(asc, "api", side_effect=[
+            {"attributes": {"state": "ACTIVE"}}, {"attributes": {"state": "PENDING"}},
+            {"attributes": {"state": "ACTIVE"}}, {"attributes": {"state": "ACTIVE"}},
+        ]), patch.object(asc, "DEADLINE", 1), patch.object(asc.time, "monotonic", return_value=0), \
+             patch.object(asc.time, "sleep") as sleep:
+            asc.wait_for_screenshots(["ipad", "iphone"])
+            sleep.assert_called_once_with(20)
+
+    def test_failed_processing_reports_the_apple_failure(self):
         with patch.object(asc, "api", return_value={"attributes": {"state": "FAILED", "stateDetails": "Invalid image"}}):
             with self.assertRaisesRegex(SystemExit, "Invalid image"):
-                asc.processed_screenshots(["screenshot"])
+                asc.wait_for_screenshots(["screenshot"])
 
 
 class BuildIdentityTests(unittest.TestCase):
@@ -34,6 +49,21 @@ class BuildIdentityTests(unittest.TestCase):
             [{"attributes": {"cfBundleVersion": "12"}}],
         ]):
             self.assertEqual(13, asc.next_build_number("app"))
+
+    def test_a_dotted_pending_upload_sets_the_next_global_build(self):
+        with patch.object(asc, "api", side_effect=[
+            [{"attributes": {"version": "30"}}],
+            [{"attributes": {"cfBundleVersion": "42.9.1"}}],
+        ]):
+            self.assertEqual(43, asc.next_build_number("app"))
+
+    def test_unrecognized_build_versions_stop_allocation(self):
+        for version in ("", "1.2.3.4", "1.beta", "１"):
+            with self.subTest(version=version), patch.object(asc, "api", side_effect=[
+                [{"attributes": {"version": version}}], [],
+            ]):
+                with self.assertRaisesRegex(SystemExit, "CFBundleVersion"):
+                    asc.next_build_number("app")
 
     def test_acceptance_filters_the_exact_uploaded_build(self):
         with patch.object(asc, "api", return_value=[]) as api:
@@ -49,6 +79,43 @@ class BuildIdentityTests(unittest.TestCase):
         with patch.object(asc, "token", return_value="fixture"), patch.object(asc, "send", side_effect=[json.dumps(p).encode() for p in pages]):
             self.assertEqual([{"id": "first"}, {"id": "last"}], asc.api("GET", "builds"))
 
+
+class UploadFenceTests(unittest.TestCase):
+    def test_a_first_attempt_uploads_beside_an_older_build_of_the_same_version(self):
+        with patch.object(asc, "uploaded_build_numbers", return_value=["1"]) as existing, \
+             patch.object(asc, "next_build_number", return_value=12):
+            self.assertEqual((13, False), asc.reserve_build("app", "1.3.2", "13", fenced=False))
+            existing.assert_not_called()
+
+    def test_a_first_attempt_takes_a_newer_global_number_than_its_reservation(self):
+        with patch.object(asc, "next_build_number", return_value=14), patch.object(asc.time, "sleep") as sleep:
+            self.assertEqual((14, False), asc.reserve_build("app", "1.3.2", "13", fenced=False))
+            sleep.assert_not_called()
+
+    def test_a_dotted_build_is_reused_with_its_exact_apple_version(self):
+        with patch.object(asc, "uploaded_build_numbers", return_value=["9", "12.2", "12.7.2"]), \
+             patch.object(asc, "next_build_number") as reserve:
+            self.assertEqual(("12.7.2", True), asc.reserve_build("app", "1.3.2", "12", fenced=True))
+            reserve.assert_not_called()
+
+    def test_a_fenced_rerun_waits_for_the_build_and_never_reserves_a_second_number(self):
+        with patch.object(asc, "uploaded_build_numbers", side_effect=[[], [], ["12"]]), patch.object(asc, "next_build_number") as reserve, \
+             patch.object(asc.time, "sleep"):
+            self.assertEqual(("12", True), asc.reserve_build("app", "1.3.2", "12", fenced=True))
+            reserve.assert_not_called()
+
+    def test_a_retry_never_selects_an_older_build_of_the_same_version(self):
+        with patch.object(asc, "uploaded_build_numbers", return_value=["1"]), \
+             patch.object(asc.time, "sleep"), patch.object(asc.time, "monotonic", side_effect=[0, 901]):
+            with self.assertRaisesRegex(SystemExit, "do not upload again blindly"):
+                asc.reserve_build("app", "1.3.2", "12", fenced=True)
+
+    def test_a_fenced_rerun_fails_when_no_build_appears(self):
+        with patch.object(asc, "uploaded_build_numbers", return_value=[]), patch.object(asc, "next_build_number") as reserve, \
+             patch.object(asc.time, "sleep"), patch.object(asc.time, "monotonic", side_effect=[0, 1, 1000]):
+            with self.assertRaisesRegex(SystemExit, "do not upload again"):
+                asc.reserve_build("app", "1.3.2", "12", fenced=True)
+            reserve.assert_not_called()
 
 def submission(identifier, version, state):
     return {"id": identifier, "attributes": {"state": state},
@@ -277,17 +344,18 @@ class MetadataTests(unittest.TestCase):
 
 
 class VersionAndMetadataTests(unittest.TestCase):
-    def test_a_version_at_or_below_an_uploaded_one_is_refused_before_the_build(self):
+    def test_only_a_newer_unreleased_version_is_accepted(self):
         responses = [[{"attributes": {"versionString": "2.13.0", "appVersionState": "READY_FOR_DISTRIBUTION"}},
                       {"attributes": {"versionString": "2.14.0", "appVersionState": "PREPARE_FOR_SUBMISSION"}}],
                      [{"attributes": {"version": "2.13.1"}}]]
-        for version, accepted in (("2.13.1", False), ("2.13.0", False), ("2.13.2", True)):
+        for version, refusal in (("2.13.0", "already released"), ("2.12.9", "must exceed.*2.13.1"),
+                                 ("2.13.1", None), ("2.13.2", None)):
             with self.subTest(version=version), patch.object(asc, "api", side_effect=list(responses)) as api:
-                if accepted:
-                    asc.check_version("app", version)
-                else:
-                    with self.assertRaisesRegex(SystemExit, "must exceed"):
+                if refusal:
+                    with self.assertRaisesRegex(SystemExit, refusal):
                         asc.check_version("app", version)
+                else:
+                    asc.check_version("app", version)
                 self.assertEqual(["apps/app/appStoreVersions", "preReleaseVersions"], [call.args[1] for call in api.call_args_list])
                 self.assertEqual("app", api.call_args_list[1].kwargs["filter[app]"])
 
@@ -316,3 +384,20 @@ class VersionAndMetadataTests(unittest.TestCase):
         self.assertEqual([("PATCH", "appInfoLocalizations/infoloc", {"name": "New"}),
                           ("PATCH", "appStoreVersionLocalizations/loc", {"whatsNew": "- Fixed it."}),
                           ("PATCH", "appInfoLocalizations/infoloc", {"name": "New"})], patches)
+
+
+class TestFlightPolicyTests(unittest.TestCase):
+    def test_what_to_test_never_adds_external_groups(self):
+        calls = []
+
+        def api(method, path, data=None, **params):
+            calls.append((method, path))
+            if path == "builds":
+                return [{"id": "build", "attributes": {"processingState": "VALID"}}]
+            if path == "builds/build/betaBuildLocalizations":
+                return [{"id": "notes"}]
+
+        with patch.object(asc, "api", side_effect=api):
+            asc.what_to_test("app", "1.3.2", "11", "- Fixed it.")
+        self.assertEqual([("PATCH", "betaBuildLocalizations/notes")], [call for call in calls if call[0] != "GET"])
+        self.assertNotIn("betaGroups", " ".join(path for _, path in calls))
