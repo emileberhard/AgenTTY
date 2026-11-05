@@ -987,9 +987,10 @@ async fn create_ssh_relay_session(
         .await
         .map_err(ApiError::from)?
     else {
-        return Err(ApiError::forbidden(
-            "This device is not allowed to use relay access for that host.",
-        ));
+        return Err(ApiError::CodedForbidden {
+            code: "relay_not_allowed",
+            detail: "This device is not allowed to use relay access for that host.",
+        });
     };
 
     if !state
@@ -1010,9 +1011,10 @@ async fn create_ssh_relay_session(
             )
             .await
             .map_err(ApiError::from)?;
-        return Err(ApiError::forbidden(
-            "Relay connector is offline for that host.",
-        ));
+        return Err(ApiError::CodedForbidden {
+            code: "relay_connector_offline",
+            detail: "Relay connector is offline for that host.",
+        });
     }
 
     let app_issue = state
@@ -1385,7 +1387,7 @@ async fn dictation_transcription(
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StreamRejection {
+pub(crate) enum StreamRejection {
     Unauthorized,
     VerificationRequired,
     QuotaExhausted,
@@ -2134,9 +2136,10 @@ async fn authorize_device(state: &AppState, device_id: &str) -> Result<(), ApiEr
         .await
         .map_err(ApiError::from)?
     else {
-        return Err(ApiError::forbidden(
-            "This relay requires a verified App Store installation or an operator-authorized device.",
-        ));
+        return Err(ApiError::CodedForbidden {
+            code: "verification_required",
+            detail: "This relay requires a verified App Store installation or an operator-authorized device.",
+        });
     };
     let trusted = state
         .admission
@@ -2148,9 +2151,10 @@ async fn authorize_device(state: &AppState, device_id: &str) -> Result<(), ApiEr
                 && hash.as_bytes().ct_eq(secret_hash.as_bytes()).unwrap_u8() == 1
         });
     if !trusted && identity.is_none() && state.admission.dictation_limits.require_verified_devices {
-        return Err(ApiError::forbidden(
-            "This relay requires a verified App Store installation or an operator-authorized device. Please update AgenTTY.",
-        ));
+        return Err(ApiError::CodedForbidden {
+            code: "verification_required",
+            detail: "This relay requires a verified App Store installation or an operator-authorized device. Please update AgenTTY.",
+        });
     }
     if !state.admission.admit_device(device_id) {
         return Err(ApiError::ResourceLimit {

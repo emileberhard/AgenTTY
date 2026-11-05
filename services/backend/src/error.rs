@@ -30,6 +30,11 @@ pub enum ApiError {
         detail: &'static str,
     },
     #[error("{detail}")]
+    CodedForbidden {
+        code: &'static str,
+        detail: &'static str,
+    },
+    #[error("{detail}")]
     Http {
         status: StatusCode,
         detail: String,
@@ -251,11 +256,10 @@ impl From<AnalyticsValidationError> for ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         match self {
-            Self::ResourceLimit { code, detail } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"detail": detail, "code": code})),
-            )
-                .into_response(),
+            Self::CodedForbidden { code, detail } => coded(StatusCode::FORBIDDEN, code, detail),
+            Self::ResourceLimit { code, detail } => {
+                coded(StatusCode::TOO_MANY_REQUESTS, code, detail)
+            }
             Self::Http {
                 status,
                 detail,
@@ -355,4 +359,12 @@ impl IntoResponse for ApiError {
             }
         }
     }
+}
+
+fn coded(status: StatusCode, code: &str, detail: &str) -> Response {
+    (
+        status,
+        Json(serde_json::json!({"detail": detail, "code": code})),
+    )
+        .into_response()
 }

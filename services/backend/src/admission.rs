@@ -144,6 +144,9 @@ pub async fn limit(State(state): State<AppState>, request: Request, next: Next) 
             | "/v1/dictation/sessions"
     );
     if !admission.admit_rate(provision) {
+        if path == crate::api::DICTATION_STREAM_PATH {
+            return crate::api::StreamRejection::Busy.into_response();
+        }
         return (StatusCode::TOO_MANY_REQUESTS, axum::Json(serde_json::json!({"code":"relay_request_limit","detail":"Relay request limit reached. Please try again shortly."}))).into_response();
     }
     if path == crate::api::DICTATION_STREAM_PATH {
