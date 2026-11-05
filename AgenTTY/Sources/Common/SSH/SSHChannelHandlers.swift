@@ -98,7 +98,7 @@ nonisolated final class RootSSHDiagnosticsHandler: ChannelInboundHandler, @unche
             return
         }
 
-        if failureRecorder.hasRecordedOutcome {
+        if failureRecorder.outcome != nil {
             context.close(promise: nil)
             return
         }

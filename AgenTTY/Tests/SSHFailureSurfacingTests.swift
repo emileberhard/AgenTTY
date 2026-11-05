@@ -41,12 +41,11 @@ struct SSHFailureSurfacingTests {
 
     @Test
     func hostToolsDownloadFailureHasItsOwnGuidance() {
-        let outcome = SSHClientSession.preShellFailureOutcome(
-            for: AgenTTYHostRuntimeArtifactError.manifestUnavailable(reason: "The request timed out.")
-        )
+        let timeout = URLError(.timedOut)
+        let outcome = SSHClientSession.preShellFailureOutcome(for: timeout)
 
         #expect(outcome.failureStage == .hostToolsDownload)
-        #expect(outcome.rawReason.contains("The request timed out."))
+        #expect(outcome.rawReason.contains(timeout.localizedDescription))
         #expect(AgenTTYSSHRecoveryGuidance.guidance(for: outcome).title == "Couldn’t Download Host Tools")
     }
 

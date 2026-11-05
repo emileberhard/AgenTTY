@@ -129,7 +129,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
             case .failure(let error):
                 let rawReason = "connect failed: \(error.localizedDescription)"
                 notifyDisconnect(
-                    failureRecorder.takeOutcome()
+                    failureRecorder.outcome
                         ?? Self.connectFailureOutcome(for: error, rawReason: rawReason)
                 )
 
@@ -146,7 +146,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                     guard let self else { return }
                     let rawReason = "ssh transport closed"
                     self.notifyDisconnect(
-                        self.failureRecorder.takeOutcome()
+                        self.failureRecorder.outcome
                             ?? AgenTTYSSHTerminationOutcome(
                                 category: .transportClosed,
                                 failureStage: self.didBecomeReady ? .postReadySession : .transport,
@@ -163,7 +163,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                         try await self.runPreShellProvisionerIfNeeded()
                     } catch {
                         self.notifyDisconnect(
-                            self.failureRecorder.takeOutcome()
+                            self.failureRecorder.outcome
                                 ?? Self.preShellFailureOutcome(for: error)
                         )
                         return
@@ -506,7 +506,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                     guard let self else { return }
                     let rawReason = "shell channel closed"
                     self.notifyDisconnect(
-                        self.failureRecorder.takeOutcome()
+                        self.failureRecorder.outcome
                             ?? AgenTTYSSHTerminationOutcome(
                                 category: .shellClosed,
                                 failureStage: self.didBecomeReady ? .postReadySession : .shellChannel,

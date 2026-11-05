@@ -14,10 +14,25 @@ nonisolated struct AgenTTYSSHRecoveryDescription: Equatable, Sendable {
 
 nonisolated enum AgenTTYSSHRecoveryGuidance {
     static func guidance(for outcome: AgenTTYSSHTerminationOutcome) -> AgenTTYSSHRecoveryDescription {
-        // The outer switch is on `failureStage`, so this category has to be handled
-        // before it or the generic transport copy would swallow it.
-        if outcome.category == .algorithmNegotiationFailed {
+        switch outcome.category {
+        case .algorithmNegotiationFailed:
             return negotiationFailureGuidance(detail: outcome.negotiationDetail)
+        case .hostKeyMismatch:
+            return AgenTTYSSHRecoveryDescription(
+                title: "The Host Identity Changed",
+                message: "This host presented a different SSH host key than the one AgenTTY trusted before. Only reset the saved key if you rebuilt or reconfigured the host yourself.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "key.2.on.ring",
+                        title: "Reset the trusted host key",
+                        subtitle: "Do this in Edit Host only after confirming the new fingerprint on the host."
+                    ),
+                ]
+            )
+        case .authFailed:
+            return authenticationFailed
+        default:
+            break
         }
 
         switch outcome.failureStage {
@@ -39,26 +54,11 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
                 ]
             )
         case .sshAuth:
-            return AgenTTYSSHRecoveryDescription(
-                title: "SSH Authentication Failed",
-                message: "The host didn’t accept this iPhone’s key or password. Run Automatic Setup on the host again, or add this iPhone’s public key to ~/.ssh/authorized_keys.",
-                suggestions: [
-                    AgenTTYSSHRecoverySuggestion(
-                        icon: "key",
-                        title: "Check the trusted key",
-                        subtitle: "Make sure the selected public key is installed in ~/.ssh/authorized_keys."
-                    ),
-                    AgenTTYSSHRecoverySuggestion(
-                        icon: "person.badge.key",
-                        title: "Verify the username",
-                        subtitle: "Public-key authentication must be allowed for the selected user account."
-                    ),
-                ]
-            )
+            return authenticationFailed
         case .hostToolsDownload:
             return AgenTTYSSHRecoveryDescription(
                 title: "Couldn’t Download Host Tools",
-                message: "AgenTTY reached the host, but this iPhone couldn’t download the tools AgenTTY installs there. Check the iPhone’s internet connection and retry.",
+                message: "AgenTTY reached the host, but this iPhone couldn’t download valid copies of the tools AgenTTY installs there. Check the iPhone’s internet connection and retry. If it keeps failing, update AgenTTY.",
                 suggestions: [
                     AgenTTYSSHRecoverySuggestion(
                         icon: "icloud.and.arrow.down",
@@ -114,44 +114,36 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
                 ]
             )
         case .postReadySession, nil:
-            switch outcome.category {
-            case .hostKeyMismatch:
-                return AgenTTYSSHRecoveryDescription(
-                    title: "The Host Identity Changed",
-                    message: "AgenTTY found a different SSH host key than it trusted before.",
-                    suggestions: [
-                        AgenTTYSSHRecoverySuggestion(
-                            icon: "key.2.on.ring",
-                            title: "Reset the trusted host key",
-                            subtitle: "Only do this if you trust the host and intentionally changed or rebuilt it."
-                        ),
-                    ]
-                )
-            case .authFailed:
-                return guidance(
-                    for: AgenTTYSSHTerminationOutcome(
-                        category: outcome.category,
-                        failureStage: .sshAuth,
-                        rawReason: outcome.rawReason,
-                        wasReady: outcome.wasReady,
-                        shouldReconnect: outcome.shouldReconnect
-                    )
-                )
-            default:
-                return AgenTTYSSHRecoveryDescription(
-                    title: "The Connection Needs Attention",
-                    message: "AgenTTY could not finish opening a usable terminal session for this host.",
-                    suggestions: [
-                        AgenTTYSSHRecoverySuggestion(
-                            icon: "slider.horizontal.3",
-                            title: "Review the host details",
-                            subtitle: "Check the hostname, username, authentication method, and any recent host changes."
-                        ),
-                    ]
-                )
-            }
+            return AgenTTYSSHRecoveryDescription(
+                title: "The Connection Needs Attention",
+                message: "AgenTTY could not finish opening a usable terminal session for this host.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "slider.horizontal.3",
+                        title: "Review the host details",
+                        subtitle: "Check the hostname, username, authentication method, and any recent host changes."
+                    ),
+                ]
+            )
         }
     }
+
+    private static let authenticationFailed = AgenTTYSSHRecoveryDescription(
+            title: "SSH Authentication Failed",
+            message: "The host didn’t accept this iPhone’s key or password. Run Automatic Setup on the host again, or add this iPhone’s public key to ~/.ssh/authorized_keys.",
+            suggestions: [
+                AgenTTYSSHRecoverySuggestion(
+                    icon: "key",
+                    title: "Check the trusted key",
+                    subtitle: "Make sure the selected public key is installed in ~/.ssh/authorized_keys."
+                ),
+                AgenTTYSSHRecoverySuggestion(
+                    icon: "person.badge.key",
+                    title: "Verify the username",
+                    subtitle: "Public-key authentication must be allowed for the selected user account."
+                ),
+            ]
+        )
 
     /// Component-specific cards for algorithm-negotiation failures. The fork's
     /// diagnostics say which component had no overlap and what each side offered;

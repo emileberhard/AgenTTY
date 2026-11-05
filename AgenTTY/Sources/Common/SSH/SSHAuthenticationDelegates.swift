@@ -34,15 +34,8 @@ nonisolated final class AgenTTYSSHFailureRecorder: @unchecked Sendable {
         }
     }
 
-    var hasRecordedOutcome: Bool {
-        queue.sync { recordedOutcome != nil }
-    }
-
-    func takeOutcome() -> AgenTTYSSHTerminationOutcome? {
-        queue.sync {
-            defer { recordedOutcome = nil }
-            return recordedOutcome
-        }
+    var outcome: AgenTTYSSHTerminationOutcome? {
+        queue.sync { recordedOutcome }
     }
 }
 
@@ -86,19 +79,8 @@ nonisolated final class TOFUHostKeysDelegate: NIOSSHClientServerAuthenticationDe
             validationCompletePromise.succeed(())
         } catch {
             EsmaLog.ssh.error("host key validation failed: \(error.localizedDescription, privacy: .public)")
-            let category: AgenTTYSSHDisconnectCategory = if error is AgenTTYTrustedHostKeyValidationError {
-                .hostKeyMismatch
-            } else {
-                .other
-            }
             failureRecorder.record(
-                AgenTTYSSHTerminationOutcome(
-                    category: category,
-                    failureStage: .sshAuth,
-                    rawReason: error.localizedDescription,
-                    wasReady: false,
-                    shouldReconnect: false
-                )
+                SSHClientSession.connectFailureOutcome(for: error, rawReason: error.localizedDescription)
             )
             validationCompletePromise.fail(error)
         }

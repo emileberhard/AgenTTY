@@ -98,7 +98,7 @@ struct AgenTTYPairingSessionStatusResponse: Decodable, Sendable {
     }
 }
 
-nonisolated struct AgenTTYPairingSessionStatusRequest: Encodable, Sendable {
+private nonisolated struct AgenTTYPairingSessionStatusRequest: Encodable, Sendable {
     let deviceID: UUID
     let deviceSecret: String
 }

@@ -12,7 +12,6 @@ nonisolated enum AgenTTYHostRuntimeArtifactError: LocalizedError {
     case invalidRelativePath(String)
     case unsupportedSchemaVersion(Int)
     case checksumMismatch(name: String)
-    case manifestUnavailable(reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -36,8 +35,6 @@ nonisolated enum AgenTTYHostRuntimeArtifactError: LocalizedError {
             "Unsupported host runtime manifest schema version: \(version)."
         case .checksumMismatch(let name):
             "Host runtime checksum mismatch for \(name)."
-        case .manifestUnavailable(let reason):
-            "Couldn’t download the host runtime manifest: \(reason)"
         }
     }
 }
@@ -351,14 +348,20 @@ actor AgenTTYHostRuntimeArtifactStore {
                 throw AgenTTYHostRuntimeArtifactError.invalidManifestResponse(httpResponse.statusCode)
             }
             let manifest = try decodeManifest(data)
-            try writeAtomically(data, to: cacheURL)
+            do {
+                try writeAtomically(data, to: cacheURL)
+            } catch {
+                EsmaLog.terminal.error(
+                    "host runtime manifest cache write failed error=\(String(describing: error), privacy: .public)"
+                )
+            }
             EsmaLog.terminal.info(
                 "host runtime manifest fetched url=\(manifestURL.absoluteString, privacy: .public) runtime_version=\(manifest.runtimeVersion, privacy: .public)"
             )
             return manifest
         } catch {
             guard let cachedManifestData = try? Data(contentsOf: cacheURL) else {
-                throw AgenTTYHostRuntimeArtifactError.manifestUnavailable(reason: error.localizedDescription)
+                throw error
             }
             let cachedManifest = try decodeManifest(cachedManifestData)
             EsmaLog.terminal.notice(

@@ -2199,7 +2199,7 @@ pub struct PairingSessionStatusRequest {
     pub device_id: DeviceId,
     pub device_secret: NonEmptyString,
     #[serde(default)]
-    pub scope: Option<serde::de::IgnoredAny>,
+    pub scope: serde::de::IgnoredAny,
 }
 
 #[derive(Debug, Clone, Deserialize)]
