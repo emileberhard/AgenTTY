@@ -256,17 +256,18 @@ final class AgenTTYPairingRelayClient {
 
     static func pairingCode(from rawValue: String) -> String? {
         let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return nil }
-
-        if let components = URLComponents(string: trimmed),
-           components.scheme == "agentty",
-           components.host == "pair",
-           let code = components.queryItems?.first(where: { $0.name == "code" })?.value,
-           !code.isEmpty {
-            return code
+        let candidate: String
+        if let components = URLComponents(string: trimmed), components.scheme == "agentty", components.host == "pair" {
+            guard let code = components.queryItems?.first(where: { $0.name == "code" })?.value else { return nil }
+            candidate = code
+        } else {
+            candidate = trimmed
         }
-
-        return trimmed
+        let normalized = String(String.UnicodeScalarView(candidate.unicodeScalars.filter {
+            $0.isASCII && CharacterSet.alphanumerics.contains($0)
+        })).uppercased()
+        guard normalized.count == 8 else { return nil }
+        return "\(normalized.prefix(4))-\(normalized.suffix(4))"
     }
 
     private static func codeTail(for code: String) -> String {

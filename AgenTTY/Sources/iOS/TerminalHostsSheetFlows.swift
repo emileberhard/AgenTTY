@@ -1648,7 +1648,7 @@ struct AutomaticHostSetupTroubleshootingView: View {
     }
 
     private enum VerificationStatus {
-        case failed(AgenTTYSSHTerminationOutcome?)
+        case failed(address: String, outcome: AgenTTYSSHTerminationOutcome?)
         case succeeded
 
         var isVerified: Bool {
@@ -1669,7 +1669,9 @@ struct AutomaticHostSetupTroubleshootingView: View {
         self.trustedHostKeyStore = trustedHostKeyStore
         self.onContinueToReview = onContinueToReview
         _draft = State(initialValue: draft)
-        _status = State(initialValue: .failed(draft.automaticVerificationFailureOutcome))
+        _status = State(
+            initialValue: .failed(address: draft.normalizedAddress, outcome: draft.automaticVerificationFailureOutcome)
+        )
     }
 
     private var canRetry: Bool {
@@ -1688,7 +1690,7 @@ struct AutomaticHostSetupTroubleshootingView: View {
     }
 
     private var guidance: AgenTTYSSHRecoveryDescription? {
-        if case .failed(let outcome?) = status {
+        if case .failed(_, let outcome?) = status {
             return AgenTTYSSHRecoveryGuidance.guidance(for: outcome)
         }
         return nil
@@ -1704,12 +1706,12 @@ struct AutomaticHostSetupTroubleshootingView: View {
                     subtitle: "AgenTTY successfully installed or confirmed its SSH key on the host."
                 )
                 switch status {
-                case .failed:
+                case .failed(let address, _):
                     statusRow(
                         icon: "exclamationmark.triangle",
                         tint: .yellow,
                         title: guidance?.title ?? "Verification Failed",
-                        subtitle: guidance?.message ?? "AgenTTY could not verify that this host is ready for a usable terminal session."
+                        subtitle: "\(address): \(guidance?.message ?? "AgenTTY could not verify that this host is ready for a usable terminal session.")"
                     )
                 case .succeeded:
                     statusRow(
@@ -1898,6 +1900,7 @@ struct AutomaticHostSetupTroubleshootingView: View {
             return
         }
 
+        let testedAddress = draft.normalizedAddress
         errorMessage = nil
         isTesting = true
         Task {
@@ -1922,14 +1925,14 @@ struct AutomaticHostSetupTroubleshootingView: View {
                         draft.automaticVerificationFailureOutcome = nil
                         errorMessage = nil
                     case .failed(let outcome):
-                        status = .failed(outcome)
+                        status = .failed(address: testedAddress, outcome: outcome)
                         draft.automaticVerificationFailureOutcome = outcome
                         errorMessage = AgenTTYSSHRecoveryGuidance.guidance(for: outcome).message
                     }
                 }
             } catch {
                 await MainActor.run {
-                    status = .failed(nil)
+                    status = .failed(address: testedAddress, outcome: nil)
                     draft.automaticVerificationFailureOutcome = nil
                     errorMessage = error.localizedDescription
                 }
@@ -1980,6 +1983,7 @@ struct AutomaticHostSetupView: View {
     @State private var manualCode = ""
     @State private var showScanner = false
     @State private var errorMessage: String?
+    @State private var pairingCodeExpired = false
     @State private var statusMessage: String?
     @State private var pairingTask: Task<Void, Never>?
     @State private var pairingTaskToken = 0
@@ -2009,6 +2013,7 @@ struct AutomaticHostSetupView: View {
             set: { isPresented in
                 if !isPresented {
                     errorMessage = nil
+                    pairingCodeExpired = false
                 }
             }
         )
@@ -2105,6 +2110,10 @@ struct AutomaticHostSetupView: View {
                 )
             } header: {
                 Text("Claim Host")
+            } footer: {
+                if !manualCode.isEmpty && AgenTTYPairingRelayClient.pairingCode(from: manualCode) == nil {
+                    Text("Enter the 8-character pairing code.")
+                }
             }
 
             if let statusMessage {
@@ -2141,10 +2150,10 @@ struct AutomaticHostSetupView: View {
             cancelPairingTask()
         }
         .alert(
-            "Automatic Setup Error",
+            pairingCodeExpired ? "Pairing Code Expired" : "Automatic Setup Error",
             isPresented: automaticSetupErrorIsPresented
         ) {
-            Button("OK") { errorMessage = nil }
+            Button("Try Again") {}
         } message: {
             Text(errorMessage ?? "Unknown error.")
         }
@@ -2353,6 +2362,7 @@ struct AutomaticHostSetupView: View {
                 await MainActor.run {
                     clearPendingState()
                     statusMessage = nil
+                    pairingCodeExpired = (error as? AgenTTYPairingQRCodeSetupError) == .pairingExpired
                     errorMessage = error.localizedDescription
                 }
             }
@@ -2558,7 +2568,7 @@ struct AutomaticHostSetupView: View {
             verificationAttemptCount: candidates.count
         )
 
-        var lastVerificationOutcome: AgenTTYSSHTerminationOutcome?
+        var firstFailure: (candidate: AgenTTYResolvedPairingHostCandidate, outcome: AgenTTYSSHTerminationOutcome)?
         for (index, candidate) in candidates.enumerated() {
             let candidateDraft = try makeAutomaticDraft(
                 from: completion,
@@ -2570,13 +2580,22 @@ struct AutomaticHostSetupView: View {
             guard let hostDraft = candidateDraft.makeHostDraft(authentication: .key(keyID)) else {
                 continue
             }
-            let verificationResult = try await verifyHostConnection(
-                hostDraft: hostDraft,
-                hostID: UUID(),
-                keyStore: keyStore,
-                trustedHostKeyStore: trustedHostKeyStore,
-                pinnedSSHHostPublicKeys: completion.sshHostPublicKeys
-            )
+            let verificationResult: AgenTTYHostConnectionVerificationResult
+            do {
+                verificationResult = try await verifyHostConnection(
+                    hostDraft: hostDraft,
+                    hostID: UUID(),
+                    keyStore: keyStore,
+                    trustedHostKeyStore: trustedHostKeyStore,
+                    pinnedSSHHostPublicKeys: completion.sshHostPublicKeys
+                )
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                verificationResult = .failed(
+                    SSHClientSession.connectFailureOutcome(for: error, rawReason: error.localizedDescription)
+                )
+            }
             switch verificationResult {
             case .succeeded:
                 recordHostSetupFlow(
@@ -2587,19 +2606,20 @@ struct AutomaticHostSetupView: View {
                 )
                 return .addAutomaticReview(candidateDraft)
             case .failed(let outcome):
-                lastVerificationOutcome = outcome
+                if firstFailure == nil { firstFailure = (candidate, outcome) }
             }
         }
 
+        let failedCandidate = firstFailure?.candidate ?? firstCandidate
         let fallbackDraft = try makeAutomaticDraft(
             from: completion,
             keyID: keyID,
             username: username,
-            selectedCandidate: firstCandidate,
+            selectedCandidate: failedCandidate,
             allCandidates: candidates
         )
 
-        let verificationFailureOutcome = lastVerificationOutcome ?? AgenTTYSSHTerminationOutcome(
+        let verificationFailureOutcome = firstFailure?.outcome ?? AgenTTYSSHTerminationOutcome(
             category: .other,
             failureStage: .tcpConnect,
             rawReason: "Automatic setup could not verify a usable connection.",
@@ -2623,7 +2643,7 @@ struct AutomaticHostSetupView: View {
             detectedUsernameSource: completion.detectedUsernameSource,
             usernameSuspicious: completion.detectedUsernameSuspicious,
             candidates: candidates,
-            selectedCandidate: firstCandidate,
+            selectedCandidate: failedCandidate,
             hostPlatform: completion.platform?.analyticsValue,
             hostEnvironmentFlags: completion.hostEnvironmentFlags.compactMap(\.analyticsValue)
         )
@@ -3058,7 +3078,7 @@ private extension AgenTTYHostReachabilityFailureSubtype {
     }
 }
 
-private enum AgenTTYPairingQRCodeSetupError: LocalizedError {
+private enum AgenTTYPairingQRCodeSetupError: LocalizedError, Equatable {
     case missingSSHKey
     case missingDetectedUsername
     case missingHostAddress
@@ -3079,7 +3099,7 @@ private enum AgenTTYPairingQRCodeSetupError: LocalizedError {
         case .pairingFailed(let message):
             message
         case .pairingExpired:
-            "The pairing code expired before the host finished setup."
+            "Run Automatic Setup on the host again."
         }
     }
 }
