@@ -449,6 +449,10 @@ final class TerminalSurfaceViewIOS: UIView, GhosttySurfaceProvider, TerminalInpu
         bridge?.connectionRecoveryRequestDidChange = { [weak inputRouter] request in
             inputRouter?.updateConnectionRecoveryRequest(request)
         }
+        inputRouter.notificationIssue = bridge?.notificationIssue
+        bridge?.notificationIssueDidChange = { [weak inputRouter] issue in
+            inputRouter?.notificationIssue = issue
+        }
     }
 
     func updateActiveHost(_ host: AgenTTYHost?) {
@@ -490,6 +494,10 @@ final class TerminalSurfaceViewIOS: UIView, GhosttySurfaceProvider, TerminalInpu
 
     func retryActiveConnection() {
         bridge?.retryConnectionRecovery()
+    }
+
+    func retryNotificationSetup() {
+        bridge?.retryNotificationSetup()
     }
 
     func handleApplicationWillResignActive() {

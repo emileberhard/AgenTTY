@@ -230,6 +230,59 @@ struct HostCardRow: View {
 }
 
 @safe
+struct NotificationIssueRow: View {
+    let issue: AgenTTYNotificationIssue
+    let retry: () -> Void
+
+    @Environment(\.openURL) private var openURL
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "bell.slash")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(AppTheme.darkModePrimaryText)
+                .frame(width: 32, height: 32)
+                .background(Color.orange.gradient, in: .rect(cornerRadius: 8))
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(AppTheme.primaryText)
+                if issue == .permissionDenied {
+                    Text("Allow them for AgenTTY in Settings.")
+                        .font(.caption)
+                        .foregroundStyle(AppTheme.secondaryText)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            switch issue {
+            case .permissionDenied:
+                Button("Settings") {
+                    if let url = URL(string: UIApplication.openNotificationSettingsURLString) {
+                        openURL(url)
+                    }
+                }
+                .buttonStyle(.bordered)
+            case .hostSetupFailed:
+                Button("Retry", action: retry)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+
+    private var title: String {
+        switch issue {
+        case .permissionDenied:
+            "Notifications unavailable"
+        case .hostSetupFailed:
+            "Couldn’t set up notifications on this host"
+        }
+    }
+}
+
+@safe
 private struct HostReachabilityPill: View {
     let state: HostListReachabilityIndicatorState
 

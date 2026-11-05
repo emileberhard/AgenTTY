@@ -616,6 +616,12 @@ struct TerminalHostsSheet: View {
                         .listRowBackground(AppTheme.sheetListRowBackground)
                     }
                 }
+                if let notificationIssue = inputRouter.notificationIssue {
+                    Section {
+                        NotificationIssueRow(issue: notificationIssue, retry: inputRouter.retryNotificationSetup)
+                            .listRowBackground(AppTheme.sheetListRowBackground)
+                    }
+                }
             }
             .scrollContentBackground(.hidden)
             .contentMargins(.top, 4, for: .scrollContent)

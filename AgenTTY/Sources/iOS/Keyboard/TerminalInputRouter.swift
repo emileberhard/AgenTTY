@@ -17,6 +17,7 @@ protocol TerminalInputSink: AnyObject {
     func setDirectionalPadCursorStyle(active: Bool)
     func dismissConnectionRecovery()
     func retryActiveConnection()
+    func retryNotificationSetup()
 }
 
 extension TerminalInputSink {
@@ -68,6 +69,7 @@ final class TerminalInputRouter {
     var hostConnectionPhase: AgenTTYHostConnectionPhase = .disconnected
     var hostConnectionMethod: AgenTTYHostConnectionMethod?
     private(set) var connectionRecoveryRequest: AgenTTYConnectionRecoveryRequest?
+    var notificationIssue: AgenTTYNotificationIssue?
 
     var isDictationCaptureActive: Bool {
         isDictationArming || isDictationRecording
@@ -280,6 +282,10 @@ final class TerminalInputRouter {
 
     func dismissConnectionRecovery() {
         sink?.dismissConnectionRecovery()
+    }
+
+    func retryNotificationSetup() {
+        sink?.retryNotificationSetup()
     }
 
     func updateConnectionRecoveryRequest(_ request: AgenTTYConnectionRecoveryRequest?) {

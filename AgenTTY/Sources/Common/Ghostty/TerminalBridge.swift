@@ -4,6 +4,7 @@ import NIOCore
 import NIOSSH
 import OSLog
 import Synchronization
+import UserNotifications
 #if os(iOS)
 import UIKit
 #endif
@@ -25,6 +26,11 @@ nonisolated enum AgenTTYHostConnectionPhase: Sendable {
     var allowsHostInteraction: Bool {
         self == .connected
     }
+}
+
+nonisolated enum AgenTTYNotificationIssue: Equatable, Sendable {
+    case permissionDenied
+    case hostSetupFailed
 }
 
 @MainActor
@@ -218,6 +224,8 @@ final class TerminalBridge {
     private var lastRetryFailure: AgenTTYSSHRetryFailure?
     private var connectionProgress: SSHClientSession.Progress?
     private var livenessProbeInFlight = false
+    private var notificationPermissionDenied = false
+    private var notificationHostSetupFailed = false
     private var preReadyFailureCircuitBreaker = AgenTTYPreReadyFailureCircuitBreaker()
     private var hasNoHosts = false
     private var isShuttingDown = false
@@ -297,11 +305,13 @@ final class TerminalBridge {
     var hostConnectionPhaseDidChange: ((_ phase: AgenTTYHostConnectionPhase) -> Void)?
     var hostConnectionMethodDidChange: ((_ method: AgenTTYHostConnectionMethod?) -> Void)?
     var connectionRecoveryRequestDidChange: ((_ request: AgenTTYConnectionRecoveryRequest?) -> Void)?
+    var notificationIssueDidChange: ((_ issue: AgenTTYNotificationIssue?) -> Void)?
     private var apnsTokenDidChangeObserver: NSObjectProtocol?
     private var analyticsSSHSession: AgenTTYAnalyticsSSHSession?
     private(set) var hostConnectionPhase: AgenTTYHostConnectionPhase = .disconnected
     private(set) var hostConnectionMethod: AgenTTYHostConnectionMethod?
     private(set) var connectionRecoveryRequest: AgenTTYConnectionRecoveryRequest?
+    private(set) var notificationIssue: AgenTTYNotificationIssue?
 
     init(
         runtime: GhosttyRuntime,
@@ -433,6 +443,8 @@ final class TerminalBridge {
         activeConnectionTarget = nextTarget
         lastRetryFailure = nil
         connectionProgress = nil
+        notificationHostSetupFailed = false
+        updateNotificationIssue()
         reconnectAttempt = 0
         reconnectRetryDeadline = nil
         preReadyFailureCircuitBreaker.reset()
@@ -1181,8 +1193,34 @@ final class TerminalBridge {
         }
     }
 
+    func retryNotificationSetup() {
+        guard hostConnectionPhase == .connected else { return }
+        scheduleNotificationsProvisioning(generation: connectionGeneration)
+    }
+
+    private func refreshNotificationPermission() async {
+        let status = await UNUserNotificationCenter.current().notificationSettings().authorizationStatus
+        notificationPermissionDenied = status == .denied
+        updateNotificationIssue()
+    }
+
+    private func updateNotificationIssue() {
+        let issue: AgenTTYNotificationIssue? = if notificationPermissionDenied {
+            .permissionDenied
+        } else if notificationHostSetupFailed {
+            .hostSetupFailed
+        } else {
+            nil
+        }
+        guard issue != notificationIssue else { return }
+        notificationIssue = issue
+        notificationIssueDidChange?(issue)
+    }
+
     private func configureNotifications(generation: Int) async {
-        guard connectionGeneration == generation,
+        await refreshNotificationPermission()
+        guard !Task.isCancelled,
+              connectionGeneration == generation,
               let ssh,
               let connectionTarget = activeConnectionTarget else { return }
 
@@ -1192,7 +1230,6 @@ final class TerminalBridge {
 
         do {
             guard let relaySession = try await AgenTTYNotifyRelayClient.shared.issueRelaySession() else {
-                emitStatusLine("[agentty] notifications unavailable (push not ready)")
                 EsmaLog.notifications.notice(
                     "event=provision_skip generation=\(generation) reason=push_not_ready"
                 )
@@ -1205,6 +1242,8 @@ final class TerminalBridge {
             )
 
             guard !Task.isCancelled, connectionGeneration == generation else { return }
+            notificationHostSetupFailed = false
+            updateNotificationIssue()
             scheduleNotificationsRefresh(
                 expiresAtEpochSeconds: relaySession.expiresAtEpochSeconds,
                 generation: generation
@@ -1214,7 +1253,8 @@ final class TerminalBridge {
             )
         } catch {
             guard !Task.isCancelled, connectionGeneration == generation else { return }
-            emitStatusLine("[agentty] notifications unavailable")
+            notificationHostSetupFailed = true
+            updateNotificationIssue()
             EsmaLog.notifications.error(
                 "event=provision_failure generation=\(generation) error=\(String(describing: error), privacy: .public)"
             )
@@ -1361,6 +1401,7 @@ final class TerminalBridge {
     func handleApplicationDidBecomeActive() {
         isApplicationActive = true
         endBackgroundWarmHoldIfNeeded(reason: "didBecomeActive")
+        Task { [weak self] in await self?.refreshNotificationPermission() }
         refreshReconnectScreen()
         applyConnectionLifecycleAction(
             AgenTTYConnectionLifecyclePolicy.action(
