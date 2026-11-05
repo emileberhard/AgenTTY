@@ -63,6 +63,17 @@ Public app/helper endpoints include:
 - `POST /v1/analytics/events`
 - `GET /healthz`
 
+JSON routes reject a request with `{"detail": "...", "code": "..."}`. `detail`
+is written for the user; `code` is a stable machine value present only where
+clients must tell rejections with one status apart. The app's
+`AgenTTYRelayTransport` owns decoding: a 4xx shows its detail, and a 5xx or
+unreadable body shows one shared "temporarily unavailable" message.
+`POST /v1/ssh-relay-sessions` answers 403 with `relay_connector_offline`
+(transient), `relay_not_allowed` or `verification_required` (permanent).
+Apps before these codes treat every relay 403 as an offline connector, so a
+403 without a code keeps that meaning. Status codes never change for an
+existing rejection, because installed apps map them.
+
 Internal companion-client endpoints accept only RemoteCoder and PingBooks, using env-configured bearer tokens.
 They include:
 
@@ -122,7 +133,7 @@ App builds through 2.13.8 also send `scope` to `/v1/pairing-sessions/{id}/status
 
 New notification requests use `scope: "notify"` at `/v1/relay-sessions`. These tokens cannot transcribe. Dictation tokens cannot notify and expire after one hour. Missing scope and existing tokens are explicitly legacy credentials, subject to the shared compatibility budget. A host may still hold a legacy token until a new app refreshes `notify.json`; the bounded legacy pool covers that rollout.
 
-`POST /v1/dictation/azure-speech/speechtotext/transcriptions:transcribe` is SpeechKit's relay contract for MAI-Transcribe-2 progressive upload and its batch fallback. It accepts a dictation-scope token, or a legacy token only from an operator-trusted device, and `multipart/form-data` with exactly a `definition` part followed by an `audio` part. The definition is strict JSON of at most 8 KiB: MAI-Transcribe-2 enhanced mode, an optional clean or verbatim style, at most 50 phrase-list terms and one locale, and no prompt. Audio is a canonical 44-byte 16 kHz mono PCM16 WAV header whose sizes are either `0xFFFFFFFF` (streaming) or exact (batch), followed by PCM. The relay rebuilds the multipart body from the parsed definition and an open-length header and streams it to llm-router's `/vendors/azure-speech` passthrough with its own key; the app never holds a provider or router key. It reserves allowance in 30-second increments before forwarding the audio that needs it, settles to the actual seconds rounded up and returns the unused reservation. Upstream statuses pass through, with non-2xx bodies reduced to `{}`. Relay refusals carry `X-Speech-Relay-Rejection`: `unauthorized` 401, `verification_required` 403, `quota_exhausted` 429, `busy` 429 (another active stream on the same allowance, or no capacity), `service_limit` 503 (operator ceiling), `invalid_request` 400, `audio_too_long` 413 and `upstream_unavailable` 502. Each allowance has one active stream. At most 32 streams run outside the general request pool and its timeout, each limited to 15 minutes of audio and wall-clock time, 30 idle seconds in either direction, 45 seconds for the upstream response and a 1 MiB response body. The response limit stays below SpeechKit's 60-second finalization wait, so clients receive the relay's verdict instead of timing out on an already charged request.
+`POST /v1/dictation/azure-speech/speechtotext/transcriptions:transcribe` is SpeechKit's relay contract for MAI-Transcribe-2 progressive upload and its batch fallback. It accepts a dictation-scope token, or a legacy token only from an operator-trusted device, and `multipart/form-data` with exactly a `definition` part followed by an `audio` part. The definition is strict JSON of at most 8 KiB: MAI-Transcribe-2 enhanced mode, an optional clean or verbatim style, at most 50 phrase-list terms and one locale, and no prompt. Audio is a canonical 44-byte 16 kHz mono PCM16 WAV header whose sizes are either `0xFFFFFFFF` (streaming) or exact (batch), followed by PCM. The relay rebuilds the multipart body from the parsed definition and an open-length header and streams it to llm-router's `/vendors/azure-speech` passthrough with its own key; the app never holds a provider or router key. It reserves allowance in 30-second increments before forwarding the audio that needs it, settles to the actual seconds rounded up and returns the unused reservation. Upstream statuses pass through, with non-2xx bodies reduced to `{}`. Relay refusals carry `X-Speech-Relay-Rejection`: `unauthorized` 401, `verification_required` 403, `quota_exhausted` 429, `busy` 429 (another active stream on the same allowance, no capacity, or the public request rate limit), `service_limit` 503 (operator ceiling), `invalid_request` 400, `audio_too_long` 413 and `upstream_unavailable` 502. Each allowance has one active stream. At most 32 streams run outside the general request pool and its timeout, each limited to 15 minutes of audio and wall-clock time, 30 idle seconds in either direction, 45 seconds for the upstream response and a 1 MiB response body. The response limit stays below SpeechKit's 60-second finalization wait, so clients receive the relay's verdict instead of timing out on an already charged request.
 
 `POST /v1/dictation/transcriptions` remains only for 1.0.14 and 2.12.0 clients and now transcribes through the same router path in one batch, ignoring their instructions and language hints. Tokens with a dictation identity charge the monthly ledger at their tier; identity-less legacy tokens keep a 1,800-second weekly device allowance inside the shared legacy pool. Remove this lane once verified-device enforcement is on and the last 2.12.0 TestFlight build has expired (2027-01-19). It accepts complete PCM WAV files, with one format chunk followed by one data chunk. Encoding, sample rate, channel count, sample width, byte rate, frame alignment, RIFF size and chunk boundaries must agree. Unknown, duplicate and truncated chunks are rejected. Charging rounds validated sample-frame duration up to seconds. Audio is limited to 25,000,000 bytes; JSON transport adds base64 overhead without accepting an arbitrary 40 MiB body. Metadata and provider responses are bounded, and upstream requests have a 120-second timeout.
 
@@ -159,3 +170,18 @@ For the first deployment only, the running binary lacks this control. The update
 After lead approval, deploy the backend first with host-adoption proof enforcement off. The 2.12.0 tag publishes the matching `@agentty-app/pair` helper; do not publish it independently. Then enable `AGENTTY_BACKEND_REQUIRE_HOST_ADOPTION_PROOF=true` through the guarded operator deploy path and verify health and rejected forged requests read-only. The next app release carries JWS admission, notification scoping and typed limit recovery; the rebuilt Rust helpers ship with the next host-runtime release. Production Apple JWS acceptance, the combined iOS build/install and the guarded live deployment still require their respective acceptance checks. Acceptance follow-up: [#453](https://github.com/emileberhard/tracker/issues/453).
 
 Verification references: [Apple's signed-data verifier](https://github.com/apple/app-store-server-library-python/blob/main/appstoreserverlibrary/signed_data_verifier.py), [AppTransaction](https://developer.apple.com/documentation/storekit/apptransaction), [Apple Root CA G3](https://www.apple.com/certificateauthority/AppleRootCA-G3.cer).
+
+## Shared contract fixtures
+
+`contract-fixtures/` pins the JSON each side sends, grouped as
+`<route>/request` and `<route>/response`, with fake identifiers only. The backend
+drives requests through the real router in `services/backend/tests/contracts.rs`
+and checks that its responses and error bodies match; the app's
+`ContractFixtureTests` compare the real encoders' output and decode responses
+with the real decoders; the pairing CLI's `pairing-api.test.ts` does both for
+its routes. Strict enums are listed in `pairing-status/response/enum-values.json`.
+
+Change a fixture only together with both sides of the contract. Keep legacy
+variants, such as `pairing-status/request/status-before-2.13.9.json` and
+`relay-sessions/request/unsigned-dictation.json`, until their compatibility lane
+is retired. CI has no path filters, so a fixture-only change runs every job.
