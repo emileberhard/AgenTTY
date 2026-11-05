@@ -37,13 +37,32 @@ extension TerminalInputSink {
     }
 }
 
+enum AgenTTYDictationAlert: Equatable {
+    case microphoneAccessOff
+    case failed(String)
+
+    var title: String {
+        switch self {
+        case .microphoneAccessOff: "Microphone Access Off"
+        case .failed: "Dictation Error"
+        }
+    }
+
+    var message: String {
+        switch self {
+        case .microphoneAccessOff: "Allow microphone access in Settings to use dictation."
+        case .failed(let message): message
+        }
+    }
+}
+
 @MainActor
 @Observable
 final class TerminalInputRouter {
     private(set) var isDictationRecording = false
     private(set) var isDictationProcessing = false
     private(set) var isDictationArming = false
-    var dictationError: String?
+    var dictationAlert: AgenTTYDictationAlert?
     var lifetimeAccessController: AgenTTYLifetimeAccessController?
     var keyboardEncodingMode: KeyboardEncodingMode = .defaultShortcuts
     var hostConnectionPhase: AgenTTYHostConnectionPhase = .disconnected
@@ -296,7 +315,7 @@ final class TerminalInputRouter {
         guard Self.isDictationAIEnabled else {
             let message = Self.dictationDisabledMessage
             EsmaLog.terminal.notice("dictation blocked: \(message, privacy: .public)")
-            dictationError = message
+            dictationAlert = .failed(message)
             return
         }
 
@@ -345,6 +364,7 @@ final class TerminalInputRouter {
         dictationProcessingTask = Task(priority: .userInitiated) { @MainActor [self] in
             async let archiveWarning = AgenTTYDictationLibrary.shared.finishOriginal(capture)
             var recording: DictationRecording<String>?
+            var messages: [String] = []
             defer {
                 isDictationProcessing = false
                 dictationProcessingTask = nil
@@ -387,8 +407,7 @@ final class TerminalInputRouter {
                     contextWasUsed: output.contextWasUsed
                 )
                 guard generation == dictationGeneration else { throw DictationLibraryError.accountChanged }
-                let warning = [capture.archiveWarning, resultWarning].compactMap { $0 }.joined(separator: "\n")
-                if !warning.isEmpty { dictationError = warning }
+                messages += [capture.archiveWarning, resultWarning].compactMap { $0 }
                 let text = output.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !text.isEmpty {
                     let fallbackBytes = utf8Bytes(for: text)
@@ -408,11 +427,12 @@ final class TerminalInputRouter {
                 if case SpeechKitError.relayRejected(kind: "unauthorized") = error {
                     await AgenTTYDictationRelayClient.shared.invalidateSession()
                 }
-                dictationError = AgenTTYDictationErrorPresentation.message(
+                messages.append(AgenTTYDictationErrorPresentation.message(
                     for: error, hasLifetimeAccess: lifetimeAccessController?.hasLifetimeAccess == true, now: Date()
-                )
+                ))
             }
-            if let archiveWarning = await archiveWarning { dictationError = archiveWarning }
+            if let archiveWarning = await archiveWarning { messages.append(archiveWarning) }
+            if !messages.isEmpty { dictationAlert = .failed(messages.joined(separator: "\n\n")) }
             if let recording { try? await store.discard(recording) }
         }
     }
@@ -420,6 +440,7 @@ final class TerminalInputRouter {
     private func startDictation() async {
         guard await ensureMicrophonePermission() else {
             isDictationArming = false
+            dictationAlert = .microphoneAccessOff
             return
         }
         var capture: AgenTTYDictationLibrary.Capture?
@@ -488,9 +509,9 @@ final class TerminalInputRouter {
                 await AgenTTYDictationLibrary.shared.record(capture, text: String(reflecting: type(of: error)), kind: .failure, model: capture.backend.libraryIdentifier, contextWasUsed: false)
             }
             if let writer { try? await writer.discard() }
-            dictationError = AgenTTYDictationErrorPresentation.message(
+            dictationAlert = .failed(AgenTTYDictationErrorPresentation.message(
                 for: error, hasLifetimeAccess: lifetimeAccessController?.hasLifetimeAccess == true, now: Date()
-            )
+            ))
             deactivateAudioSession()
         }
         isDictationArming = false

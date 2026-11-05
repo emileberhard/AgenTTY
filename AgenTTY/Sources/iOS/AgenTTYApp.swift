@@ -506,17 +506,25 @@ struct AgenTTYiOSApp: App {
                 }
             }
             .alert(
-                "Dictation Error",
+                inputRouter.dictationAlert?.title ?? "",
                 isPresented: Binding(
-                    get: { inputRouter.dictationError != nil },
-                    set: { if !$0 { inputRouter.dictationError = nil } }
-                )
-            ) {
-                Button("OK") { inputRouter.dictationError = nil }
-            } message: {
-                if let error = inputRouter.dictationError {
-                    Text(error)
+                    get: { inputRouter.dictationAlert != nil },
+                    set: { if !$0 { inputRouter.dictationAlert = nil } }
+                ),
+                presenting: inputRouter.dictationAlert
+            ) { alert in
+                if alert == .microphoneAccessOff {
+                    Button("Open Settings") {
+                        if let url = URL(string: UIApplication.openSettingsURLString) {
+                            UIApplication.shared.open(url)
+                        }
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } else {
+                    Button("OK") {}
                 }
+            } message: { alert in
+                Text(alert.message)
             }
             .sheet(
                 isPresented: $sheetPresentation.showSettings,
