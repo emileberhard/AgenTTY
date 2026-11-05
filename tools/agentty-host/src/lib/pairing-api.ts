@@ -186,7 +186,7 @@ async function parseJsonResponse(
     return data;
   }
 
-  const detail = errorMessageFromResponse(data);
+  const detail = backendErrorDetail(data);
   throw new Error(detail ?? fallbackMessage);
 }
 
@@ -277,19 +277,9 @@ function parsePairingSessionState(value: unknown): PairingSessionState {
   }
 }
 
-function errorMessageFromResponse(value: unknown): string | null {
-  if (typeof value !== "object" || value === null) {
-    return null;
-  }
-
-  if ("detail" in value && typeof value.detail === "string") {
+export function backendErrorDetail(value: unknown): string | null {
+  if (typeof value === "object" && value !== null && "detail" in value && typeof value.detail === "string") {
     return value.detail;
-  }
-  if ("error" in value && typeof value.error === "string") {
-    return value.error;
-  }
-  if ("message" in value && typeof value.message === "string") {
-    return value.message;
   }
   return null;
 }

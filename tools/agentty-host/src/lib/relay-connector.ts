@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { BUILD_GIT_TAG, type CommandIO, type PairingMetadata } from "./types.js";
+import { backendErrorDetail } from "./pairing-api.js";
+import { BUILD_GIT_TAG, type CommandIO, type FetchLike, type PairingMetadata } from "./types.js";
 
 const DEFAULT_HOST_RUNTIME_ASSET_BASE_URL =
   "https://agentty-assets.esmadil.se/host-runtime";
@@ -26,7 +27,7 @@ interface HostRuntimeManifest {
   readonly targets: Record<string, HostRuntimeManifestTarget>;
 }
 
-interface ConnectorRegisterResponse {
+export interface ConnectorRegisterResponse {
   readonly connector_id: string;
   readonly connector_secret: string;
   readonly relay_host_id: string;
@@ -169,20 +170,23 @@ async function loadOrCreateRelayMachineID(homeDirectory: string): Promise<string
   return created;
 }
 
-async function registerConnector({
-  existingConnector,
-  baseUrl,
-  bootstrapToken,
-  machineID,
-  metadata,
-}: {
-  readonly baseUrl: URL;
-  readonly bootstrapToken: string;
-  readonly machineID: string;
-  readonly metadata: PairingMetadata;
-  readonly existingConnector: { connector_id: string; connector_secret: string } | undefined;
-}): Promise<ConnectorRegisterResponse> {
-  const response = await fetch(new URL("/v1/connectors/register", baseUrl), {
+export async function registerConnector(
+  {
+    existingConnector,
+    baseUrl,
+    bootstrapToken,
+    machineID,
+    metadata,
+  }: {
+    readonly baseUrl: URL;
+    readonly bootstrapToken: string;
+    readonly machineID: string;
+    readonly metadata: PairingMetadata;
+    readonly existingConnector: { connector_id: string; connector_secret: string } | undefined;
+  },
+  { fetchImpl = fetch as FetchLike }: { readonly fetchImpl?: FetchLike } = {}
+): Promise<ConnectorRegisterResponse> {
+  const response = await fetchImpl(new URL("/v1/connectors/register", baseUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -200,20 +204,20 @@ async function registerConnector({
     } satisfies ConnectorRegisterRequestBody),
   });
 
+  const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    const error = await parseRelayError(response);
-    throw new Error(error ?? "Failed to register the AgenTTY relay connector.");
+    throw new Error(backendErrorDetail(payload) ?? "Failed to register the AgenTTY relay connector.");
   }
 
-  const payload = (await response.json()) as Partial<ConnectorRegisterResponse>;
+  const registration = (payload ?? {}) as Partial<ConnectorRegisterResponse>;
   if (
-    !payload.connector_id ||
-    !payload.connector_secret ||
-    !payload.relay_host_id
+    !registration.connector_id ||
+    !registration.connector_secret ||
+    !registration.relay_host_id
   ) {
     throw new Error("Relay connector registration returned an invalid payload.");
   }
-  return payload as ConnectorRegisterResponse;
+  return registration as ConnectorRegisterResponse;
 }
 
 async function downloadConnectorBinary({
@@ -616,15 +620,3 @@ async function runCapturedCommand(
   });
 }
 
-async function parseRelayError(response: Response): Promise<string | null> {
-  try {
-    const payload = (await response.json()) as {
-      readonly detail?: string;
-      readonly error?: string;
-      readonly message?: string;
-    };
-    return payload.detail ?? payload.error ?? payload.message ?? null;
-  } catch {
-    return null;
-  }
-}
