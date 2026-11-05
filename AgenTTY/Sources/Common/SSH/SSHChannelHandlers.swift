@@ -98,6 +98,11 @@ nonisolated final class RootSSHDiagnosticsHandler: ChannelInboundHandler, @unche
             return
         }
 
+        if failureRecorder.hasRecordedOutcome {
+            context.close(promise: nil)
+            return
+        }
+
         context.fireErrorCaught(error)
     }
 }

@@ -171,6 +171,7 @@
                 { "path": "RelayAndAutomaticSetupTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "ShellTitleSchedulingTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "ShortcutCommandTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
+                { "path": "SSHFailureSurfacingTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "SSHKeyImportDecryptionTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "SSHKeyImportRSATests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "SSHTransportProtectionTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },

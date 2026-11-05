@@ -34,6 +34,10 @@ nonisolated final class AgenTTYSSHFailureRecorder: @unchecked Sendable {
         }
     }
 
+    var hasRecordedOutcome: Bool {
+        queue.sync { recordedOutcome != nil }
+    }
+
     func takeOutcome() -> AgenTTYSSHTerminationOutcome? {
         queue.sync {
             defer { recordedOutcome = nil }

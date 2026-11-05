@@ -41,7 +41,7 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
         case .sshAuth:
             return AgenTTYSSHRecoveryDescription(
                 title: "SSH Authentication Failed",
-                message: "The host rejected the selected authentication method before the session could start.",
+                message: "The host didn’t accept this iPhone’s key or password. Run Automatic Setup on the host again, or add this iPhone’s public key to ~/.ssh/authorized_keys.",
                 suggestions: [
                     AgenTTYSSHRecoverySuggestion(
                         icon: "key",
@@ -52,6 +52,18 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
                         icon: "person.badge.key",
                         title: "Verify the username",
                         subtitle: "Public-key authentication must be allowed for the selected user account."
+                    ),
+                ]
+            )
+        case .hostToolsDownload:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Couldn’t Download Host Tools",
+                message: "AgenTTY reached the host, but this iPhone couldn’t download the tools AgenTTY installs there. Check the iPhone’s internet connection and retry.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "icloud.and.arrow.down",
+                        title: "Check the internet connection",
+                        subtitle: "The iPhone downloads AgenTTY’s host tools before the first session on each host."
                     ),
                 ]
             )

@@ -12,7 +12,7 @@ nonisolated enum AgenTTYHostRuntimeArtifactError: LocalizedError {
     case invalidRelativePath(String)
     case unsupportedSchemaVersion(Int)
     case checksumMismatch(name: String)
-    case unavailableCachedManifest
+    case manifestUnavailable(reason: String)
 
     var errorDescription: String? {
         switch self {
@@ -36,8 +36,8 @@ nonisolated enum AgenTTYHostRuntimeArtifactError: LocalizedError {
             "Unsupported host runtime manifest schema version: \(version)."
         case .checksumMismatch(let name):
             "Host runtime checksum mismatch for \(name)."
-        case .unavailableCachedManifest:
-            "No cached host runtime manifest is available."
+        case .manifestUnavailable(let reason):
+            "Couldn’t download the host runtime manifest: \(reason)"
         }
     }
 }
@@ -357,7 +357,9 @@ actor AgenTTYHostRuntimeArtifactStore {
             )
             return manifest
         } catch {
-            let cachedManifestData = try cachedManifestData(at: cacheURL)
+            guard let cachedManifestData = try? Data(contentsOf: cacheURL) else {
+                throw AgenTTYHostRuntimeArtifactError.manifestUnavailable(reason: error.localizedDescription)
+            }
             let cachedManifest = try decodeManifest(cachedManifestData)
             EsmaLog.terminal.notice(
                 "host runtime manifest using cache channel=\(channel.cacheKey, privacy: .public) runtime_version=\(cachedManifest.runtimeVersion, privacy: .public) error=\(String(describing: error), privacy: .public)"
@@ -435,13 +437,6 @@ actor AgenTTYHostRuntimeArtifactStore {
             }
             throw AgenTTYHostRuntimeArtifactError.manifestDecodeFailed
         }
-    }
-
-    private func cachedManifestData(at cacheURL: URL) throws -> Data {
-        guard let data = try? Data(contentsOf: cacheURL) else {
-            throw AgenTTYHostRuntimeArtifactError.unavailableCachedManifest
-        }
-        return data
     }
 
     private func manifestChannel(

@@ -163,13 +163,8 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                         try await self.runPreShellProvisionerIfNeeded()
                     } catch {
                         self.notifyDisconnect(
-                            AgenTTYSSHTerminationOutcome(
-                                category: .other,
-                                failureStage: .preShellRuntime,
-                                rawReason: "failed to prepare host runtime: \(error.localizedDescription)",
-                                wasReady: false,
-                                shouldReconnect: false
-                            )
+                            self.failureRecorder.takeOutcome()
+                                ?? Self.preShellFailureOutcome(for: error)
                         )
                         return
                     }
@@ -525,6 +520,17 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                 self.startInteractiveShell(on: childChannel)
             }
         }
+    }
+
+    nonisolated static func preShellFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
+        let downloadFailed = error is AgenTTYHostRuntimeArtifactError || error is URLError
+        return AgenTTYSSHTerminationOutcome(
+            category: .other,
+            failureStage: downloadFailed ? .hostToolsDownload : .preShellRuntime,
+            rawReason: "failed to prepare host runtime: \(error.localizedDescription)",
+            wasReady: false,
+            shouldReconnect: false
+        )
     }
 
     private func notifyDisconnect(_ outcome: AgenTTYSSHTerminationOutcome) {

@@ -15,6 +15,7 @@ nonisolated enum AgenTTYSSHDisconnectCategory: Equatable, Hashable, Sendable {
 nonisolated enum AgenTTYSSHFailureStage: Equatable, Hashable, Sendable {
     case tcpConnect
     case sshAuth
+    case hostToolsDownload
     case preShellRuntime
     case shellChannel
     case ptyBootstrap
@@ -93,7 +94,7 @@ nonisolated extension AgenTTYSSHFailureStage {
             .tcpConnect
         case .sshAuth:
             .sshAuth
-        case .preShellRuntime:
+        case .hostToolsDownload, .preShellRuntime:
             .preShellRuntime
         case .shellChannel:
             .shellChannel
