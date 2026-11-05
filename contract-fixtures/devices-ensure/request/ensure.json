@@ -1,0 +1,6 @@
+{
+  "device_id": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+  "device_secret": "device-secret",
+  "bundle_id": "dev.tuist.agentty.iOS.dev",
+  "push_environment": "development"
+}

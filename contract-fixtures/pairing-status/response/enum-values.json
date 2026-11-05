@@ -1,0 +1,37 @@
+{
+  "status": [
+    "pending",
+    "claimed",
+    "completed",
+    "failed",
+    "expired"
+  ],
+  "detected_username_source": [
+    "account_lookup",
+    "id_command",
+    "env_user",
+    "whoami_command"
+  ],
+  "host_environment_flags": [
+    "container",
+    "wsl"
+  ],
+  "host_candidate_kind": [
+    "tailscale_short",
+    "tailscale_fqdn",
+    "fqdn",
+    "single_label",
+    "local_domain"
+  ],
+  "host_candidate_source": [
+    "scutil_hostname",
+    "scutil_localhostname",
+    "hostname_fqdn",
+    "hostname",
+    "os_hostname",
+    "env_hostname",
+    "tailscale_short",
+    "tailscale_magicdns",
+    "legacy_hostname_candidates"
+  ]
+}

@@ -1,0 +1,11 @@
+{
+  "session_id": "session-1",
+  "status": "claimed",
+  "expires_at_epoch_seconds": 1800000000,
+  "claimed_at_epoch_seconds": 1799999700,
+  "public_key": "ssh-ed25519 AAAATEST agentty@fixture",
+  "connector_bootstrap": {
+    "token": "bootstrap-token",
+    "expires_at_epoch_seconds": 1800000000
+  }
+}

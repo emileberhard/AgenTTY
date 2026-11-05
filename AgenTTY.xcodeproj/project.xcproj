@@ -68,6 +68,7 @@
       "kind": "group",
       "name": "Project",
       "children": [
+        { "path": "contract-fixtures", "target-membership": [ "AgenTTY-iOS-Tests/resources" ] },
         {
           "kind": "group",
           "path": "AgenTTY",
@@ -162,6 +163,7 @@
                 { "path": "AgenTTYTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "AnalyticsTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "ChaCha20Poly1305TransportTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
+                { "path": "ContractFixtureTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "DictationErrorPresentationTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "DictationLibraryPolicyTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },
                 { "path": "HardwareKeyMappingTests.swift", "target-membership": [ "AgenTTY-iOS-Tests/compile-sources" ] },

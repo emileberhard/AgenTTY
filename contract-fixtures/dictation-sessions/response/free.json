@@ -1,0 +1,5 @@
+{
+  "relay_token": "relay-token",
+  "expires_at_epoch_seconds": 1800000000,
+  "dictation_tier": "free"
+}

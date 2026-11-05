@@ -1,0 +1,7 @@
+{
+  "detail": "Analytics host-setup payload is invalid.",
+  "event_id": "event-1",
+  "event_type": "host_setup_flow_event",
+  "field": "saved_host_count",
+  "rule": "positive"
+}

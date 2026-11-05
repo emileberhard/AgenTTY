@@ -201,128 +201,6 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
     }
 
     @MainActor
-    func testPairingRelayClientFetchStatusPostsIdentityAndDecodesCompletion() async throws {
-        let baseURL = URL(string: "https://agentty.esmadil.se")!
-        let identity = AgenTTYNotificationDeviceIdentity(
-            deviceID: UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!,
-            deviceSecret: "device-secret-2"
-        )
-        let transport = PairingClientTestTransport { request, _ in
-            let url = try XCTUnwrap(request.url)
-            switch url.path {
-            case "/v1/pairing-sessions/session-1/status":
-                return try makeJSONResponse(
-                    url: url,
-                    statusCode: 200,
-                    body: [
-                        "session_id": "session-1",
-                        "status": "completed",
-                        "expires_at_epoch_seconds": 456,
-                        "completion": [
-                            "detected_username": "developer",
-                            "detected_username_source": "env_user",
-                            "detected_username_suspicious": false,
-                            "hostname_candidates": ["dev-host", "dev-host.local"],
-                            "host_candidates": [
-                                [
-                                    "value": "dev-host",
-                                    "kind": "single_label",
-                                    "source": "hostname",
-                                    "rank": 1,
-                                ],
-                            ],
-                            "host_environment_flags": [],
-                            "uses_tailscale": true,
-                            "ssh_host_public_keys": ["ssh-ed25519 AAAAHOSTKEY"],
-                            "relay_host_id": "relay-host-1",
-                            "relay_capable": true,
-                            "port": 22,
-                            "platform": "macos",
-                        ],
-                    ]
-                )
-            default:
-                throw NSError(domain: "PairingClientTestTransport", code: 1)
-            }
-        }
-        let client = AgenTTYPairingRelayClient(
-            urlSession: makeRequestHandlerURLSession(handler: transport.handle),
-            baseURLProvider: { baseURL },
-            deviceIdentityProvider: { identity }
-        )
-
-        let status = try await client.fetchPairingSessionStatus(sessionID: "session-1")
-
-        XCTAssertEqual(status.sessionID, "session-1")
-        XCTAssertEqual(status.status, .completed)
-        XCTAssertEqual(status.expiresAtEpochSeconds, 456)
-        let completion = try XCTUnwrap(status.completion)
-        XCTAssertEqual(completion.detectedUsername, "developer")
-        XCTAssertEqual(completion.hostnameCandidates, ["dev-host", "dev-host.local"])
-        XCTAssertEqual(completion.sshHostPublicKeys, ["ssh-ed25519 AAAAHOSTKEY"])
-        XCTAssertEqual(completion.relayHostID, "relay-host-1")
-        XCTAssertEqual(completion.relayCapable, true)
-        XCTAssertEqual(completion.port, 22)
-        XCTAssertEqual(completion.platform, "macos")
-        XCTAssertTrue(completion.shouldUseTailscale)
-
-        let request = try XCTUnwrap(transport.requests.first)
-        XCTAssertEqual(
-            request.url?.absoluteString,
-            "https://agentty.esmadil.se/v1/pairing-sessions/session-1/status"
-        )
-        let requestBody = try jsonObject(from: request)
-        XCTAssertEqual(Set(requestBody.keys), ["device_id", "device_secret"])
-        XCTAssertEqual(requestBody["device_id"] as? String, identity.deviceID.uuidString)
-        XCTAssertEqual(requestBody["device_secret"] as? String, identity.deviceSecret)
-    }
-
-    @MainActor
-    func testSSHRelayClientPostsIdentityAndRelayHostIDAndDecodesResponse() async throws {
-        let baseURL = URL(string: "https://agentty.esmadil.se")!
-        let identity = AgenTTYNotificationDeviceIdentity(
-            deviceID: UUID(uuidString: "99999999-2222-3333-4444-555555555555")!,
-            deviceSecret: "relay-device-secret"
-        )
-        var capturedRequests: [URLRequest] = []
-        let client = AgenTTYSSHRelayClient(
-            urlSession: makeRequestHandlerURLSession { request in
-                capturedRequests.append(request)
-                let url = try XCTUnwrap(request.url)
-                return try makeJSONResponse(
-                    url: url,
-                    statusCode: 200,
-                    body: [
-                        "relay_session_id": "relay-session-1",
-                        "expires_at_epoch_seconds": 123,
-                        "authorization_token": "relay-token-1",
-                        "websocket_url": "wss://agentty.esmadil.se/v1/ssh-relay-sessions/relay-session-1/ws",
-                    ]
-                )
-            },
-            baseURLProvider: { baseURL },
-            deviceIdentityProvider: { identity }
-        )
-
-        let session = try await client.issueRelaySession(relayHostID: "relay-host-1")
-
-        XCTAssertEqual(session.relaySessionID, "relay-session-1")
-        XCTAssertEqual(session.expiresAtEpochSeconds, 123)
-        XCTAssertEqual(session.authorizationToken, "relay-token-1")
-        XCTAssertEqual(
-            session.websocketURL,
-            "wss://agentty.esmadil.se/v1/ssh-relay-sessions/relay-session-1/ws"
-        )
-
-        let request = try XCTUnwrap(capturedRequests.first)
-        XCTAssertEqual(request.url?.absoluteString, "https://agentty.esmadil.se/v1/ssh-relay-sessions")
-        let body = try jsonObject(from: request)
-        XCTAssertEqual(body["device_id"] as? String, identity.deviceID.uuidString)
-        XCTAssertEqual(body["device_secret"] as? String, identity.deviceSecret)
-        XCTAssertEqual(body["relay_host_id"] as? String, "relay-host-1")
-    }
-
-    @MainActor
     func testSSHRelayClientRetriesUnauthorizedAfterEnsuringIdentity() async throws {
         let baseURL = URL(string: "https://agentty.esmadil.se")!
         let identity = AgenTTYNotificationDeviceIdentity(
@@ -367,7 +245,7 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
     }
 
     @MainActor
-    func testSSHRelayClientMapsForbiddenToRelayConnectorOffline() async {
+    func testSSHRelayClientMapsUncodedForbiddenToRelayConnectorOffline() async {
         let client = AgenTTYSSHRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
                 let url = try XCTUnwrap(request.url)

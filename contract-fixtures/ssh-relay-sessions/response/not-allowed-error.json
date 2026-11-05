@@ -1,0 +1,4 @@
+{
+  "code": "relay_not_allowed",
+  "detail": "This device is not allowed to use relay access for that host."
+}

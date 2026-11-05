@@ -1,0 +1,7 @@
+{
+  "bootstrap_token": "bootstrap-token",
+  "machine_id": "machine-1",
+  "ssh_username": "developer",
+  "platform": "linux",
+  "port": 22
+}

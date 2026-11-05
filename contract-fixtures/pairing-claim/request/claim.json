@@ -1,0 +1,6 @@
+{
+  "code": "ABCD-EFGH",
+  "device_id": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+  "device_secret": "device-secret",
+  "public_key": "ssh-ed25519 AAAATEST agentty@fixture"
+}

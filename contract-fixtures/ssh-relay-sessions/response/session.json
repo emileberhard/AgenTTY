@@ -1,0 +1,6 @@
+{
+  "relay_session_id": "relay-session-1",
+  "expires_at_epoch_seconds": 1800000000,
+  "authorization_token": "relay-authorization-token",
+  "websocket_url": "wss://relay.example.test/v1/ssh-relay-sessions/relay-session-1/ws"
+}

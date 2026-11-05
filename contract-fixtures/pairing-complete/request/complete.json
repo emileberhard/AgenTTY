@@ -1,0 +1,28 @@
+{
+  "host_token": "host-token",
+  "detected_username": "developer",
+  "detected_username_source": "account_lookup",
+  "detected_username_suspicious": true,
+  "host_candidates": [
+    {
+      "value": "agentty.local",
+      "kind": "local_domain",
+      "source": "hostname_fqdn",
+      "rank": 1
+    }
+  ],
+  "host_environment_flags": [
+    "wsl"
+  ],
+  "hostname_candidates": [
+    "agentty.local"
+  ],
+  "uses_tailscale": false,
+  "ssh_host_public_keys": [
+    "ssh-ed25519 AAAAHOSTKEY"
+  ],
+  "relay_capable": true,
+  "relay_host_id": "relay-host-1",
+  "port": 22,
+  "platform": "linux"
+}

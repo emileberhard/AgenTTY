@@ -1,0 +1,5 @@
+{
+  "connector_id": "connector-1",
+  "connector_secret": "connector-secret",
+  "relay_host_id": "relay-host-1"
+}

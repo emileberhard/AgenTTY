@@ -1,0 +1,7 @@
+{
+  "session_id": "session-1",
+  "pairing_code": "ABCD-EFGH",
+  "qr_payload": "agentty://pair?code=ABCD-EFGH",
+  "host_token": "host-token",
+  "expires_at_epoch_seconds": 1800000000
+}

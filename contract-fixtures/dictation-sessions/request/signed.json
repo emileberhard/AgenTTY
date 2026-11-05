@@ -1,0 +1,6 @@
+{
+  "device_id": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
+  "device_secret": "device-secret",
+  "signed_app_transaction": "signed-app-transaction",
+  "signed_lifetime_transaction": "signed-lifetime-transaction"
+}
