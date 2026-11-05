@@ -15,15 +15,10 @@ nonisolated enum SSHCommandFailure: LocalizedError, Equatable, Sendable {
 
     var hostMessage: String? {
         guard case .remote(_, let output) = self else { return nil }
-        let lastLine = output
+        return output
             .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { AgenTTYDisplayText.sanitized(String($0), maximumLength: 200) }
             .last { !$0.isEmpty }
-        guard let lastLine else { return nil }
-        let printable = String(String.UnicodeScalarView(lastLine.unicodeScalars.filter {
-            !CharacterSet.controlCharacters.contains($0)
-        }))
-        return String(printable.prefix(200))
     }
 
     var errorDescription: String? {

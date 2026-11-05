@@ -182,6 +182,14 @@ struct ConnectionFailureMappingTests {
     }
 
     @Test
+    func displayTextDropsControlCharactersAndIsBounded() {
+        #expect(AgenTTYDisplayText.sanitized("\u{1B}[31mdenied\r\n\tnow\u{7F}", maximumLength: 100) == "[31mdenied now")
+        #expect(AgenTTYDisplayText.sanitized("\u{202E}evil\u{202C} name", maximumLength: 100) == "evil name")
+        #expect(AgenTTYDisplayText.sanitized(" \n ", maximumLength: 100).isEmpty)
+        #expect(AgenTTYDisplayText.sanitized(String(repeating: "x", count: 50), maximumLength: 10) == String(repeating: "x", count: 10))
+    }
+
+    @Test
     func authorizedKeyCommentIsBounded() {
         let comment = AgenTTYAuthorizedKeyLine.comment(forKeyName: String(repeating: "k", count: 500))
         #expect(comment.count == AgenTTYAuthorizedKeyLine.maximumCommentLength)

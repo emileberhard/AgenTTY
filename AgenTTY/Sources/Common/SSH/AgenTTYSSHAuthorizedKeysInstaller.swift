@@ -9,10 +9,7 @@ nonisolated enum AgenTTYAuthorizedKeyLine {
     }
 
     static func comment(forKeyName keyName: String) -> String {
-        let printableName = String(String.UnicodeScalarView(keyName.unicodeScalars.map {
-            CharacterSet.controlCharacters.contains($0) ? " " : $0
-        }))
-        let name = printableName.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let name = AgenTTYDisplayText.sanitized(keyName, maximumLength: maximumCommentLength)
         let comment: String
         if name.isEmpty {
             comment = "AgenTTY"

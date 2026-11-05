@@ -32,7 +32,9 @@ nonisolated struct AgenTTYBackendError: LocalizedError, Sendable, Equatable {
         let decoded = try? JSONDecoder().decode(AgenTTYBackendErrorBody.self, from: body)
         self.status = status
         code = decoded?.code
-        detail = decoded?.detail.flatMap(Self.boundedDetail)
+        detail = decoded?.detail
+            .map { AgenTTYDisplayText.sanitized($0, maximumLength: Self.maximumDetailLength) }
+            .flatMap { $0.isEmpty ? nil : $0 }
     }
 
     var errorDescription: String? {
@@ -40,12 +42,6 @@ nonisolated struct AgenTTYBackendError: LocalizedError, Sendable, Equatable {
             return detail
         }
         return Self.temporarilyUnavailableMessage
-    }
-
-    private static func boundedDetail(_ raw: String) -> String? {
-        let line = raw.split(whereSeparator: \.isNewline).joined(separator: " ")
-            .trimmingCharacters(in: .whitespaces)
-        return line.isEmpty ? nil : String(line.prefix(maximumDetailLength))
     }
 }
 

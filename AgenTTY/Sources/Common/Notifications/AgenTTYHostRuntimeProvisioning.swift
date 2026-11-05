@@ -50,17 +50,12 @@ enum AgenTTYRemoteHostPlatform: String, Sendable {
 
         guard let platform = parse(operatingSystem: lines[0].lowercased(), architecture: lines[1].lowercased()) else {
             throw AgenTTYHostRuntimeProvisionError.unsupportedHostPlatform(
-                operatingSystem: displayName(lines[0]),
-                architecture: displayName(lines[1])
+                operatingSystem: AgenTTYDisplayText.sanitized(lines[0], maximumLength: 40),
+                architecture: AgenTTYDisplayText.sanitized(lines[1], maximumLength: 40)
             )
         }
 
         return platform
-    }
-
-    private static func displayName(_ unameField: String) -> String {
-        let printable = unameField.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
-        return String(String(String.UnicodeScalarView(printable)).prefix(40))
     }
 
     private static func parse(operatingSystem: String, architecture: String) -> Self? {
