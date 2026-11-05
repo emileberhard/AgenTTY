@@ -39,21 +39,35 @@ private nonisolated struct AgenTTYAnalyticsAppSessionStart: Sendable {
     var hadTerminalInput: Bool
 }
 
-private nonisolated struct AgenTTYAnalyticsValidationRejection: Sendable {
-    let statusCode: Int
-    let detail: String
+nonisolated struct AgenTTYAnalyticsValidationRejection: Sendable {
+    let backendError: AgenTTYBackendError
     let eventID: String?
     let eventType: AgenTTYAnalyticsEventType?
     let field: String?
     let rule: String?
-}
 
-private nonisolated struct AgenTTYAnalyticsValidationRejectionBody: Decodable {
-    let detail: String?
-    let eventID: String?
-    let eventType: AgenTTYAnalyticsEventType?
-    let field: String?
-    let rule: String?
+    init(status: Int, body: Data) {
+        let fields = try? JSONDecoder().decode(Fields.self, from: body)
+        backendError = AgenTTYBackendError(status: status, body: body)
+        eventID = fields?.eventID
+        eventType = fields?.eventType.flatMap(AgenTTYAnalyticsEventType.init(rawValue:))
+        field = fields?.field
+        rule = fields?.rule
+    }
+
+    private struct Fields: Decodable {
+        let eventID: String?
+        let eventType: String?
+        let field: String?
+        let rule: String?
+
+        private enum CodingKeys: String, CodingKey {
+            case eventID = "event_id"
+            case eventType = "event_type"
+            case field
+            case rule
+        }
+    }
 }
 
 private nonisolated enum AgenTTYAnalyticsClientError: LocalizedError {
@@ -61,7 +75,6 @@ private nonisolated enum AgenTTYAnalyticsClientError: LocalizedError {
     case invalidResponse
     case unauthorized
     case validationRejected(AgenTTYAnalyticsValidationRejection)
-    case unexpectedStatusCode(Int, String)
 
     var errorDescription: String? {
         switch self {
@@ -72,9 +85,7 @@ private nonisolated enum AgenTTYAnalyticsClientError: LocalizedError {
         case .unauthorized:
             "Analytics backend rejected device credentials."
         case .validationRejected(let rejection):
-            "Analytics backend rejected validation for \(rejection.eventType?.rawValue ?? "unknown_event"): \(rejection.detail)"
-        case .unexpectedStatusCode(let statusCode, let preview):
-            "Analytics backend returned \(statusCode): \(preview)"
+            "Analytics backend rejected validation for \(rejection.eventType?.rawValue ?? "unknown_event"): \(rejection.backendError.detail ?? "none")"
         }
     }
 }
@@ -553,7 +564,7 @@ actor AgenTTYAnalyticsClient {
         originalBatch: [AgenTTYAnalyticsQueuedEvent]
     ) {
         EsmaLog.app.error(
-            "event=analytics_validation_rejected status=\(rejection.statusCode, privacy: .public) event_id=\(rejectedEvent.eventID, privacy: .public) event_type=\(rejectedEvent.eventType.rawValue, privacy: .public) field=\(rejection.field ?? "none", privacy: .public) rule=\(rejection.rule ?? "none", privacy: .public)"
+            "event=analytics_validation_rejected status=\(rejection.backendError.status, privacy: .public) event_id=\(rejectedEvent.eventID, privacy: .public) event_type=\(rejectedEvent.eventType.rawValue, privacy: .public) field=\(rejection.field ?? "none", privacy: .public) rule=\(rejection.rule ?? "none", privacy: .public)"
         )
 
         let now = dateProvider()
@@ -564,8 +575,8 @@ actor AgenTTYAnalyticsClient {
         lastValidationRejectionSentryCaptureAt = now
 
         var data = analyticsBatchDiagnosticData(originalBatch)
-        data["status_code"] = String(rejection.statusCode)
-        data["server_detail"] = rejection.detail
+        data["status_code"] = String(rejection.backendError.status)
+        data["server_detail"] = rejection.backendError.detail ?? "none"
         data["rejected_event_id"] = rejectedEvent.eventID
         data["rejected_event_type"] = rejectedEvent.eventType.rawValue
         data["rejected_payload_version"] = rejectedEvent.payloadVersion.map(String.init) ?? "none"
@@ -737,30 +748,11 @@ actor AgenTTYAnalyticsClient {
             throw AgenTTYAnalyticsClientError.unauthorized
         case 400:
             throw AgenTTYAnalyticsClientError.validationRejected(
-                validationRejection(from: data, statusCode: httpResponse.statusCode)
+                AgenTTYAnalyticsValidationRejection(status: httpResponse.statusCode, body: data)
             )
         default:
-            let responsePreview = AgenTTYRelayTransport.responsePreview(from: data)
-            throw AgenTTYAnalyticsClientError.unexpectedStatusCode(
-                httpResponse.statusCode,
-                responsePreview
-            )
+            throw AgenTTYBackendError(status: httpResponse.statusCode, body: data)
         }
-    }
-
-    private func validationRejection(
-        from data: Data,
-        statusCode: Int
-    ) -> AgenTTYAnalyticsValidationRejection {
-        let body = try? decoder.decode(AgenTTYAnalyticsValidationRejectionBody.self, from: data)
-        return AgenTTYAnalyticsValidationRejection(
-            statusCode: statusCode,
-            detail: body?.detail ?? AgenTTYRelayTransport.responsePreview(from: data),
-            eventID: body?.eventID,
-            eventType: body?.eventType,
-            field: body?.field,
-            rule: body?.rule
-        )
     }
 
     private func loadOutboxIfNeeded() async {

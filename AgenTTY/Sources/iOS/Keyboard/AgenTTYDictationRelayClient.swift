@@ -2,19 +2,19 @@ import Foundation
 import SpeechKit
 import StoreKit
 
-private nonisolated struct AgenTTYDictationSessionRequest: Encodable, Sendable {
+nonisolated struct AgenTTYDictationSessionRequest: Encodable, Sendable {
     let deviceID: UUID
     let deviceSecret: String
     let signedAppTransaction: String
     let signedLifetimeTransaction: String?
 }
 
-private nonisolated struct AgenTTYLegacyDictationSessionRequest: Encodable, Sendable {
+nonisolated struct AgenTTYLegacyDictationSessionRequest: Encodable, Sendable {
     let deviceID: UUID
     let deviceSecret: String
 }
 
-private nonisolated struct AgenTTYDictationRelaySession: Decodable, Sendable {
+nonisolated struct AgenTTYDictationRelaySession: Decodable, Sendable {
     enum Tier: String, Decodable, Sendable {
         case free
         case lifetime
@@ -107,29 +107,30 @@ actor AgenTTYDictationRelayClient {
                 body: AgenTTYLegacyDictationSessionRequest(deviceID: identity.deviceID, deviceSecret: identity.deviceSecret)
             )
         }
-        var (data, response) = try await urlSession.data(for: request)
-        if (response as? HTTPURLResponse)?.statusCode == 401 {
+        let data: Data
+        do {
+            data = try await sendRepairingDeviceIdentity(request)
+        } catch let error as AgenTTYBackendError {
+            switch error.status {
+            case 401: throw SpeechKitError.relayRejected(kind: "unauthorized")
+            case 403: throw SpeechKitError.relayRejected(kind: "verification_required")
+            default: throw error
+            }
+        }
+        let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYDictationRelaySession.self, from: data)
+        guard signedAppTransaction == nil || session.dictationTier != nil else { throw SpeechKitError.invalidResponse }
+        return session
+    }
+
+    private func sendRepairingDeviceIdentity(_ request: URLRequest) async throws -> Data {
+        do {
+            return try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
+        } catch let error as AgenTTYBackendError where error.status == 401 {
             try await AgenTTYRelayTransport.ensureCurrentDeviceIdentity(
                 baseURL: AgenTTYRelayConfiguration.baseURL,
                 urlSession: urlSession
             )
-            (data, response) = try await urlSession.data(for: request)
-        }
-        guard let response = response as? HTTPURLResponse else { throw SpeechKitError.invalidResponse }
-        switch response.statusCode {
-        case 200:
-            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYDictationRelaySession.self, from: data)
-            guard signedAppTransaction == nil || session.dictationTier != nil else { throw SpeechKitError.invalidResponse }
-            return session
-        case 401:
-            throw SpeechKitError.relayRejected(kind: "unauthorized")
-        case 403:
-            throw SpeechKitError.relayRejected(kind: "verification_required")
-        default:
-            throw SpeechKitError.httpFailure(
-                statusCode: response.statusCode,
-                body: HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
-            )
+            return try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
         }
     }
 }

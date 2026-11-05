@@ -106,7 +106,6 @@ private nonisolated struct AgenTTYPairingSessionStatusRequest: Encodable, Sendab
 enum AgenTTYPairingRelayError: LocalizedError {
     case deviceIdentityRejected
     case invalidResponse
-    case unexpectedStatusCode(Int)
 
     var errorDescription: String? {
         switch self {
@@ -114,8 +113,6 @@ enum AgenTTYPairingRelayError: LocalizedError {
             "This iPhone could not be authorized with the pairing relay. Please try automatic setup again in a few seconds."
         case .invalidResponse:
             "Invalid pairing backend response."
-        case .unexpectedStatusCode(let statusCode):
-            "Unexpected pairing backend status code: \(statusCode)."
         }
     }
 }
@@ -232,36 +229,7 @@ final class AgenTTYPairingRelayClient {
             )
         )
 
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            EsmaLog.notifications.error(
-                "event=pairing_status_fetch_failure reason=invalid_response_type session_id=\(sessionID, privacy: .public)"
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing status fetch failed: invalid response type",
-                category: "pairing",
-                level: "error",
-                data: ["session_id": sessionID]
-            )
-            throw AgenTTYPairingRelayError.invalidResponse
-        }
-        guard httpResponse.statusCode == 200 else {
-            let bodyPreview = AgenTTYRelayTransport.responsePreview(from: data)
-            EsmaLog.notifications.error(
-                "event=pairing_status_fetch_failure session_id=\(sessionID, privacy: .public) status=\(httpResponse.statusCode) body=\(bodyPreview, privacy: .public)"
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing status fetch failed",
-                category: "pairing",
-                level: "error",
-                data: [
-                    "session_id": sessionID,
-                    "status": String(httpResponse.statusCode),
-                    "body_preview": bodyPreview,
-                ]
-            )
-            throw AgenTTYPairingRelayError.unexpectedStatusCode(httpResponse.statusCode)
-        }
+        let data = try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
         do {
             let status = try Self.makePairingDecoder().decode(AgenTTYPairingSessionStatusResponse.self, from: data)
             EsmaLog.notifications.notice(
@@ -279,27 +247,8 @@ final class AgenTTYPairingRelayClient {
             )
             return status
         } catch {
-            let bodyPreview = AgenTTYRelayTransport.responsePreview(from: data)
             EsmaLog.notifications.error(
-                "event=pairing_status_decode_failure session_id=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public) body=\(bodyPreview, privacy: .public)"
-            )
-            AgenTTYSentryService.capture(
-                error: error,
-                context: "pairing_status_decode_failure",
-                data: [
-                    "session_id": sessionID,
-                    "body_preview": bodyPreview,
-                ]
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing status decode failed",
-                category: "pairing",
-                level: "error",
-                data: [
-                    "session_id": sessionID,
-                    "error": String(describing: error),
-                    "body_preview": bodyPreview,
-                ]
+                "event=pairing_status_decode_failure session_id=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public)"
             )
             throw AgenTTYPairingRelayError.invalidResponse
         }
@@ -333,40 +282,11 @@ final class AgenTTYPairingRelayClient {
             body: requestBody,
             encoder: Self.makePairingEncoder()
         )
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            EsmaLog.notifications.error("event=pairing_claim_failure reason=invalid_response_type")
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing claim failed: invalid response type",
-                category: "pairing",
-                level: "error"
-            )
-            throw AgenTTYPairingRelayError.invalidResponse
-        }
-        guard httpResponse.statusCode == 200 else {
-            let bodyPreview = AgenTTYRelayTransport.responsePreview(from: data)
-            if httpResponse.statusCode == 401 {
-                EsmaLog.notifications.notice(
-                    "event=pairing_claim_failure status=\(httpResponse.statusCode) body=\(bodyPreview, privacy: .public)"
-                )
-            } else {
-                EsmaLog.notifications.error(
-                    "event=pairing_claim_failure status=\(httpResponse.statusCode) body=\(bodyPreview, privacy: .public)"
-                )
-            }
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing claim failed",
-                category: "pairing",
-                level: httpResponse.statusCode == 401 ? "warning" : "error",
-                data: [
-                    "status": String(httpResponse.statusCode),
-                    "body_preview": bodyPreview,
-                ]
-            )
-            if httpResponse.statusCode == 401 {
-                throw AgenTTYPairingRelayError.deviceIdentityRejected
-            }
-            throw AgenTTYPairingRelayError.unexpectedStatusCode(httpResponse.statusCode)
+        let data: Data
+        do {
+            data = try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
+        } catch let error as AgenTTYBackendError where error.status == 401 {
+            throw AgenTTYPairingRelayError.deviceIdentityRejected
         }
         do {
             let claim = try Self.makePairingDecoder().decode(AgenTTYClaimedPairingSession.self, from: data)
@@ -384,23 +304,8 @@ final class AgenTTYPairingRelayClient {
             )
             return claim
         } catch {
-            let bodyPreview = AgenTTYRelayTransport.responsePreview(from: data)
             EsmaLog.notifications.error(
-                "event=pairing_claim_decode_failure error=\(String(describing: error), privacy: .public) body=\(bodyPreview, privacy: .public)"
-            )
-            AgenTTYSentryService.capture(
-                error: error,
-                context: "pairing_claim_decode_failure",
-                data: ["body_preview": bodyPreview]
-            )
-            AgenTTYSentryService.addBreadcrumb(
-                message: "Pairing claim decode failed",
-                category: "pairing",
-                level: "error",
-                data: [
-                    "error": String(describing: error),
-                    "body_preview": bodyPreview,
-                ]
+                "event=pairing_claim_decode_failure error=\(String(describing: error), privacy: .public)"
             )
             throw AgenTTYPairingRelayError.invalidResponse
         }
@@ -409,24 +314,11 @@ final class AgenTTYPairingRelayClient {
     private func ensureDeviceIdentity(identity: AgenTTYNotificationDeviceIdentity) async throws {
         do {
             try await deviceIdentityEnsurer(identity, baseURL, urlSession)
-        } catch let error as AgenTTYRelayTransportError {
-            switch error {
-            case .unauthorized:
-                EsmaLog.notifications.error(
-                    "event=pairing_claim_failure reason=device_identity_rejected device_id=\(identity.deviceID.uuidString, privacy: .public)"
-                )
-                AgenTTYSentryService.addBreadcrumb(
-                    message: "Pairing claim failed: device identity rejected",
-                    category: "pairing",
-                    level: "error",
-                    data: ["device_id": identity.deviceID.uuidString]
-                )
-                throw AgenTTYPairingRelayError.deviceIdentityRejected
-            case .missingBundleIdentifier, .invalidResponse:
-                throw AgenTTYPairingRelayError.invalidResponse
-            case .unexpectedStatusCode(let statusCode):
-                throw AgenTTYPairingRelayError.unexpectedStatusCode(statusCode)
-            }
+        } catch let error as AgenTTYBackendError where error.status == 401 {
+            EsmaLog.notifications.error(
+                "event=pairing_claim_failure reason=device_identity_rejected device_id=\(identity.deviceID.uuidString, privacy: .public)"
+            )
+            throw AgenTTYPairingRelayError.deviceIdentityRejected
         }
     }
 

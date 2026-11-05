@@ -13,8 +13,6 @@ nonisolated struct AgenTTYNotifyRelaySession: Codable, Sendable {
 enum AgenTTYRelayTransportError: LocalizedError, Sendable {
     case missingBundleIdentifier
     case invalidResponse
-    case unauthorized
-    case unexpectedStatusCode(Int)
 
     var errorDescription: String? {
         switch self {
@@ -22,10 +20,6 @@ enum AgenTTYRelayTransportError: LocalizedError, Sendable {
             "Missing bundle identifier."
         case .invalidResponse:
             "Invalid backend response."
-        case .unauthorized:
-            "Unauthorized backend request."
-        case .unexpectedStatusCode(let statusCode):
-            "Unexpected backend status code: \(statusCode)."
         }
     }
 }
@@ -118,15 +112,9 @@ final class AgenTTYNotifyRelayClient {
             body: requestBody
         )
 
-        let (_, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AgenTTYRelayTransportError.invalidResponse
-        }
-        guard httpResponse.statusCode == 204 else {
-            throw AgenTTYRelayTransportError.unexpectedStatusCode(httpResponse.statusCode)
-        }
+        _ = try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 204)
         userDefaults.set(fingerprint, forKey: Self.registrationFingerprintStorageKey)
-        EsmaLog.notifications.notice("event=relay_register_success status=\(httpResponse.statusCode)")
+        EsmaLog.notifications.notice("event=relay_register_success")
         return true
     }
 
@@ -145,51 +133,17 @@ final class AgenTTYNotifyRelayClient {
             path: "v1/relay-sessions",
             body: requestBody
         )
-        let (data, response) = try await urlSession.data(for: request)
-        return try await decodeRelaySessionResponse(
-            data: data,
-            response: response,
-            requestBody: requestBody
-        )
-    }
-
-    private func decodeRelaySessionResponse(
-        data: Data,
-        response: URLResponse,
-        requestBody: AgenTTYRelaySessionRequest
-    ) async throws -> AgenTTYNotifyRelaySession {
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AgenTTYRelayTransportError.invalidResponse
-        }
-        if httpResponse.statusCode == 200 {
-            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYNotifyRelaySession.self, from: data)
-            EsmaLog.notifications.notice(
-                "event=relay_session_success expires_at=\(session.expiresAtEpochSeconds) retry=no"
-            )
-            return session
-        }
-        if httpResponse.statusCode == 401 {
+        let data: Data
+        do {
+            data = try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
+        } catch let error as AgenTTYBackendError where error.status == 401 {
             EsmaLog.notifications.error("event=relay_session_retry reason=unauthorized")
             _ = try await registerPendingDeviceIfPossible(force: true)
-            let retryRequest = try AgenTTYRelayTransport.makeJSONRequest(
-                baseURL: baseURL,
-                path: "v1/relay-sessions",
-                body: requestBody
-            )
-            let (retryData, retryResponse) = try await urlSession.data(for: retryRequest)
-            guard let retryHTTPResponse = retryResponse as? HTTPURLResponse else {
-                throw AgenTTYRelayTransportError.invalidResponse
-            }
-            guard retryHTTPResponse.statusCode == 200 else {
-                throw AgenTTYRelayTransportError.unexpectedStatusCode(retryHTTPResponse.statusCode)
-            }
-            let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYNotifyRelaySession.self, from: retryData)
-            EsmaLog.notifications.notice(
-                "event=relay_session_success expires_at=\(session.expiresAtEpochSeconds) retry=yes"
-            )
-            return session
+            data = try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
         }
-        throw AgenTTYRelayTransportError.unexpectedStatusCode(httpResponse.statusCode)
+        let session = try AgenTTYRelayTransport.makeDecoder().decode(AgenTTYNotifyRelaySession.self, from: data)
+        EsmaLog.notifications.notice("event=relay_session_success expires_at=\(session.expiresAtEpochSeconds)")
+        return session
     }
 
     private func registrationFingerprint(for requestBody: AgenTTYDeviceRegistrationRequest) -> String {

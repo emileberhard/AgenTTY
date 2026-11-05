@@ -4,10 +4,25 @@ enum AgenTTYSSHRelayError: LocalizedError {
     case invalidRelayHostID
     case invalidResponse
     case relayConnectorOffline
-    case unauthorized
-    case unexpectedStatusCode(Int)
+    case unauthorized(AgenTTYBackendError)
+    case unexpectedStatusCode(AgenTTYBackendError)
     case websocketOpenTimedOut
     case resourceLimit(String)
+
+    init(_ error: AgenTTYBackendError) {
+        switch (error.status, error.code) {
+        case (401, _):
+            self = .unauthorized(error)
+        case (403, nil), (403, "relay_connector_offline"):
+            self = .relayConnectorOffline
+        case (403, _):
+            self = .unauthorized(error)
+        case (429, _):
+            self = .resourceLimit(error.localizedDescription)
+        default:
+            self = .unexpectedStatusCode(error)
+        }
+    }
 
     var errorDescription: String? {
         switch self {
@@ -19,19 +34,12 @@ enum AgenTTYSSHRelayError: LocalizedError {
             "Invalid relay backend response."
         case .relayConnectorOffline:
             "Relay connector is offline for this host."
-        case .unauthorized:
-            "Relay backend rejected this device identity."
-        case .unexpectedStatusCode(let statusCode):
-            "Unexpected relay backend status code: \(statusCode)."
+        case .unauthorized(let error), .unexpectedStatusCode(let error):
+            error.localizedDescription
         case .websocketOpenTimedOut:
             "Relay websocket did not open in time."
         }
     }
-}
-
-private struct AgenTTYRelayResourceLimit: Decodable {
-    let code: String
-    let detail: String
 }
 
 private struct AgenTTYSSHRelaySessionRequest: Codable, Sendable {
@@ -110,52 +118,36 @@ final class AgenTTYSSHRelayClient {
             relayHostID: normalizedRelayHostID
         )
         let baseURL = baseURLProvider()
-        do {
-            return try await sendIssueRelaySessionRequest(requestBody, baseURL: baseURL)
-        } catch AgenTTYSSHRelayError.unauthorized {
-            try await deviceIdentityEnsurer(baseURL, urlSession)
-            return try await sendIssueRelaySessionRequest(requestBody, baseURL: baseURL)
-        }
-    }
-
-    private func sendIssueRelaySessionRequest(
-        _ requestBody: AgenTTYSSHRelaySessionRequest,
-        baseURL: URL
-    ) async throws -> AgenTTYSSHRelaySession {
         var request = try AgenTTYRelayTransport.makeJSONRequest(
             baseURL: baseURL,
             path: "v1/ssh-relay-sessions",
             body: requestBody
         )
         request.setValue("1", forHTTPHeaderField: "x-agentty-resource-errors")
-        let (data, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
+        let data: Data
+        do {
+            data = try await sendRepairingDeviceIdentity(request, baseURL: baseURL)
+        } catch let error as AgenTTYBackendError {
+            throw AgenTTYSSHRelayError(error)
+        } catch AgenTTYRelayTransportError.invalidResponse {
             throw AgenTTYSSHRelayError.invalidResponse
         }
+        do {
+            // The shared relay decoder uses convertFromSnakeCase, which turns
+            // relay_session_id into relaySessionId and breaks acronym-backed
+            // properties like relaySessionID/websocketURL.
+            return try Self.makeRelaySessionDecoder().decode(AgenTTYSSHRelaySession.self, from: data)
+        } catch {
+            throw AgenTTYSSHRelayError.invalidResponse
+        }
+    }
 
-        switch httpResponse.statusCode {
-        case 200:
-            do {
-                // The shared relay decoder uses convertFromSnakeCase, which turns
-                // relay_session_id into relaySessionId and breaks acronym-backed
-                // properties like relaySessionID/websocketURL.
-                let session = try Self.makeRelaySessionDecoder().decode(
-                    AgenTTYSSHRelaySession.self,
-                    from: data
-                )
-                return session
-            } catch {
-                throw AgenTTYSSHRelayError.invalidResponse
-            }
-        case 401:
-            throw AgenTTYSSHRelayError.unauthorized
-        case 403:
-            throw AgenTTYSSHRelayError.relayConnectorOffline
-        case 429:
-            let limit = try? JSONDecoder().decode(AgenTTYRelayResourceLimit.self, from: data)
-            throw AgenTTYSSHRelayError.resourceLimit(limit?.detail ?? "Relay request limit reached. Please try again later.")
-        default:
-            throw AgenTTYSSHRelayError.unexpectedStatusCode(httpResponse.statusCode)
+    private func sendRepairingDeviceIdentity(_ request: URLRequest, baseURL: URL) async throws -> Data {
+        do {
+            return try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
+        } catch let error as AgenTTYBackendError where error.status == 401 {
+            try await deviceIdentityEnsurer(baseURL, urlSession)
+            return try await AgenTTYRelayTransport.send(request, using: urlSession, expecting: 200)
         }
     }
 

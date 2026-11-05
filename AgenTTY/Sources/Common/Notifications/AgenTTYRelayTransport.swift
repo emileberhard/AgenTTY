@@ -15,6 +15,40 @@ nonisolated struct AgenTTYRelaySessionRequest: Encodable, Sendable {
     let scope = "notify"
 }
 
+private nonisolated struct AgenTTYBackendErrorBody: Decodable {
+    let detail: String?
+    let code: String?
+}
+
+nonisolated struct AgenTTYBackendError: LocalizedError, Sendable, Equatable {
+    static let temporarilyUnavailableMessage = "The AgenTTY service is temporarily unavailable. Try again in a moment."
+    private static let maximumDetailLength = 300
+
+    let status: Int
+    let code: String?
+    let detail: String?
+
+    init(status: Int, body: Data) {
+        let decoded = try? JSONDecoder().decode(AgenTTYBackendErrorBody.self, from: body)
+        self.status = status
+        code = decoded?.code
+        detail = decoded?.detail.flatMap(Self.boundedDetail)
+    }
+
+    var errorDescription: String? {
+        if (400..<500).contains(status), let detail {
+            return detail
+        }
+        return Self.temporarilyUnavailableMessage
+    }
+
+    private static func boundedDetail(_ raw: String) -> String? {
+        let line = raw.split(whereSeparator: \.isNewline).joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+        return line.isEmpty ? nil : String(line.prefix(maximumDetailLength))
+    }
+}
+
 nonisolated enum AgenTTYRelayTransport {
     static func currentDeviceIdentity() -> AgenTTYNotificationDeviceIdentity {
         AgenTTYNotificationDeviceIdentityStore.loadOrCreate()
@@ -30,19 +64,7 @@ nonisolated enum AgenTTYRelayTransport {
             path: "v1/devices/ensure",
             body: requestBody
         )
-        let (_, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw AgenTTYRelayTransportError.invalidResponse
-        }
-
-        switch httpResponse.statusCode {
-        case 204:
-            return
-        case 401:
-            throw AgenTTYRelayTransportError.unauthorized
-        default:
-            throw AgenTTYRelayTransportError.unexpectedStatusCode(httpResponse.statusCode)
-        }
+        _ = try await send(request, using: urlSession, expecting: 204)
     }
 
     static func currentEnsureDeviceRequest() async throws -> AgenTTYRelayEnsureDeviceRequest {
@@ -107,12 +129,34 @@ nonisolated enum AgenTTYRelayTransport {
         return decoder
     }
 
-    static func responsePreview(from data: Data, maximumLength: Int = 300) -> String {
-        guard !data.isEmpty else { return "none" }
-        let raw = String(decoding: data, as: UTF8.self)
-        let singleLine = raw
-            .replacingOccurrences(of: "\n", with: "\\n")
-            .replacingOccurrences(of: "\r", with: "\\r")
-        return String(singleLine.prefix(maximumLength))
+    static func send(
+        _ request: URLRequest,
+        using urlSession: URLSession,
+        expecting successStatus: Int
+    ) async throws -> Data {
+        let (data, response) = try await urlSession.data(for: request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw AgenTTYRelayTransportError.invalidResponse
+        }
+        guard httpResponse.statusCode == successStatus else {
+            let error = AgenTTYBackendError(status: httpResponse.statusCode, body: data)
+            let path = request.url?.path() ?? "unknown"
+            EsmaLog.notifications.notice(
+                "event=backend_request_rejected path=\(path, privacy: .public) status=\(error.status) code=\(error.code ?? "none", privacy: .public) detail=\(error.detail ?? "none", privacy: .public)"
+            )
+            AgenTTYSentryService.addBreadcrumb(
+                message: "Backend request rejected",
+                category: "backend",
+                level: error.status >= 500 ? "error" : "warning",
+                data: [
+                    "path": path,
+                    "status": String(error.status),
+                    "code": error.code ?? "none",
+                    "detail": error.detail ?? "none",
+                ]
+            )
+            throw error
+        }
+        return data
     }
 }
