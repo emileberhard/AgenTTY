@@ -521,7 +521,12 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
 
             self.startOneOffExecChannel(command: command, on: rootChannel)
                 .flatMap { childChannel, execHandler in
-                    Self.finishInput(input, on: childChannel).map { (childChannel, execHandler) }
+                    Self.finishInput(input, on: childChannel)
+                        .map { (childChannel, execHandler) }
+                        .flatMapErrorThrowing { error in
+                            childChannel.close(promise: nil)
+                            throw error
+                        }
                 }
                 .whenComplete { result in
                     switch result {
