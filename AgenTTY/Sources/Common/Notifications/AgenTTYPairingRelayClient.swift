@@ -250,6 +250,11 @@ final class AgenTTYPairingRelayClient {
             EsmaLog.notifications.error(
                 "event=pairing_status_decode_failure session_id=\(sessionID, privacy: .public) error=\(String(describing: error), privacy: .public)"
             )
+            AgenTTYSentryService.capture(
+                error: error,
+                context: "pairing_status_decode_failure",
+                data: ["session_id": sessionID]
+            )
             throw AgenTTYPairingRelayError.invalidResponse
         }
     }
@@ -308,6 +313,7 @@ final class AgenTTYPairingRelayClient {
             EsmaLog.notifications.error(
                 "event=pairing_claim_decode_failure error=\(String(describing: error), privacy: .public)"
             )
+            AgenTTYSentryService.capture(error: error, context: "pairing_claim_decode_failure")
             throw AgenTTYPairingRelayError.invalidResponse
         }
     }

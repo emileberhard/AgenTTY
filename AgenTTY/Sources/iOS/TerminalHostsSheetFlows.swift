@@ -2111,7 +2111,8 @@ struct AutomaticHostSetupView: View {
             } header: {
                 Text("Claim Host")
             } footer: {
-                if !manualCode.isEmpty && AgenTTYPairingRelayClient.pairingCode(from: manualCode) == nil {
+                if manualCode.unicodeScalars.count(where: { $0.isASCII && CharacterSet.alphanumerics.contains($0) }) > 8,
+                   AgenTTYPairingRelayClient.pairingCode(from: manualCode) == nil {
                     Text("Enter the 8-character pairing code.")
                 }
             }
@@ -2153,7 +2154,7 @@ struct AutomaticHostSetupView: View {
             pairingCodeExpired ? "Pairing Code Expired" : "Automatic Setup Error",
             isPresented: automaticSetupErrorIsPresented
         ) {
-            Button("Try Again") {}
+            Button("OK") {}
         } message: {
             Text(errorMessage ?? "Unknown error.")
         }

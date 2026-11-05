@@ -438,9 +438,10 @@ final class TerminalInputRouter {
     }
 
     private func startDictation() async {
+        let permissionWasDenied = audioSessionBoundary.recordPermission == .denied
         guard await ensureMicrophonePermission() else {
             isDictationArming = false
-            dictationAlert = .microphoneAccessOff
+            if permissionWasDenied { dictationAlert = .microphoneAccessOff }
             return
         }
         var capture: AgenTTYDictationLibrary.Capture?
