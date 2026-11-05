@@ -129,8 +129,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
             case .failure(let error):
                 let rawReason = "connect failed: \(error.localizedDescription)"
                 notifyDisconnect(
-                    failureRecorder.outcome
-                        ?? Self.connectFailureOutcome(for: error, rawReason: rawReason)
+                    Self.connectFailureOutcome(for: error, rawReason: rawReason)
                 )
 
             case .success(let channel):
@@ -146,14 +145,13 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                     guard let self else { return }
                     let rawReason = "ssh transport closed"
                     self.notifyDisconnect(
-                        self.failureRecorder.outcome
-                            ?? AgenTTYSSHTerminationOutcome(
-                                category: .transportClosed,
-                                failureStage: self.didBecomeReady ? .postReadySession : .transport,
-                                rawReason: rawReason,
-                                wasReady: self.didBecomeReady,
-                                shouldReconnect: !self.didBecomeReady
-                            )
+                        AgenTTYSSHTerminationOutcome(
+                            category: .transportClosed,
+                            failureStage: self.didBecomeReady ? .postReadySession : .transport,
+                            rawReason: rawReason,
+                            wasReady: self.didBecomeReady,
+                            shouldReconnect: !self.didBecomeReady
+                        )
                     )
                 }
                 Task { [weak self] in
@@ -163,8 +161,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                         try await self.runPreShellProvisionerIfNeeded()
                     } catch {
                         self.notifyDisconnect(
-                            self.failureRecorder.outcome
-                                ?? Self.preShellFailureOutcome(for: error)
+                            Self.preShellFailureOutcome(for: error)
                         )
                         return
                     }
@@ -419,12 +416,12 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
             case .failure(let error):
                 self.notifyDisconnect(
                     AgenTTYSSHTerminationOutcome(
-                        category: .other,
-                        failureStage: .ptyBootstrap,
-                        rawReason: "failed to request PTY: \(error.localizedDescription)",
-                        wasReady: false,
-                        shouldReconnect: false
-                    )
+                    category: .other,
+                    failureStage: .ptyBootstrap,
+                    rawReason: "failed to request PTY: \(error.localizedDescription)",
+                    wasReady: false,
+                    shouldReconnect: false
+                )
                 )
             case .success:
                 let command = SSHChannelRequestEvent.ExecRequest(
@@ -506,14 +503,13 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                     guard let self else { return }
                     let rawReason = "shell channel closed"
                     self.notifyDisconnect(
-                        self.failureRecorder.outcome
-                            ?? AgenTTYSSHTerminationOutcome(
-                                category: .shellClosed,
-                                failureStage: self.didBecomeReady ? .postReadySession : .shellChannel,
-                                rawReason: rawReason,
-                                wasReady: self.didBecomeReady,
-                                shouldReconnect: self.didBecomeReady
-                            )
+                        AgenTTYSSHTerminationOutcome(
+                            category: .shellClosed,
+                            failureStage: self.didBecomeReady ? .postReadySession : .shellChannel,
+                            rawReason: rawReason,
+                            wasReady: self.didBecomeReady,
+                            shouldReconnect: self.didBecomeReady
+                        )
                     )
                 }
 
@@ -522,7 +518,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         }
     }
 
-    nonisolated static func preShellFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
+    static func preShellFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
         let downloadFailed = error is AgenTTYHostRuntimeArtifactError || error is URLError
         return AgenTTYSSHTerminationOutcome(
             category: .other,
@@ -533,7 +529,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         )
     }
 
-    private func notifyDisconnect(_ outcome: AgenTTYSSHTerminationOutcome) {
+    private func notifyDisconnect(_ fallback: AgenTTYSSHTerminationOutcome) {
         let shouldEmit = stateQueue.sync {
             if didDisconnect { return false }
             didDisconnect = true
@@ -541,6 +537,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         }
 
         guard shouldEmit else { return }
+        let outcome = failureRecorder.outcome ?? fallback
         EsmaLog.ssh.error("disconnect: \(outcome.rawReason, privacy: .public)")
         disconnectHandler(outcome)
     }
@@ -620,8 +617,8 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                             runState.didComplete = true
                             if runState.didTimeOut {
                                 EsmaLog.ssh.error(
-                                    "\(failureLogPrefix, privacy: .public) exec timed out waiting for completion"
-                                )
+                                "\(failureLogPrefix, privacy: .public) exec timed out waiting for completion"
+                            )
                                 completion(false, "")
                                 return
                             }

@@ -6,7 +6,14 @@ import NIOSSH
 import Testing
 @testable import AgenTTY_iOS
 
-struct SSHFailureSurfacingTests {
+final class SSHFailureSurfacingTests {
+    private let hostID = UUID()
+    private let defaultsSuiteName = "SSHFailureSurfacingTests-\(UUID().uuidString)"
+
+    deinit {
+        UserDefaults.standard.removePersistentDomain(forName: defaultsSuiteName)
+    }
+
     @Test
     func rejectedKeyReportsAuthenticationFailure() async throws {
         let server = try await LoopbackSSHServer.start(hostKey: NIOSSHPrivateKey(ed25519Key: .init()))
@@ -39,31 +46,29 @@ struct SSHFailureSurfacingTests {
         #expect(AgenTTYSSHRecoveryGuidance.guidance(for: outcome).title == "The Host Identity Changed")
     }
 
-    @Test
-    func hostToolsDownloadFailureHasItsOwnGuidance() {
-        let timeout = URLError(.timedOut)
-        let outcome = SSHClientSession.preShellFailureOutcome(for: timeout)
+    @Test(arguments: [
+        PreShellFailureCase(
+            error: URLError(.timedOut),
+            stage: .hostToolsDownload,
+            title: "Couldn’t Download Host Tools"
+        ),
+        PreShellFailureCase(
+            error: AgenTTYHostRuntimeProvisionError.remoteWriteFailed("$HOME/.agentty/config/notify.json"),
+            stage: .preShellRuntime,
+            title: "Connected, But Host Preparation Failed"
+        ),
+    ])
+    func preShellFailureGuidance(_ failure: PreShellFailureCase) {
+        let outcome = SSHClientSession.preShellFailureOutcome(for: failure.error)
 
-        #expect(outcome.failureStage == .hostToolsDownload)
-        #expect(outcome.rawReason.contains(timeout.localizedDescription))
-        #expect(AgenTTYSSHRecoveryGuidance.guidance(for: outcome).title == "Couldn’t Download Host Tools")
+        #expect(outcome.failureStage == failure.stage)
+        #expect(outcome.rawReason.contains(failure.error.localizedDescription))
+        #expect(AgenTTYSSHRecoveryGuidance.guidance(for: outcome).title == failure.title)
     }
-
-    @Test
-    func hostSideSetupFailureKeepsHostPreparationGuidance() {
-        let outcome = SSHClientSession.preShellFailureOutcome(
-            for: AgenTTYHostRuntimeProvisionError.remoteWriteFailed("$HOME/.agentty/config/notify.json")
-        )
-
-        #expect(outcome.failureStage == .preShellRuntime)
-        #expect(AgenTTYSSHRecoveryGuidance.guidance(for: outcome).title == "Connected, But Host Preparation Failed")
-    }
-
-    private let hostID = UUID()
 
     private func makeTrustedHostKeyStore() -> AgenTTYTrustedHostKeyStore {
         AgenTTYTrustedHostKeyStore(
-            userDefaults: UserDefaults(suiteName: "SSHFailureSurfacingTests-\(UUID().uuidString)")!,
+            userDefaults: UserDefaults(suiteName: defaultsSuiteName)!,
             flavor: .dev
         )
     }
@@ -108,6 +113,14 @@ struct SSHFailureSurfacingTests {
         var iterator = outcomes.stream.makeAsyncIterator()
         return try #require(await iterator.next())
     }
+}
+
+struct PreShellFailureCase: Sendable, CustomTestStringConvertible {
+    let error: any Error
+    let stage: AgenTTYSSHFailureStage
+    let title: String
+
+    var testDescription: String { title }
 }
 
 private final class RejectingUserAuthenticationDelegate: NIOSSHServerUserAuthenticationDelegate, Sendable {

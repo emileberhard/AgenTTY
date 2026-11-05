@@ -58,12 +58,12 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
         case .hostToolsDownload:
             return AgenTTYSSHRecoveryDescription(
                 title: "Couldn’t Download Host Tools",
-                message: "AgenTTY reached the host, but this iPhone couldn’t download valid copies of the tools AgenTTY installs there. Check the iPhone’s internet connection and retry. If it keeps failing, update AgenTTY.",
+                message: "AgenTTY reached the host, but couldn’t download valid copies of the tools it installs there. Check this device’s internet connection and retry. If it keeps failing, update AgenTTY.",
                 suggestions: [
                     AgenTTYSSHRecoverySuggestion(
                         icon: "icloud.and.arrow.down",
                         title: "Check the internet connection",
-                        subtitle: "The iPhone downloads AgenTTY’s host tools before the first session on each host."
+                        subtitle: "AgenTTY downloads its host tools whenever a host needs them installed or updated."
                     ),
                 ]
             )
@@ -130,7 +130,7 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
 
     private static let authenticationFailed = AgenTTYSSHRecoveryDescription(
             title: "SSH Authentication Failed",
-            message: "The host didn’t accept this iPhone’s key or password. Run Automatic Setup on the host again, or add this iPhone’s public key to ~/.ssh/authorized_keys.",
+            message: "The host didn’t accept this device’s key or password. Run Automatic Setup on the host again, or add this device’s public key to ~/.ssh/authorized_keys.",
             suggestions: [
                 AgenTTYSSHRecoverySuggestion(
                     icon: "key",

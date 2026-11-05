@@ -49,10 +49,12 @@ NIOSSH comes from AgenTTY's fork (`emileberhard/swift-nio-ssh`, branch `agentty-
 2. Uses `AgenTTYSSHAuthenticationDelegate` with either a host-selected private key or a temporary password bootstrap credential
 3. Uses `TOFUHostKeysDelegate` with per-host trust validation/persistence
 4. If the host is in `.passwordBootstrap(...)`, installs the target public key into `~/.ssh/authorized_keys`, converts the saved host auth to `.key(...)`, and deletes the stored password credential
-5. Runs the pre-shell host-runtime provisioner on the connected root SSH transport
+5. Starts the pre-shell host-runtime provisioner as soon as TCP connects; its exec channels wait for authentication, so key exchange and auth count toward its first command's timeout
 6. Creates the shell child channel with `ShellChannelHandler` for PTY I/O only after the host runtime is ready
 7. Sends `PseudoTerminalRequest` (using latest known window size) then `ExecRequest` with the app-bundled tmux bootstrap script
 8. On success: calls `readyHandler()`, flushes any queued outbound data
+
+**Failure outcomes:** `AgenTTYSSHFailureRecorder` keeps the first outcome a delegate or the negotiation classifier records for the session, and `notifyDisconnect` reports that outcome over whatever fallback the closing path built. NIOSSH only fires `errorCaught` when a delegate fails its promise, so `RootSSHDiagnosticsHandler` closes the root channel once an outcome is recorded; each delegate records before failing its promise, and `SSHFailureSurfacingTests` guards that a rejected key or changed host key surfaces in seconds instead of after the provisioner's command timeouts. Pre-shell errors from the host-runtime artifact store or `URLError` use stage `.hostToolsDownload` (analytics `pre_shell_runtime`); other provisioning errors use `.preShellRuntime`. `AgenTTYSSHRecoveryGuidance` decides by category before stage, so a host-key mismatch recorded at `.sshAuth` still gets the host-identity card.
 
 **Key invariant**: `latestWindowSize` is stored even before the shell channel exists. PTY request uses this value, not hardcoded dimensions. Size is reapplied when shell becomes ready.
 

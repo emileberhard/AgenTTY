@@ -421,7 +421,13 @@ actor AgenTTYHostRuntimeArtifactStore {
             throw AgenTTYHostRuntimeArtifactError.checksumMismatch(name: checksumName)
         }
 
-        try writeAtomically(data, to: cacheURL)
+        do {
+            try writeAtomically(data, to: cacheURL)
+        } catch {
+            EsmaLog.terminal.error(
+                "host runtime artifact cache write failed name=\(checksumName, privacy: .public) error=\(String(describing: error), privacy: .public)"
+            )
+        }
         return data
     }
 
