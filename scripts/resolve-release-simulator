@@ -12,6 +12,7 @@ xcrun simctl list devices available --json > "$devices_json"
 
 python3 - "$devices_json" "$runtime_identifier" "$runtime_version" "$device_name" <<'PY'
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -25,7 +26,7 @@ if runtime_version == "latest":
             and (device.get("name") == device_name if device_name else device.get("name", "").startswith("iPhone"))
         ]
         for runtime, devices in devices_by_runtime.items()
-        if runtime.startswith("com.apple.CoreSimulator.SimRuntime.iOS-")
+        if re.fullmatch(r"com\.apple\.CoreSimulator\.SimRuntime\.iOS-\d+(-\d+)*", runtime)
     }
     available = {runtime: devices for runtime, devices in available.items() if devices}
     if not available:
