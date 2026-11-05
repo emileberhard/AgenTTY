@@ -66,9 +66,11 @@ nonisolated final class RootSSHDiagnosticsHandler: ChannelInboundHandler, @unche
     typealias InboundIn = Any
 
     private let failureRecorder: AgenTTYSSHFailureRecorder
+    private let authenticated: @Sendable (Channel) -> Void
 
-    init(failureRecorder: AgenTTYSSHFailureRecorder) {
+    init(failureRecorder: AgenTTYSSHFailureRecorder, authenticated: @escaping @Sendable (Channel) -> Void) {
         self.failureRecorder = failureRecorder
+        self.authenticated = authenticated
     }
 
     func channelActive(context: ChannelHandlerContext) {
@@ -82,7 +84,9 @@ nonisolated final class RootSSHDiagnosticsHandler: ChannelInboundHandler, @unche
     }
 
     func userInboundEventTriggered(context: ChannelHandlerContext, event: Any) {
-        EsmaLog.ssh.info("ssh root inbound event=\(String(describing: event), privacy: .public)")
+        if event is UserAuthSuccessEvent {
+            authenticated(context.channel)
+        }
         context.fireUserInboundEventTriggered(event)
     }
 
@@ -123,6 +127,13 @@ nonisolated final class ExecCommandChannelHandler: ChannelInboundHandler, @unche
         outputText
             .replacingOccurrences(of: "\r", with: "\\r")
             .replacingOccurrences(of: "\n", with: "\\n")
+    }
+
+    var result: SSHCommandResult {
+        guard exitStatus == 0 else {
+            return .failure(.remote(exitStatus: exitStatus, capturedOutput: outputText))
+        }
+        return .success(outputText)
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {

@@ -73,4 +73,8 @@ struct AgenTTYSSHKey: Codable, Identifiable, Equatable, Hashable, Sendable {
     let publicKeyFingerprint: String
     let source: AgenTTYSSHKeySource
     let createdAt: Date
+
+    var authorizedKeyLine: String {
+        AgenTTYAuthorizedKeyLine.make(publicKey: publicKey, keyName: name)
+    }
 }

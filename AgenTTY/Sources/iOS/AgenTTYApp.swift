@@ -345,7 +345,6 @@ struct AgenTTYiOSApp: App {
     @AppStorage(KeyboardInputMode.storageKey, store: AgenTTYSharedDefaults.store)
     private var keyboardInputModeRawValue: String = KeyboardInputMode.defaultValue.rawValue
     private let ghostty = GhosttyRuntime()
-    private let keyMaterialStore: AgenTTYSSHKeyMaterialStore
     private let passwordStore: AgenTTYSSHPasswordStore
     private let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
     private let analyticsClient: AgenTTYAnalyticsClient
@@ -390,7 +389,6 @@ struct AgenTTYiOSApp: App {
             analyticsClient: analyticsClient
         )
 
-        keyMaterialStore = materialStore
         self.passwordStore = passwordStore
         self.trustedHostKeyStore = trustedHostKeyStore
         self.analyticsClient = analyticsClient
@@ -417,7 +415,7 @@ struct AgenTTYiOSApp: App {
             AgenTTYMainWindowView(
                 appDelegate: appDelegate,
                 ghostty: ghostty,
-                keyMaterialStore: keyMaterialStore,
+                keyStore: sshKeyStore,
                 passwordStore: passwordStore,
                 trustedHostKeyStore: trustedHostKeyStore,
                 inputRouter: inputRouter,
@@ -648,7 +646,7 @@ struct AgenTTYiOSApp: App {
 private struct AgenTTYMainWindowView: View {
     let appDelegate: AgenTTYAppDelegate
     let ghostty: GhosttyRuntime
-    let keyMaterialStore: AgenTTYSSHKeyMaterialStore
+    let keyStore: AgenTTYSSHKeyStore
     let passwordStore: AgenTTYSSHPasswordStore
     let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
     let inputRouter: TerminalInputRouter
@@ -852,7 +850,7 @@ private struct AgenTTYMainWindowView: View {
                 ghostty: ghostty,
                 inputRouter: inputRouter,
                 shellState: shellState,
-                keyMaterialStore: keyMaterialStore,
+                keyStore: keyStore,
                 passwordStore: passwordStore,
                 hostStore: hostStore,
                 trustedHostKeyStore: trustedHostKeyStore,
@@ -1123,7 +1121,7 @@ private struct AgenTTYScreenshotHostSwitcher: View {
     AgenTTYMainWindowView(
         appDelegate: AgenTTYAppDelegate(),
         ghostty: GhosttyRuntime(),
-        keyMaterialStore: materialStore,
+        keyStore: AgenTTYSSHKeyStore(flavor: flavor, materialStore: materialStore),
         passwordStore: passwordStore,
         trustedHostKeyStore: trustedHostKeyStore,
         inputRouter: TerminalInputRouter(),

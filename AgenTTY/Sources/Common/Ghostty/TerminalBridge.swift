@@ -45,21 +45,6 @@ private enum SyntheticFocusRefreshReason {
     }
 }
 
-private enum AgenTTYPasswordBootstrapError: LocalizedError {
-    case keyInstallFailed(String)
-
-    var errorDescription: String? {
-        switch self {
-        case .keyInstallFailed(let output):
-            let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-            if trimmedOutput.isEmpty {
-                return "Failed to install the AgenTTY SSH key on the host."
-            }
-            return "Failed to install the AgenTTY SSH key on the host: \(trimmedOutput)"
-        }
-    }
-}
-
 private struct AgenTTYAnalyticsSSHSession {
     let sessionID: String
     let hostID: UUID
@@ -196,7 +181,7 @@ nonisolated private final class TerminalInboundDataRouter: Sendable {
 final class TerminalBridge {
     private let runtime: GhosttyRuntime
     private let surface: ghostty_surface_t
-    private let keyMaterialStore: AgenTTYSSHKeyMaterialStore
+    private let keyStore: AgenTTYSSHKeyStore
     private let passwordStore: AgenTTYSSHPasswordStore
     private let hostStore: AgenTTYHostStore
     private let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
@@ -230,6 +215,8 @@ final class TerminalBridge {
         startedAtNanoseconds: UInt64
     )?
     private let networkPathObserver = AgenTTYNetworkPathObserver()
+    private var lastRetryFailure: AgenTTYSSHRetryFailure?
+    private var connectionProgress: SSHClientSession.Progress?
     private var livenessProbeInFlight = false
     private var preReadyFailureCircuitBreaker = AgenTTYPreReadyFailureCircuitBreaker()
     private var hasNoHosts = false
@@ -319,7 +306,7 @@ final class TerminalBridge {
     init(
         runtime: GhosttyRuntime,
         surface: ghostty_surface_t,
-        keyMaterialStore: AgenTTYSSHKeyMaterialStore,
+        keyStore: AgenTTYSSHKeyStore,
         passwordStore: AgenTTYSSHPasswordStore,
         hostStore: AgenTTYHostStore,
         trustedHostKeyStore: AgenTTYTrustedHostKeyStore,
@@ -327,7 +314,7 @@ final class TerminalBridge {
     ) {
         self.runtime = runtime
         unsafe self.surface = surface
-        self.keyMaterialStore = keyMaterialStore
+        self.keyStore = keyStore
         self.passwordStore = passwordStore
         self.hostStore = hostStore
         self.trustedHostKeyStore = trustedHostKeyStore
@@ -444,6 +431,8 @@ final class TerminalBridge {
 
         activeHost = host
         activeConnectionTarget = nextTarget
+        lastRetryFailure = nil
+        connectionProgress = nil
         reconnectAttempt = 0
         reconnectRetryDeadline = nil
         preReadyFailureCircuitBreaker.reset()
@@ -548,46 +537,30 @@ final class TerminalBridge {
     }
 
     func insertDictationText(_ text: String, fallbackBytes: [UInt8]) {
-        guard !text.isEmpty else { return }
-        guard let ssh else {
-            EsmaLog.terminal.error("dictation insert failed: ssh unavailable")
-            sendFallbackBytes(fallbackBytes)
-            return
-        }
-
-        ssh.insertTextViaTmux(text) { [weak self] success in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if success {
-                    EsmaLog.terminal.info("dictation inserted via tmux paste-buffer")
-                    return
-                }
-
-                EsmaLog.terminal.error("dictation tmux insertion failed; falling back to raw bytes")
-                self.sendFallbackBytes(fallbackBytes)
-            }
-        }
+        pasteViaTmux(text, fallbackBytes: fallbackBytes, source: "dictation")
     }
 
     func insertClipboardText(_ text: String, fallbackBytes: [UInt8]) {
+        pasteViaTmux(text, fallbackBytes: fallbackBytes, source: "clipboard text")
+    }
+
+    private func pasteViaTmux(_ text: String, fallbackBytes: [UInt8], source: String) {
         guard !text.isEmpty else { return }
         guard let ssh else {
-            EsmaLog.terminal.error("clipboard text insert failed: ssh unavailable")
+            EsmaLog.terminal.error("\(source, privacy: .public) insert failed: ssh unavailable")
             sendFallbackBytes(fallbackBytes)
             return
         }
 
-        ssh.insertTextViaTmux(text) { [weak self] success in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if success {
-                    EsmaLog.terminal.info("clipboard text inserted via tmux paste-buffer bytes=\(text.utf8.count)")
-                    return
-                }
-
-                EsmaLog.terminal.error("clipboard text insertion failed; falling back to key bytes")
-                self.sendFallbackBytes(fallbackBytes)
+        Task { [weak self] in
+            let result = await ssh.runCommand(SSHClientSession.tmuxDictationInsertCommand(for: text))
+            guard let self else { return }
+            if case .success = result {
+                EsmaLog.terminal.info("\(source, privacy: .public) inserted via tmux paste-buffer bytes=\(text.utf8.count)")
+                return
             }
+            EsmaLog.terminal.error("\(source, privacy: .public) tmux insertion failed; falling back to key bytes")
+            self.sendFallbackBytes(fallbackBytes)
         }
     }
 
@@ -650,7 +623,7 @@ final class TerminalBridge {
                     )
                 }
 
-                let success = await ssh.writeRemoteFile(
+                let result = await ssh.writeRemoteFile(
                     uploadPlan.data,
                     remotePath: uploadPlan.remotePath,
                     executable: false
@@ -660,7 +633,7 @@ final class TerminalBridge {
                     remotePath: uploadPlan.remotePath,
                     byteCount: uploadPlan.data.count,
                     preferredExtension: uploadPlan.preferredExtension,
-                    success: success
+                    success: (try? result.get()) != nil
                 )
             }
 
@@ -820,26 +793,12 @@ final class TerminalBridge {
             return nil
         }
 
-        let command = Self.tmuxCapturePaneTailCommand(maxLines: maxLines)
-        return await withCheckedContinuation { continuation in
-            ssh.runTmuxCommand(command) { success, output in
-                DispatchQueue.main.async {
-                    guard success else {
-                        EsmaLog.terminal.error("dictation context capture failed: tmux command failed")
-                        continuation.resume(returning: nil)
-                        return
-                    }
-
-                    let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !trimmedOutput.isEmpty else {
-                        continuation.resume(returning: nil)
-                        return
-                    }
-
-                    continuation.resume(returning: trimmedOutput)
-                }
-            }
+        guard case .success(let output) = await ssh.runCommand(Self.tmuxCapturePaneTailCommand(maxLines: maxLines)) else {
+            EsmaLog.terminal.error("dictation context capture failed: tmux command failed")
+            return nil
         }
+        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmedOutput.isEmpty ? nil : trimmedOutput
     }
 
     @discardableResult
@@ -880,14 +839,10 @@ final class TerminalBridge {
             reuseRightmostWorkingDirectory: NewShellWorkingDirectorySetting.persistedValue()
         )
 
-        ssh.runTmuxCommand(command, timeout: interactiveTmuxCommandTimeout) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.handleTmuxShellSwipeCommandResult(
-                    direction: direction,
-                    success: success,
-                    output: output
-                )
-            }
+        let timeout = interactiveTmuxCommandTimeout
+        Task { [weak self] in
+            let result = await ssh.runCommand(command, timeout: timeout)
+            self?.handleTmuxShellSwipeCommandResult(direction: direction, result: result)
         }
     }
 
@@ -958,7 +913,7 @@ final class TerminalBridge {
 
             do {
                 let userAuthentication = try await AgenTTYSSHUserAuthenticationResolver.resolve(
-                    keyMaterialStore: self.keyMaterialStore,
+                    keyMaterialStore: self.keyStore.materialStore,
                     passwordStore: self.passwordStore,
                     connectionTarget: connectionTarget
                 )
@@ -1005,61 +960,10 @@ final class TerminalBridge {
                 return
             } catch {
                 guard self.connectionGeneration == generation else { return }
-                self.endConnectionDiagnostics(generation: generation, outcome: "preflight_failed")
-                self.setHostConnectionMethod(nil)
-                EsmaLog.terminal.error(
-                    "connection preflight failed host=\(connectionTarget.host, privacy: .public) auth=\(Self.logDescription(for: connectionTarget.authentication), privacy: .public) error=\(error.localizedDescription, privacy: .public)"
-                )
-
-                // Transient network/relay errors must keep the normal reconnect
-                // loop alive; only configuration-class failures stop retrying.
-                if Self.isTransientPreflightError(error), !self.isShuttingDown, self.activeConnectionTarget != nil {
-                    self.emitStatusLine("[agentty] connection attempt failed: \(error.localizedDescription)")
-                    if self.canPerformConnectionWorkNow {
-                        self.setHostConnectionPhase(.connecting)
-                        self.scheduleReconnect()
-                    } else {
-                        self.setHostConnectionPhase(.disconnected)
-                        EsmaLog.terminal.info("deferring preflight retry until app becomes active")
-                    }
-                    return
-                }
-
-                self.setHostConnectionPhase(.disconnected)
-                self.emitStatusLine("[agentty] connection blocked: \(error.localizedDescription)")
-                AgenTTYSentryService.capture(
-                    error: error,
-                    context: "ssh_connection_preflight",
-                    data: [
-                        "host_id": connectionTarget.hostID.uuidString.lowercased(),
-                        "authentication": Self.logDescription(for: connectionTarget.authentication),
-                    ]
-                )
+                let outcome = SSHClientSession.preflightFailureOutcome(for: error)
+                self.handleDisconnect(outcome: outcome, generation: generation, connectionTarget: connectionTarget)
             }
         }
-    }
-
-    /// Errors that the network can fix on its own (roaming, flaky cellular,
-    /// relay hiccups). Configuration-class failures — bad keys, missing relay
-    /// setup, rejected device identity — still block reconnect until fixed.
-    private static func isTransientPreflightError(_ error: Error) -> Bool {
-        if error is AgenTTYHostReachabilityError {
-            return true
-        }
-        if let relayError = error as? AgenTTYSSHRelayError {
-            switch relayError {
-            case .invalidRelayHostID, .unauthorized, .resourceLimit:
-                return false
-            case .invalidResponse, .relayConnectorOffline, .unexpectedStatusCode,
-                 .websocketOpenTimedOut:
-                return true
-            }
-        }
-        if error is URLError {
-            return true
-        }
-        let nsError = error as NSError
-        return nsError.domain == NSURLErrorDomain || nsError.domain == NSPOSIXErrorDomain
     }
 
     private var canPerformConnectionWorkNow: Bool {
@@ -1068,6 +972,7 @@ final class TerminalBridge {
 
     private func handleNetworkPathChange(isSatisfied: Bool) {
         AgenTTYConnectionRouteResolver.invalidateRouteMemory()
+        refreshReconnectScreen()
         guard !isShuttingDown, activeConnectionTarget != nil, isSatisfied else { return }
 
         if reconnectWorkItem != nil, canPerformConnectionWorkNow {
@@ -1094,25 +999,20 @@ final class TerminalBridge {
         let generation = connectionGeneration
         EsmaLog.terminal.info("verifying transport liveness reason=\(reason, privacy: .public)")
 
-        ssh.runLivenessProbe { [weak self] isAlive in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.livenessProbeInFlight = false
-                guard self.connectionGeneration == generation, !self.isShuttingDown else { return }
-                if isAlive {
-                    EsmaLog.terminal.info(
-                        "transport liveness confirmed reason=\(reason, privacy: .public)"
-                    )
-                    return
-                }
-
-                EsmaLog.terminal.error(
-                    "transport liveness probe failed; reconnecting reason=\(reason, privacy: .public)"
-                )
-                self.emitStatusLine("[agentty] connection unresponsive; reconnecting...")
-                self.reconnectAttempt = 0
-                self.maybeStartSSHConnection(reason: "liveness probe failed (\(reason))")
+        Task { [weak self] in
+            let isAlive = await ssh.runLivenessProbe()
+            guard let self else { return }
+            self.livenessProbeInFlight = false
+            guard self.connectionGeneration == generation, !self.isShuttingDown else { return }
+            if isAlive {
+                EsmaLog.terminal.info("transport liveness confirmed reason=\(reason, privacy: .public)")
+                return
             }
+
+            EsmaLog.terminal.error("transport liveness probe failed; reconnecting reason=\(reason, privacy: .public)")
+            self.emitStatusLine("[agentty] connection unresponsive; reconnecting...")
+            self.reconnectAttempt = 0
+            self.maybeStartSSHConnection(reason: "liveness probe failed (\(reason))")
         }
     }
 
@@ -1138,6 +1038,13 @@ final class TerminalBridge {
                     generation: generation
                 )
                 try await AgenTTYHostRuntimeProvisioner.prepareBaseRuntime(ssh: ssh)
+            },
+            progressHandler: { [weak self] progress in
+                DispatchQueue.main.async {
+                    guard let self, self.connectionGeneration == generation else { return }
+                    self.connectionProgress = progress
+                    self.refreshReconnectScreen()
+                }
             },
             outputHandler: { [weak self] data in
                 inboundDataRouter.routeRemoteData(
@@ -1180,6 +1087,8 @@ final class TerminalBridge {
     private func handleReady(generation: Int) {
         guard connectionGeneration == generation else { return }
         reconnectAttempt = 0
+        lastRetryFailure = nil
+        connectionProgress = nil
         preReadyFailureCircuitBreaker.reset()
         if activeRouteMode == .direct, let hostID = activeConnectionTarget?.hostID {
             AgenTTYConnectionRouteResolver.recordDirectRouteSuccess(for: hostID)
@@ -1351,7 +1260,7 @@ final class TerminalBridge {
         // route so the next attempt re-probes (and can fall back to relay).
         if !outcome.wasReady,
            activeRouteMode == .direct,
-           !AgenTTYPreReadyFailureCircuitBreaker.countsTowardTrip(outcome.category) {
+           outcome.category.isNetworkClass {
             AgenTTYConnectionRouteResolver.recordDirectRouteFailure(for: connectionTarget.hostID)
         }
 
@@ -1360,6 +1269,7 @@ final class TerminalBridge {
             outcome: outcome
         )
         endConnectionDiagnostics(generation: generation, outcome: "disconnected")
+        let failedMethod = hostConnectionMethod
         clearTransportState()
         endBackgroundWarmHoldIfNeeded(reason: "transport_disconnected")
 
@@ -1373,6 +1283,14 @@ final class TerminalBridge {
             )
         let shouldPresentRecovery = !outcome.wasReady && (!outcome.shouldReconnect || shouldTripCircuitBreaker)
         let shouldReconnect = outcome.shouldReconnect && !shouldTripCircuitBreaker
+        connectionProgress = nil
+        if shouldReconnect, let activeHost {
+            lastRetryFailure = AgenTTYSSHRetryFailure(
+                outcome: outcome,
+                method: failedMethod ?? .directMethod(for: activeHost),
+                address: activeHost.address
+            )
+        }
 
         if shouldReconnect, !isShuttingDown, canPerformConnectionWorkNow, activeConnectionTarget != nil {
             setHostConnectionPhase(.connecting)
@@ -1553,7 +1471,11 @@ final class TerminalBridge {
                 hostLabel: activeHost?.label ?? "",
                 columns: latestWindowSize?.columns ?? 0,
                 rows: latestWindowSize?.rows ?? 0,
-                isAnimating: isApplicationActive
+                isAnimating: isApplicationActive,
+                notice: lastRetryFailure.map {
+                    AgenTTYSSHRecoveryGuidance.retryNotice(for: $0, networkSatisfied: networkPathObserver.isSatisfied)
+                },
+                progress: connectionProgress
             )
         )
     }
@@ -1580,6 +1502,8 @@ final class TerminalBridge {
     }
 
     func retryConnectionRecovery() {
+        lastRetryFailure = nil
+        connectionProgress = nil
         preReadyFailureCircuitBreaker.reset()
         clearConnectionRecoveryRequest()
         reconnectAttempt = 0
@@ -1816,17 +1740,13 @@ final class TerminalBridge {
 
     private func handleTmuxShellSwipeCommandResult(
         direction: TerminalShellSwipeDirection,
-        success: Bool,
-        output: String
+        result: SSHCommandResult
     ) {
         let directionDescription = direction == .forward ? "forward" : "backward"
-        let outputPreview = output
-            .replacingOccurrences(of: "\r", with: "\\r")
-            .replacingOccurrences(of: "\n", with: "\\n")
 
-        guard success else {
+        guard case .success(let output) = result else {
             EsmaLog.terminal.error(
-                "tmux shell swipe failed direction=\(directionDescription, privacy: .public) output=\(outputPreview, privacy: .public)"
+                "tmux shell swipe failed direction=\(directionDescription, privacy: .public) error=\(String(describing: result), privacy: .public)"
             )
             tmuxShellSwipeDidComplete?(false)
             terminalDataDidUpdate?()
@@ -1852,7 +1772,7 @@ final class TerminalBridge {
         publishShellState(from: windows)
 
         EsmaLog.terminal.info(
-            "tmux shell swipe succeeded direction=\(directionDescription, privacy: .public) windows=\(windows.count) active_position=\(activePosition) output=\(outputPreview, privacy: .public)"
+            "tmux shell swipe succeeded direction=\(directionDescription, privacy: .public) windows=\(windows.count) active_position=\(activePosition)"
         )
 
         tmuxShellSwipeDidComplete?(true)
@@ -1870,17 +1790,17 @@ final class TerminalBridge {
             return
         }
         let command = Self.tmuxSelectWindowCommand(windowID: windowId)
-        ssh.runTmuxCommand(command, timeout: interactiveTmuxCommandTimeout) { [weak self] success, _ in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if success {
-                    EsmaLog.terminal.info("selectTmuxWindow succeeded windowId=\(windowId)")
-                } else {
-                    EsmaLog.terminal.error("selectTmuxWindow failed windowId=\(windowId)")
-                    self.verifyTransportLiveness(reason: "select window failed")
-                }
-                self.pollShellState(includeLineCounts: false)
+        let timeout = interactiveTmuxCommandTimeout
+        Task { [weak self] in
+            let result = await ssh.runCommand(command, timeout: timeout)
+            guard let self else { return }
+            if case .success = result {
+                EsmaLog.terminal.info("selectTmuxWindow succeeded windowId=\(windowId)")
+            } else {
+                EsmaLog.terminal.error("selectTmuxWindow failed windowId=\(windowId)")
+                self.verifyTransportLiveness(reason: "select window failed")
             }
+            self.pollShellState(includeLineCounts: false)
         }
     }
 
@@ -1890,31 +1810,27 @@ final class TerminalBridge {
             return
         }
 
-        ssh.runTmuxCommand(
-            Self.tmuxCreateWindowAndSelectCommand(
-                reuseRightmostWorkingDirectory: NewShellWorkingDirectorySetting.persistedValue()
-            ),
-            timeout: interactiveTmuxCommandTimeout
-        ) { [weak self] success, output in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard success else {
-                    EsmaLog.terminal.error("createTmuxWindowAndSelect failed")
-                    self.verifyTransportLiveness(reason: "create window failed")
-                    self.pollShellState(includeLineCounts: false)
-                    return
-                }
-
-                let windows = Self.parseTmuxWindowStates(from: output)
-                guard !windows.isEmpty else {
-                    EsmaLog.terminal.error("createTmuxWindowAndSelect failed: command returned no windows")
-                    self.pollShellState(includeLineCounts: false)
-                    return
-                }
-
-                self.publishShellState(from: windows)
+        let command = Self.tmuxCreateWindowAndSelectCommand(
+            reuseRightmostWorkingDirectory: NewShellWorkingDirectorySetting.persistedValue()
+        )
+        let timeout = interactiveTmuxCommandTimeout
+        Task { [weak self] in
+            let result = await ssh.runCommand(command, timeout: timeout)
+            guard let self else { return }
+            guard case .success(let output) = result else {
+                EsmaLog.terminal.error("createTmuxWindowAndSelect failed")
+                self.verifyTransportLiveness(reason: "create window failed")
                 self.pollShellState(includeLineCounts: false)
+                return
             }
+
+            let windows = Self.parseTmuxWindowStates(from: output)
+            if windows.isEmpty {
+                EsmaLog.terminal.error("createTmuxWindowAndSelect failed: command returned no windows")
+            } else {
+                self.publishShellState(from: windows)
+            }
+            self.pollShellState(includeLineCounts: false)
         }
     }
 
@@ -1950,43 +1866,39 @@ final class TerminalBridge {
 
         pendingShortcutShellCommands.removeFirst()
         shortcutShellCommandExecution = request
-        ssh.runTmuxCommand(
-            Self.tmuxCreateWindowAndRunCommand(
-                request.command,
-                maxShellCount: maxTmuxShellCount,
-                reuseRightmostWorkingDirectory: NewShellWorkingDirectorySetting.persistedValue()
-            )
-        ) { [weak self] success, output in
-            DispatchQueue.main.async {
-                guard let self,
-                      self.shortcutShellCommandExecution?.requestID == request.requestID else {
-                    return
-                }
-                self.shortcutShellCommandExecution = nil
-
-                if success {
-                    let windows = Self.parseTmuxWindowStates(from: output)
-                    if windows.isEmpty {
-                        EsmaLog.terminal.error(
-                            "shortcut shell command succeeded without returning window state"
-                        )
-                        self.pollShellState(includeLineCounts: false)
-                    } else {
-                        self.publishShellState(from: windows)
-                        self.pollShellState(includeLineCounts: false)
-                    }
-                    request.completion(true)
-                } else {
-                    EsmaLog.terminal.error(
-                        "shortcut shell command failed host_id=\(request.hostID.uuidString, privacy: .public) output=\(output, privacy: .private(mask: .hash))"
-                    )
-                    self.emitStatusLine("[agentty] failed to start the shortcut command in a new shell")
-                    self.pollShellState(includeLineCounts: false)
-                    request.completion(false)
-                }
-
-                self.processPendingShortcutShellCommands()
+        let command = Self.tmuxCreateWindowAndRunCommand(
+            request.command,
+            maxShellCount: maxTmuxShellCount,
+            reuseRightmostWorkingDirectory: NewShellWorkingDirectorySetting.persistedValue()
+        )
+        Task { [weak self] in
+            let result = await ssh.runCommand(command)
+            guard let self,
+                  self.shortcutShellCommandExecution?.requestID == request.requestID else {
+                return
             }
+            self.shortcutShellCommandExecution = nil
+
+            switch result {
+            case .success(let output):
+                let windows = Self.parseTmuxWindowStates(from: output)
+                if windows.isEmpty {
+                    EsmaLog.terminal.error("shortcut shell command succeeded without returning window state")
+                } else {
+                    self.publishShellState(from: windows)
+                }
+                self.pollShellState(includeLineCounts: false)
+                request.completion(true)
+            case .failure(let failure):
+                EsmaLog.terminal.error(
+                    "shortcut shell command failed host_id=\(request.hostID.uuidString, privacy: .public) error=\(failure.localizedDescription, privacy: .private(mask: .hash))"
+                )
+                self.emitStatusLine("[agentty] failed to start the shortcut command in a new shell")
+                self.pollShellState(includeLineCounts: false)
+                request.completion(false)
+            }
+
+            self.processPendingShortcutShellCommands()
         }
     }
 
@@ -2340,15 +2252,14 @@ final class TerminalBridge {
         }
 
         let targetKeyMaterial = try await Self.loadPrivateKeyMaterial(
-            keyMaterialStore: keyMaterialStore,
+            keyMaterialStore: keyStore.materialStore,
             keyID: targetKeyID
         )
-        let publicKey = try targetKeyMaterial.openSSHPublicKey()
-        let command = AgenTTYSSHAuthorizedKeysInstaller.installPublicKeyCommand(publicKey: publicKey)
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        guard success else {
-            throw AgenTTYPasswordBootstrapError.keyInstallFailed(output)
-        }
+        let authorizedKeyLine = AgenTTYAuthorizedKeyLine.make(
+            publicKey: try targetKeyMaterial.openSSHPublicKey(),
+            keyName: keyStore.keyName(for: targetKeyID) ?? ""
+        )
+        try await AgenTTYSSHAuthorizedKeysInstaller.install(authorizedKeyLine: authorizedKeyLine, using: ssh)
 
         guard connectionGeneration == generation else {
             return
@@ -2415,28 +2326,29 @@ final class TerminalBridge {
         }
 
         let command = includeLineCounts ? Self.tmuxListWindowsWithLineCountsCommand : Self.tmuxListWindowsCommand
-        ssh.runTmuxCommand(command, timeout: interactiveTmuxCommandTimeout) { [weak self] success, output in
-            DispatchQueue.main.async {
-                guard let self, !self.isShuttingDown else { return }
+        let timeout = interactiveTmuxCommandTimeout
+        Task { [weak self] in
+            let result = await ssh.runCommand(command, timeout: timeout)
+            guard let self, !self.isShuttingDown else { return }
 
-                if success {
-                    if includeLineCounts {
-                        let windows = Self.parseTmuxWindowStatesWithLineCounts(from: output)
-                        self.publishShellState(from: windows)
-                        self.updateShellTitleTracking(for: windows)
-                    } else {
-                        let windows = Self.parseTmuxWindowStates(from: output)
-                        self.publishShellState(from: windows)
-                    }
+            switch result {
+            case .success(let output):
+                if includeLineCounts {
+                    let windows = Self.parseTmuxWindowStatesWithLineCounts(from: output)
+                    self.publishShellState(from: windows)
+                    self.updateShellTitleTracking(for: windows)
                 } else {
-                    // A failed/timed-out poll on a "connected" transport is the
-                    // first sign of a silently dead socket. Escalate to a probe;
-                    // probe failure forces an immediate reconnect.
-                    self.verifyTransportLiveness(reason: "shell poll failed")
+                    let windows = Self.parseTmuxWindowStates(from: output)
+                    self.publishShellState(from: windows)
                 }
-
-                self.scheduleNextShellPoll()
+            case .failure:
+                // A failed/timed-out poll on a "connected" transport is the
+                // first sign of a silently dead socket. Escalate to a probe;
+                // probe failure forces an immediate reconnect.
+                self.verifyTransportLiveness(reason: "shell poll failed")
             }
+
+            self.scheduleNextShellPoll()
         }
     }
 
@@ -2534,27 +2446,21 @@ final class TerminalBridge {
         shellContextLastLookupDateByWorkingDirectory[workingDirectoryPath] = now
 
         let command = Self.gitHeadStateCommand(forWorkingDirectoryPath: workingDirectoryPath)
-        ssh.runTmuxCommand(command) { [weak self] success, output in
-            DispatchQueue.main.async {
-                self?.handleGitHeadLookupResult(
-                    success: success,
-                    output: output,
-                    request: request
-                )
-            }
+        Task { [weak self] in
+            let result = await ssh.runCommand(command)
+            self?.handleGitHeadLookupResult(result, request: request)
         }
     }
 
     private func handleGitHeadLookupResult(
-        success: Bool,
-        output: String,
+        _ result: SSHCommandResult,
         request: ShellContextBranchLookupRequest
     ) {
         guard shellContextBranchLookupInFlight?.requestID == request.requestID else { return }
         shellContextBranchLookupInFlight = nil
 
         let resolvedHead: GitHeadResolution
-        if success {
+        if case .success(let output) = result {
             resolvedHead = Self.parseGitHeadResolution(from: output)
         } else {
             resolvedHead = .unknown
@@ -2732,10 +2638,7 @@ final class TerminalBridge {
         let task = Task { [weak self] in
             guard let self else { return }
 
-            let capturedOutput = await self.captureTmuxOutput(
-                using: ssh,
-                command: request.contextCommand
-            )
+            let capturedOutput = (try? await ssh.runCommand(request.contextCommand).get()) ?? ""
             let context: String?
             if request.usesHostAgentState {
                 context = await Self.shellTitleContext(fromHostStateJSON: capturedOutput)
@@ -2806,20 +2709,6 @@ final class TerminalBridge {
         state.updatedAt = now
         shellTitleStatesByIdentity[request.identity] = state
         scheduleShellTitlePersistence()
-    }
-
-    private func captureTmuxOutput(using ssh: SSHClientSession, command: String) async -> String {
-        await withCheckedContinuation { continuation in
-            ssh.runTmuxCommand(command) { success, output in
-                DispatchQueue.main.async {
-                    guard success else {
-                        continuation.resume(returning: "")
-                        return
-                    }
-                    continuation.resume(returning: output)
-                }
-            }
-        }
     }
 
     private func generateShellTitle(

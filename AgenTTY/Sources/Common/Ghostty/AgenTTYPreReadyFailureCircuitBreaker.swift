@@ -14,12 +14,7 @@ nonisolated struct AgenTTYPreReadyFailureCircuitBreaker: Equatable, Sendable {
     /// already rate-limits those retries. The breaker exists for repeatable
     /// pre-ready failures like broken bootstrap or rejected sessions.
     static func countsTowardTrip(_ category: AgenTTYSSHDisconnectCategory) -> Bool {
-        switch category {
-        case .connectTimeout, .networkError, .transportClosed:
-            false
-        case .shellClosed, .authFailed, .hostKeyMismatch, .localClose, .algorithmNegotiationFailed, .other:
-            true
-        }
+        !category.isNetworkClass
     }
 
     mutating func reset() {

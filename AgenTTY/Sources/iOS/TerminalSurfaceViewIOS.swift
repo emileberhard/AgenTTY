@@ -6,7 +6,7 @@ import GhosttyKit
 @MainActor
 final class TerminalSurfaceViewIOS: UIView, GhosttySurfaceProvider, TerminalInputSink, TerminalSurfaceLifecycleHost, TerminalTouchScrollHost, TerminalTouchSelectionHost, TerminalShellSwipeHost {
     private let ghostty: GhosttyRuntime
-    private let keyMaterialStore: AgenTTYSSHKeyMaterialStore
+    private let keyStore: AgenTTYSSHKeyStore
     private let passwordStore: AgenTTYSSHPasswordStore
     private let hostStore: AgenTTYHostStore
     private let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
@@ -173,14 +173,14 @@ final class TerminalSurfaceViewIOS: UIView, GhosttySurfaceProvider, TerminalInpu
 
     init(
         ghostty: GhosttyRuntime,
-        keyMaterialStore: AgenTTYSSHKeyMaterialStore,
+        keyStore: AgenTTYSSHKeyStore,
         passwordStore: AgenTTYSSHPasswordStore,
         hostStore: AgenTTYHostStore,
         trustedHostKeyStore: AgenTTYTrustedHostKeyStore,
         analyticsClient: AgenTTYAnalyticsClient
     ) {
         self.ghostty = ghostty
-        self.keyMaterialStore = keyMaterialStore
+        self.keyStore = keyStore
         self.passwordStore = passwordStore
         self.hostStore = hostStore
         self.trustedHostKeyStore = trustedHostKeyStore
@@ -198,7 +198,7 @@ final class TerminalSurfaceViewIOS: UIView, GhosttySurfaceProvider, TerminalInpu
         bridge = unsafe TerminalBridge(
             runtime: ghostty,
             surface: surface,
-            keyMaterialStore: keyMaterialStore,
+            keyStore: keyStore,
             passwordStore: passwordStore,
             hostStore: hostStore,
             trustedHostKeyStore: trustedHostKeyStore,

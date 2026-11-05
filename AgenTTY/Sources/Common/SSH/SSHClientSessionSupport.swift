@@ -1,5 +1,6 @@
 import Foundation
 import NIOCore
+import NIOPosix
 import NIOSSH
 
 nonisolated enum AgenTTYSSHTransportFailureClassifier {
@@ -229,6 +230,11 @@ trap - 0 1 2 15
                 category = .other
             }
             stage = .sshAuth
+        } else if let connectionError = error as? NIOConnectionError,
+                  connectionError.connectionErrors.isEmpty,
+                  connectionError.dnsAError != nil || connectionError.dnsAAAAError != nil {
+            category = .dnsFailure
+            stage = .tcpConnect
         } else if containsConnectTimeout(error) {
             // `ChannelError.connectTimeout` stringifies as the meaningless
             // "NIOCore.ChannelError error 0", so the string classifier below can
@@ -267,6 +273,110 @@ trap - 0 1 2 15
         )
     }
 
+    nonisolated static func preflightFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
+        let (category, shouldReconnect) = preflightClassification(for: error)
+        return AgenTTYSSHTerminationOutcome(
+            category: category,
+            failureStage: .preflight,
+            rawReason: String(error.localizedDescription.prefix(512)),
+            wasReady: false,
+            shouldReconnect: shouldReconnect
+        )
+    }
+
+    nonisolated private static func preflightClassification(
+        for error: Error
+    ) -> (category: AgenTTYSSHDisconnectCategory, shouldReconnect: Bool) {
+        switch error {
+        case let fallback as AgenTTYRelayFallbackFailure:
+            let relay = preflightClassification(for: fallback.relayFailure)
+            switch relay.category {
+            case .networkError, .connectTimeout, .dnsFailure:
+                return (.relayUnavailable, true)
+            default:
+                return relay
+            }
+        case is AgenTTYSSHKeyMaterialError, is AgenTTYSSHKeyStoreError:
+            return (.keyUnavailable, false)
+        case is AgenTTYSSHPasswordStoreError:
+            return (.passwordUnavailable, false)
+        case let reachability as AgenTTYHostReachabilityError:
+            switch reachability {
+            case .invalidPort:
+                return (.other, false)
+            case .timedOut, .failed(_, _, _, .timeout):
+                return (.connectTimeout, true)
+            case .failed(_, _, _, .dns):
+                return (.dnsFailure, true)
+            case .failed:
+                return (.networkError, true)
+            }
+        case let relay as AgenTTYSSHRelayError:
+            switch relay {
+            case .invalidRelayHostID, .unauthorized:
+                return (.relayRejected, false)
+            case .resourceLimit(let detail):
+                return (.relayLimit(detail: detail), false)
+            case .relayConnectorOffline:
+                return (.relayConnectorOffline, true)
+            case .invalidResponse, .unexpectedStatusCode, .websocketOpenTimedOut:
+                return (.relayUnavailable, true)
+            }
+        case is URLError:
+            return (.networkError, true)
+        default:
+            let domain = (error as NSError).domain
+            if domain == NSURLErrorDomain || domain == NSPOSIXErrorDomain {
+                return (.networkError, true)
+            }
+            return (.other, false)
+        }
+    }
+
+    nonisolated static func preShellFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
+        let category: AgenTTYSSHDisconnectCategory
+        var stage = AgenTTYSSHFailureStage.preShellRuntime
+        var shouldReconnect = false
+        switch error {
+        case let installError as AgenTTYSSHKeyInstallError:
+            switch installError.failure {
+            case .timedOut:
+                category = .hostSetupTimeout
+            case .remote:
+                category = .keyInstallFailed(hostMessage: installError.failure.hostMessage)
+            case .channelFailed:
+                category = .other
+                shouldReconnect = true
+            }
+        case let commandFailure as SSHCommandFailure:
+            switch commandFailure {
+            case .timedOut:
+                category = .hostSetupTimeout
+            case .channelFailed:
+                category = .other
+                shouldReconnect = true
+            case .remote:
+                category = .other
+            }
+        case AgenTTYHostRuntimeProvisionError.unsupportedHostPlatform(let operatingSystem, let architecture):
+            category = .unsupportedHostPlatform(operatingSystem: operatingSystem, architecture: architecture)
+        case is AgenTTYSSHKeyMaterialError, is AgenTTYSSHKeyStoreError:
+            category = .keyUnavailable
+        case is AgenTTYHostRuntimeArtifactError, is URLError:
+            category = .other
+            stage = .hostToolsDownload
+        default:
+            category = .other
+        }
+        return AgenTTYSSHTerminationOutcome(
+            category: category,
+            failureStage: stage,
+            rawReason: "failed to prepare host runtime: \(error.localizedDescription)",
+            wasReady: false,
+            shouldReconnect: shouldReconnect
+        )
+    }
+
     nonisolated static func containsConnectTimeout(_ error: Error) -> Bool {
         if let channelError = error as? ChannelError, case .connectTimeout = channelError {
             return true
@@ -281,31 +391,4 @@ trap - 0 1 2 15
 
         return false
     }
-
-    func runCommandCapturingOutput(_ command: String) async -> (Bool, String) {
-        await withCheckedContinuation { continuation in
-            runTmuxCommand(command) { success, output in
-                continuation.resume(returning: (success, output))
-            }
-        }
-    }
-
-    func writeRemoteFile(
-        _ data: Data,
-        remotePath: String,
-        executable: Bool,
-        expectedSHA256: String? = nil
-    ) async -> Bool {
-        await withCheckedContinuation { continuation in
-            writeRemoteFile(
-                data,
-                remotePath: remotePath,
-                executable: executable,
-                expectedSHA256: expectedSHA256
-            ) { success in
-                continuation.resume(returning: success)
-            }
-        }
-    }
-
 }

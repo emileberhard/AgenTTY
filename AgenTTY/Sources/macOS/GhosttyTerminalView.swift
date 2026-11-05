@@ -55,7 +55,7 @@ final class TerminalSurfaceViewMacOS: NSView, GhosttySurfaceProvider {
         self.bridge = TerminalBridge(
             runtime: ghostty,
             surface: surface,
-            keyMaterialStore: AgenTTYSSHKeyMaterialStore(flavor: .main),
+            keyStore: AgenTTYSSHKeyStore(flavor: .main, materialStore: AgenTTYSSHKeyMaterialStore(flavor: .main)),
             passwordStore: AgenTTYSSHPasswordStore(flavor: .main),
             hostStore: AgenTTYHostStore(flavor: .main),
             trustedHostKeyStore: AgenTTYTrustedHostKeyStore(

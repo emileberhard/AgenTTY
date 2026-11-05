@@ -2,9 +2,11 @@ import Foundation
 @unsafe @preconcurrency import Network
 
 /// Watches the device's network path and reports meaningful changes
-/// (interface set or satisfiability) on the main actor. The initial callback
-/// that merely reports the current path is suppressed so consumers only react
-/// to real transitions (Wi-Fi <-> cellular, connectivity loss/recovery).
+/// (interface set or satisfiability) on the main actor. `isSatisfied` always
+/// holds the latest path state (nil before the first update), while the
+/// initial callback that merely reports the current path is suppressed so
+/// consumers only react to real transitions (Wi-Fi <-> cellular,
+/// connectivity loss/recovery).
 @MainActor
 final class AgenTTYNetworkPathObserver {
     private let monitor = NWPathMonitor()
@@ -12,6 +14,7 @@ final class AgenTTYNetworkPathObserver {
     private var lastPathSignature: String?
     private var isStarted = false
 
+    private(set) var isSatisfied: Bool?
     var pathDidChange: ((_ isSatisfied: Bool) -> Void)?
 
     func start() {
@@ -35,6 +38,7 @@ final class AgenTTYNetworkPathObserver {
     }
 
     private func handlePathUpdate(signature: String, isSatisfied: Bool) {
+        self.isSatisfied = isSatisfied
         let previousSignature = lastPathSignature
         lastPathSignature = signature
         guard let previousSignature, previousSignature != signature else { return }

@@ -24,6 +24,8 @@ nonisolated struct AgenTTYReconnectScreenInput: Equatable, Sendable {
     /// False while the app is not foreground active, which stops the spinner
     /// instead of burning background time on terminal writes nobody can see.
     var isAnimating: Bool
+    var notice: AgenTTYSSHRetryNotice?
+    var progress: SSHClientSession.Progress?
 }
 
 /// Pure text/escape-sequence construction for the reconnect screen.
@@ -33,7 +35,8 @@ nonisolated enum AgenTTYReconnectScreenRenderer {
         case blank
         case headline
         case detail
-        case footer
+        case noticeHeadline(String)
+        case noticeHint(String)
     }
 
     struct Layout: Equatable, Sendable {
@@ -50,7 +53,6 @@ nonisolated enum AgenTTYReconnectScreenRenderer {
     static let spinnerFrames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
     static let animatedTickInterval: TimeInterval = 0.1
     static let reducedMotionTickInterval: TimeInterval = 1.0
-    static let footerText = "Shell switching is paused until AgenTTY reconnects."
 
     static func tickInterval(reduceMotion: Bool) -> TimeInterval {
         reduceMotion ? reducedMotionTickInterval : animatedTickInterval
@@ -73,30 +75,70 @@ nonisolated enum AgenTTYReconnectScreenRenderer {
         }
     }
 
-    static func detail(phase: AgenTTYReconnectScreenPhase, now: Date) -> String {
+    static func detail(phase: AgenTTYReconnectScreenPhase, now: Date, progress: SSHClientSession.Progress?) -> String {
         switch phase {
         case .connecting(let attempt):
-            return attempt <= 0 ? "" : "attempt \(attempt)"
+            let attemptText = attempt <= 0 ? nil : "attempt \(attempt)"
+            return [attemptText, progress.map(progressText)].compactMap { $0 }.joined(separator: " · ")
         case .waitingToRetry(let attempt, let retryAt):
             let remaining = max(1, Int(ceil(retryAt.timeIntervalSince(now))))
             return "attempt \(attempt) · retrying in \(remaining)s"
         }
     }
 
-    static func layout(rows: Int) -> Layout {
-        let full: [Slot] = [.spinner, .blank, .headline, .blank, .detail, .blank, .footer]
-        let compact: [Slot] = [.spinner, .blank, .headline, .detail]
-        let minimal: [Slot] = [.spinner, .headline, .detail]
-
-        let slots: [Slot]
-        if rows >= full.count + 2 {
-            slots = full
-        } else if rows >= compact.count + 2 {
-            slots = compact
-        } else {
-            slots = minimal
+    static func progressText(_ progress: SSHClientSession.Progress) -> String {
+        switch progress {
+        case .signingIn:
+            "signing in…"
+        case .preparingHost:
+            "preparing host…"
+        case .startingTerminal:
+            "starting terminal…"
         }
+    }
+
+    static func layout(rows: Int, columns: Int, notice: AgenTTYSSHRetryNotice?) -> Layout {
+        let noticeLines = notice.map { wrapped($0.headline, columns: columns).map(Slot.noticeHeadline) } ?? []
+        let hintLines = notice.map { wrapped($0.hint, columns: columns).map(Slot.noticeHint) } ?? []
+        let separatedNotice: [Slot] = noticeLines.isEmpty ? [] : [.blank] + noticeLines
+        let minimal: [Slot] = [.spinner, .headline, .detail]
+        let candidates: [[Slot]] = [
+            [.spinner, .blank, .headline, .blank, .detail] + separatedNotice + hintLines,
+            [.spinner, .blank, .headline, .detail] + separatedNotice,
+            minimal + noticeLines,
+        ]
+        let slots = candidates.first { rows >= $0.count + 2 } ?? minimal
         return Layout(slots: slots, topPadding: max((rows - slots.count) / 2, 0))
+    }
+
+    static func wrapped(_ text: String, columns: Int) -> [String] {
+        let width = max(columns - 2, 1)
+        var lines: [String] = []
+        var current = ""
+        for word in text.split(separator: " ") {
+            var remainder = word[...]
+            while remainder.count > width {
+                if !current.isEmpty {
+                    lines.append(current)
+                    current = ""
+                }
+                lines.append(String(remainder.prefix(width)))
+                remainder = remainder.dropFirst(width)
+            }
+            guard !remainder.isEmpty else { continue }
+            if current.isEmpty {
+                current = String(remainder)
+            } else if current.count + 1 + remainder.count <= width {
+                current += " \(remainder)"
+            } else {
+                lines.append(current)
+                current = String(remainder)
+            }
+        }
+        if !current.isEmpty {
+            lines.append(current)
+        }
+        return lines
     }
 
     /// Full-screen takeover: clear, hide the cursor, and paint every slot.
@@ -106,9 +148,11 @@ nonisolated enum AgenTTYReconnectScreenRenderer {
         columns: Int,
         rows: Int,
         tick: Int,
-        now: Date
+        now: Date,
+        notice: AgenTTYSSHRetryNotice?,
+        progress: SSHClientSession.Progress?
     ) -> Data {
-        let layout = layout(rows: rows)
+        let layout = layout(rows: rows, columns: columns, notice: notice)
         var text = "\(hideCursor)\(reset)\(clearScreen)"
         text += String(repeating: "\r\n", count: layout.topPadding)
 
@@ -121,9 +165,11 @@ nonisolated enum AgenTTYReconnectScreenRenderer {
             case .headline:
                 return centered(headline(phase: phase, hostLabel: hostLabel), columns: columns)
             case .detail:
-                return centered(detail(phase: phase, now: now), columns: columns)
-            case .footer:
-                return "\(dim)\(centered(footerText, columns: columns))\(undim)"
+                return centered(detail(phase: phase, now: now, progress: progress), columns: columns)
+            case .noticeHeadline(let line):
+                return centered(line, columns: columns)
+            case .noticeHint(let line):
+                return "\(dim)\(centered(line, columns: columns))\(undim)"
             }
         }
         text += painted.joined(separator: "\r\n")
@@ -177,6 +223,7 @@ final class TerminalReconnectScreenPresenter {
         let columns: Int
         let rows: Int
         let headline: String
+        let notice: AgenTTYSSHRetryNotice?
     }
 
     private let activationDelay: TimeInterval
@@ -212,7 +259,7 @@ final class TerminalReconnectScreenPresenter {
         }
 
         if isPresenting {
-            redrawOrTick(previousPhase: previous?.phase)
+            redrawOrTick(previous: previous)
             return
         }
 
@@ -258,16 +305,16 @@ final class TerminalReconnectScreenPresenter {
         writeOutput?(AgenTTYReconnectScreenRenderer.dismissData(), "reconnect-screen-dismiss")
     }
 
-    private func redrawOrTick(previousPhase: AgenTTYReconnectScreenPhase?) {
+    private func redrawOrTick(previous: AgenTTYReconnectScreenInput?) {
         guard let input, let phase = input.phase else { return }
         let headline = AgenTTYReconnectScreenRenderer.headline(
             phase: phase,
             hostLabel: input.hostLabel
         )
-        let shape = DrawnShape(columns: input.columns, rows: input.rows, headline: headline)
+        let shape = DrawnShape(columns: input.columns, rows: input.rows, headline: headline, notice: input.notice)
         if drawnShape != shape {
             drawFullScreen(phase: phase, input: input)
-        } else if previousPhase != phase {
+        } else if previous?.phase != phase || previous?.progress != input.progress {
             paintDetailRow(phase: phase, input: input)
         }
         startTimerIfNeeded()
@@ -277,7 +324,8 @@ final class TerminalReconnectScreenPresenter {
         drawnShape = DrawnShape(
             columns: input.columns,
             rows: input.rows,
-            headline: AgenTTYReconnectScreenRenderer.headline(phase: phase, hostLabel: input.hostLabel)
+            headline: AgenTTYReconnectScreenRenderer.headline(phase: phase, hostLabel: input.hostLabel),
+            notice: input.notice
         )
         writeOutput?(
             AgenTTYReconnectScreenRenderer.fullScreenData(
@@ -286,7 +334,9 @@ final class TerminalReconnectScreenPresenter {
                 columns: input.columns,
                 rows: input.rows,
                 tick: tick,
-                now: Date()
+                now: Date(),
+                notice: input.notice,
+                progress: input.progress
             ),
             "reconnect-screen"
         )
@@ -295,7 +345,7 @@ final class TerminalReconnectScreenPresenter {
     private func handleTick() {
         guard isPresenting, let input, let phase = input.phase else { return }
         tick &+= 1
-        let layout = AgenTTYReconnectScreenRenderer.layout(rows: input.rows)
+        let layout = AgenTTYReconnectScreenRenderer.layout(rows: input.rows, columns: input.columns, notice: input.notice)
         var data = Data()
         if let spinnerRow = layout.row(of: .spinner) {
             data.append(
@@ -312,7 +362,7 @@ final class TerminalReconnectScreenPresenter {
     }
 
     private func paintDetailRow(phase: AgenTTYReconnectScreenPhase, input: AgenTTYReconnectScreenInput) {
-        let layout = AgenTTYReconnectScreenRenderer.layout(rows: input.rows)
+        let layout = AgenTTYReconnectScreenRenderer.layout(rows: input.rows, columns: input.columns, notice: input.notice)
         let data = detailRowData(phase: phase, input: input, layout: layout)
         guard !data.isEmpty else { return }
         writeOutput?(data, "reconnect-screen-detail")
@@ -325,7 +375,7 @@ final class TerminalReconnectScreenPresenter {
     ) -> Data {
         guard let detailRow = layout.row(of: .detail) else { return Data() }
         return AgenTTYReconnectScreenRenderer.rowData(
-            text: AgenTTYReconnectScreenRenderer.detail(phase: phase, now: Date()),
+            text: AgenTTYReconnectScreenRenderer.detail(phase: phase, now: Date(), progress: input.progress),
             row: detailRow,
             columns: input.columns
         )

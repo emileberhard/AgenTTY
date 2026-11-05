@@ -131,9 +131,9 @@ struct HostDetailView: View {
         )
     }
 
-    private var selectedUsablePublicKey: String? {
+    private var selectedAuthorizedKeyLine: String? {
         guard let selectedKeyID = draft.selectedKeyID else { return nil }
-        return keyStore.publicKey(for: selectedKeyID)
+        return keyStore.authorizedKeyLine(for: selectedKeyID)
     }
 
     private var isFormValid: Bool {
@@ -282,9 +282,9 @@ struct HostDetailView: View {
                 )
                 manualKeySection
 
-                if let selectedUsablePublicKey {
+                if let selectedAuthorizedKeyLine {
                     Section {
-                        SSHPublicKeyExportView(publicKey: selectedUsablePublicKey)
+                        SSHPublicKeyExportView(publicKey: selectedAuthorizedKeyLine)
                     } header: {
                         Text("Public Key")
                     } footer: {
@@ -1381,10 +1381,7 @@ struct HostDetailView: View {
                     connectionValidationWarningMessage = reachabilityWarningMessage(for: reachabilityError)
                 }
             } catch {
-                let outcome = SSHClientSession.connectFailureOutcome(
-                    for: error,
-                    rawReason: error.localizedDescription
-                )
+                let outcome = SSHClientSession.preflightFailureOutcome(for: error)
                 recordHostSetupFlow(
                     stage: .verificationFailed,
                     hostID: mode.existing?.id,
@@ -2428,7 +2425,7 @@ struct AutomaticHostSetupView: View {
 
         let claim = try await AgenTTYPairingRelayClient.shared.claimPairingSession(
             code: pairingCode,
-            publicKey: publicKey
+            publicKey: AgenTTYAuthorizedKeyLine.make(publicKey: publicKey, keyName: keyStore.keyName(for: keyID) ?? "")
         )
         recordHostSetupFlow(stage: .pairingClaimed)
         EsmaLog.notifications.notice(

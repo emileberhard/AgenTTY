@@ -5,7 +5,7 @@ struct GhosttyTerminalViewIOS: View {
     let ghostty: GhosttyRuntime
     let inputRouter: TerminalInputRouter
     let shellState: ShellIndicatorState
-    let keyMaterialStore: AgenTTYSSHKeyMaterialStore
+    let keyStore: AgenTTYSSHKeyStore
     let passwordStore: AgenTTYSSHPasswordStore
     let hostStore: AgenTTYHostStore
     let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
@@ -23,7 +23,7 @@ struct GhosttyTerminalViewIOS: View {
                 ghostty: ghostty,
                 inputRouter: inputRouter,
                 shellState: shellState,
-                keyMaterialStore: keyMaterialStore,
+                keyStore: keyStore,
                 passwordStore: passwordStore,
                 hostStore: hostStore,
                 trustedHostKeyStore: trustedHostKeyStore,
@@ -49,7 +49,7 @@ private struct GhosttySurfaceRepresentableIOS: UIViewRepresentable {
     let ghostty: GhosttyRuntime
     let inputRouter: TerminalInputRouter
     let shellState: ShellIndicatorState
-    let keyMaterialStore: AgenTTYSSHKeyMaterialStore
+    let keyStore: AgenTTYSSHKeyStore
     let passwordStore: AgenTTYSSHPasswordStore
     let hostStore: AgenTTYHostStore
     let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
@@ -69,7 +69,7 @@ private struct GhosttySurfaceRepresentableIOS: UIViewRepresentable {
     func makeUIView(context: Context) -> TerminalSurfaceViewIOS {
         let view = TerminalSurfaceViewIOS(
             ghostty: ghostty,
-            keyMaterialStore: keyMaterialStore,
+            keyStore: keyStore,
             passwordStore: passwordStore,
             hostStore: hostStore,
             trustedHostKeyStore: trustedHostKeyStore,

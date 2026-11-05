@@ -12,7 +12,63 @@ nonisolated struct AgenTTYSSHRecoveryDescription: Equatable, Sendable {
     let suggestions: [AgenTTYSSHRecoverySuggestion]
 }
 
+nonisolated struct AgenTTYSSHRetryFailure: Equatable, Sendable {
+    let outcome: AgenTTYSSHTerminationOutcome
+    let method: AgenTTYHostConnectionMethod
+    let address: String
+}
+
+nonisolated struct AgenTTYSSHRetryNotice: Equatable, Sendable {
+    let headline: String
+    let hint: String
+}
+
 nonisolated enum AgenTTYSSHRecoveryGuidance {
+    static func retryNotice(for failure: AgenTTYSSHRetryFailure, networkSatisfied: Bool?) -> AgenTTYSSHRetryNotice {
+        if networkSatisfied == false {
+            return AgenTTYSSHRetryNotice(headline: "No network connection", hint: "Waiting for Wi-Fi or cellular.")
+        }
+        switch failure.outcome.category {
+        case .connectTimeout, .networkError:
+            return unreachableNotice(method: failure.method, address: failure.address)
+        case .dnsFailure:
+            return AgenTTYSSHRetryNotice(
+                headline: "Can’t find \(failure.address)",
+                hint: "Check the host name, or use its IP address."
+            )
+        case .transportClosed where !failure.outcome.wasReady:
+            return AgenTTYSSHRetryNotice(
+                headline: "The host closed SSH before the terminal started.",
+                hint: "If this repeats, check the host’s SSH server."
+            )
+        case .relayConnectorOffline:
+            return AgenTTYSSHRetryNotice(
+                headline: "Can’t reach \(failure.address)",
+                hint: "The direct route failed and the host’s relay connector is offline. Check that the host is awake."
+            )
+        case .relayUnavailable:
+            return AgenTTYSSHRetryNotice(
+                headline: "Relay temporarily unavailable",
+                hint: "The direct route failed too."
+            )
+        default:
+            return AgenTTYSSHRetryNotice(headline: "Connection lost", hint: "AgenTTY will keep trying.")
+        }
+    }
+
+    private static func unreachableNotice(method: AgenTTYHostConnectionMethod, address: String) -> AgenTTYSSHRetryNotice {
+        switch method {
+        case .localNetwork:
+            AgenTTYSSHRetryNotice(headline: "Can’t reach \(address)", hint: "Make sure this device is on the host’s network.")
+        case .tailscale:
+            AgenTTYSSHRetryNotice(headline: "Can’t reach \(address)", hint: "Check that Tailscale is connected on this device and the host.")
+        case .publicInternet:
+            AgenTTYSSHRetryNotice(headline: "Can’t reach \(address)", hint: "Check the address, the port and the host’s firewall.")
+        case .relay:
+            AgenTTYSSHRetryNotice(headline: "Relay connection interrupted", hint: "AgenTTY will keep trying.")
+        }
+    }
+
     static func guidance(for outcome: AgenTTYSSHTerminationOutcome) -> AgenTTYSSHRecoveryDescription {
         switch outcome.category {
         case .algorithmNegotiationFailed:
@@ -31,28 +87,114 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
             )
         case .authFailed:
             return authenticationFailed
+        case .connectTimeout, .networkError:
+            return hostUnreachable
+        case .keyUnavailable:
+            return AgenTTYSSHRecoveryDescription(
+                title: "SSH Key Unavailable",
+                message: "AgenTTY couldn’t load this host’s private key from this device’s Keychain. Choose or import a key in Edit Host.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "key",
+                        title: "Choose a key on this device",
+                        subtitle: "Keys created or imported on another device are not available here."
+                    ),
+                ]
+            )
+        case .passwordUnavailable:
+            return AgenTTYSSHRecoveryDescription(
+                title: "SSH Password Unavailable",
+                message: "AgenTTY couldn’t load the saved password for this host from this device’s Keychain. Enter it again in Edit Host.",
+                suggestions: []
+            )
+        case .dnsFailure:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Host Name Not Found",
+                message: "The host name couldn’t be resolved from this device’s network.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "character.cursor.ibeam",
+                        title: "Check the address",
+                        subtitle: "Use the host’s full name or its IP address."
+                    ),
+                ]
+            )
+        case .relayRejected:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Relay Access Rejected",
+                message: "The direct connection failed, and the AgenTTY relay didn’t accept this device for this host. Run Automatic Setup on the host again to pair it.",
+                suggestions: []
+            )
+        case .relayLimit(let detail):
+            return AgenTTYSSHRecoveryDescription(
+                title: "Relay Limit Reached",
+                message: detail.isEmpty
+                    ? "The direct connection failed, and the AgenTTY relay refused another session for now."
+                    : "The direct connection failed, and the AgenTTY relay refused another session: \(detail)",
+                suggestions: []
+            )
+        case .relayConnectorOffline:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Can’t Reach This Host",
+                message: "The direct connection failed, and the host’s relay connector is offline.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "power",
+                        title: "Check the host",
+                        subtitle: "The host must be awake and online for its relay connector to run."
+                    ),
+                ]
+            )
+        case .relayUnavailable:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Relay Temporarily Unavailable",
+                message: "The direct connection failed, and the AgenTTY relay couldn’t be reached. Try again shortly.",
+                suggestions: []
+            )
+        case .keyInstallFailed(let hostMessage):
+            let reported = hostMessage.map { " The host reported: \($0)" } ?? ""
+            return AgenTTYSSHRecoveryDescription(
+                title: "Couldn’t Install the SSH Key",
+                message: "AgenTTY signed in with the password, but couldn’t add its key to ~/.ssh/authorized_keys on the host.\(reported)",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "folder.badge.person.crop",
+                        title: "Check ~/.ssh permissions",
+                        subtitle: "The account must own ~/.ssh and be able to write authorized_keys."
+                    ),
+                ]
+            )
+        case .hostSetupTimeout:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Host Setup Timed Out",
+                message: "AgenTTY signed in, but a setup command on the host didn’t finish in time.",
+                suggestions: [
+                    AgenTTYSSHRecoverySuggestion(
+                        icon: "terminal",
+                        title: "Check the login shell",
+                        subtitle: "Startup files must not wait for input or run slow commands for non-interactive sessions."
+                    ),
+                ]
+            )
+        case .unsupportedHostPlatform(let operatingSystem, let architecture):
+            return AgenTTYSSHRecoveryDescription(
+                title: "Host Platform Not Supported",
+                message: "This host runs \(operatingSystem) on \(architecture). AgenTTY supports macOS and Linux hosts on arm64 or x86_64.",
+                suggestions: []
+            )
         default:
             break
         }
 
         switch outcome.failureStage {
-        case .tcpConnect:
+        case .preflight:
             return AgenTTYSSHRecoveryDescription(
-                title: "Couldn’t Reach the Host",
-                message: "AgenTTY could not open a network connection to the host. Check the hostname, port, and that the iPhone can reach the host over the current network path.",
-                suggestions: [
-                    AgenTTYSSHRecoverySuggestion(
-                        icon: "wifi",
-                        title: "Check the network path",
-                        subtitle: "Use the same LAN, a public address, or Tailscale on both devices."
-                    ),
-                    AgenTTYSSHRecoverySuggestion(
-                        icon: "point.3.connected.trianglepath.dotted",
-                        title: "Verify SSH is listening",
-                        subtitle: "Confirm that SSH is running on the selected port for this host."
-                    ),
-                ]
+                title: "Couldn’t Start the Connection",
+                message: "AgenTTY couldn’t prepare a connection to this host. Review its details in Edit Host.",
+                suggestions: []
             )
+        case .tcpConnect:
+            return hostUnreachable
         case .sshAuth:
             return authenticationFailed
         case .hostToolsDownload:
@@ -127,6 +269,23 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
             )
         }
     }
+
+    private static let hostUnreachable = AgenTTYSSHRecoveryDescription(
+        title: "Couldn’t Reach the Host",
+        message: "AgenTTY could not open a network connection to the host. Check the hostname, port, and that the iPhone can reach the host over the current network path.",
+        suggestions: [
+            AgenTTYSSHRecoverySuggestion(
+                icon: "wifi",
+                title: "Check the network path",
+                subtitle: "Use the same LAN, a public address, or Tailscale on both devices."
+            ),
+            AgenTTYSSHRecoverySuggestion(
+                icon: "point.3.connected.trianglepath.dotted",
+                title: "Verify SSH is listening",
+                subtitle: "Confirm that SSH is running on the selected port for this host."
+            ),
+        ]
+    )
 
     private static let authenticationFailed = AgenTTYSSHRecoveryDescription(
             title: "SSH Authentication Failed",

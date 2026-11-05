@@ -1,148 +1,142 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AgenTTY_iOS
 
 private typealias Renderer = AgenTTYReconnectScreenRenderer
 
-final class ReconnectScreenTests: XCTestCase {
-    // MARK: - Host interaction gating
+struct ReconnectScreenTests {
+    private let notice = AgenTTYSSHRetryNotice(
+        headline: "Can’t reach mini.local",
+        hint: "Make sure this device is on the host’s network."
+    )
 
-    func testOnlyConnectedPhaseAllowsHostInteraction() {
-        XCTAssertTrue(AgenTTYHostConnectionPhase.connected.allowsHostInteraction)
-        XCTAssertFalse(AgenTTYHostConnectionPhase.connecting.allowsHostInteraction)
-        XCTAssertFalse(AgenTTYHostConnectionPhase.disconnected.allowsHostInteraction)
+    @Test
+    func onlyConnectedPhaseAllowsHostInteraction() {
+        #expect(AgenTTYHostConnectionPhase.connected.allowsHostInteraction)
+        #expect(!AgenTTYHostConnectionPhase.connecting.allowsHostInteraction)
+        #expect(!AgenTTYHostConnectionPhase.disconnected.allowsHostInteraction)
     }
 
-    // MARK: - Spinner
-
-    func testSpinnerWrapsAcrossFrames() {
+    @Test
+    func spinnerWrapsAcrossFramesInBothDirections() {
         let frameCount = Renderer.spinnerFrames.count
-        XCTAssertEqual(Renderer.spinnerFrame(at: 0), Renderer.spinnerFrames[0])
-        XCTAssertEqual(Renderer.spinnerFrame(at: frameCount), Renderer.spinnerFrames[0])
-        XCTAssertEqual(Renderer.spinnerFrame(at: frameCount + 3), Renderer.spinnerFrames[3])
+        #expect(Renderer.spinnerFrame(at: 0) == Renderer.spinnerFrames[0])
+        #expect(Renderer.spinnerFrame(at: frameCount + 3) == Renderer.spinnerFrames[3])
+        #expect(Renderer.spinnerFrame(at: -1) == Renderer.spinnerFrames[frameCount - 1])
+        #expect(Renderer.spinnerFrames.allSatisfy { $0.count == 1 })
     }
 
-    func testSpinnerHandlesNegativeTicks() {
-        XCTAssertEqual(
-            Renderer.spinnerFrame(at: -1),
-            Renderer.spinnerFrames[Renderer.spinnerFrames.count - 1]
-        )
+    @Test
+    func reduceMotionSlowsTheTickCadence() {
+        #expect(Renderer.tickInterval(reduceMotion: false) == Renderer.animatedTickInterval)
+        #expect(Renderer.tickInterval(reduceMotion: true) == Renderer.reducedMotionTickInterval)
+        #expect(Renderer.reducedMotionTickInterval > Renderer.animatedTickInterval)
     }
 
-    func testEverySpinnerFrameIsOneCharacterWide() {
-        for frame in Renderer.spinnerFrames {
-            XCTAssertEqual(frame.count, 1, "spinner frame \(frame) must occupy one cell")
-        }
+    @Test
+    func firstAttemptSaysConnectingAndRetriesSayReconnecting() {
+        #expect(Renderer.headline(phase: .connecting(attempt: 0), hostLabel: "mac-mini") == "Connecting to mac-mini")
+        #expect(Renderer.headline(phase: .connecting(attempt: 2), hostLabel: "mac-mini") == "Reconnecting to mac-mini")
+        #expect(
+            Renderer.headline(phase: .waitingToRetry(attempt: 2, retryAt: Date()), hostLabel: "mac-mini")
+                == "Reconnecting to mac-mini"
+        )
+        #expect(Renderer.headline(phase: .connecting(attempt: 0), hostLabel: "   ") == "Connecting to host")
     }
 
-    func testReduceMotionSlowsTheTickCadence() {
-        XCTAssertEqual(Renderer.tickInterval(reduceMotion: false), Renderer.animatedTickInterval)
-        XCTAssertEqual(Renderer.tickInterval(reduceMotion: true), Renderer.reducedMotionTickInterval)
-        XCTAssertGreaterThan(
-            Renderer.tickInterval(reduceMotion: true),
-            Renderer.tickInterval(reduceMotion: false)
-        )
-    }
-
-    // MARK: - Headline
-
-    func testFirstAttemptSaysConnectingAndRetriesSayReconnecting() {
-        XCTAssertEqual(
-            Renderer.headline(phase: .connecting(attempt: 0), hostLabel: "mac-mini"),
-            "Connecting to mac-mini"
-        )
-        XCTAssertEqual(
-            Renderer.headline(phase: .connecting(attempt: 2), hostLabel: "mac-mini"),
-            "Reconnecting to mac-mini"
-        )
-        XCTAssertEqual(
-            Renderer.headline(
-                phase: .waitingToRetry(attempt: 2, retryAt: Date()),
-                hostLabel: "mac-mini"
-            ),
-            "Reconnecting to mac-mini"
-        )
-    }
-
-    func testHeadlineFallsBackWhenHostLabelIsBlank() {
-        XCTAssertEqual(
-            Renderer.headline(phase: .connecting(attempt: 0), hostLabel: "   "),
-            "Connecting to host"
-        )
-    }
-
-    // MARK: - Detail
-
-    func testDetailIsEmptyForTheFirstConnectAndCountsRetries() {
+    @Test
+    func detailCombinesTheAttemptWithTheConnectionStage() {
         let now = Date()
-        XCTAssertEqual(Renderer.detail(phase: .connecting(attempt: 0), now: now), "")
-        XCTAssertEqual(Renderer.detail(phase: .connecting(attempt: 3), now: now), "attempt 3")
+        #expect(Renderer.detail(phase: .connecting(attempt: 0), now: now, progress: nil) == "")
+        #expect(Renderer.detail(phase: .connecting(attempt: 3), now: now, progress: nil) == "attempt 3")
+        #expect(Renderer.detail(phase: .connecting(attempt: 0), now: now, progress: .signingIn) == "signing in…")
+        #expect(
+            Renderer.detail(phase: .connecting(attempt: 2), now: now, progress: .preparingHost)
+                == "attempt 2 · preparing host…"
+        )
+        #expect(
+            Renderer.detail(phase: .connecting(attempt: 0), now: now, progress: .startingTerminal)
+                == "starting terminal…"
+        )
     }
 
-    func testDetailRoundsTheRetryCountdownUp() {
+    @Test
+    func retryCountdownRoundsUpAndNeverDropsBelowOneSecond() {
         let now = Date()
-        let phase = AgenTTYReconnectScreenPhase.waitingToRetry(
-            attempt: 4,
-            retryAt: now.addingTimeInterval(3.2)
+        let soon = AgenTTYReconnectScreenPhase.waitingToRetry(attempt: 4, retryAt: now.addingTimeInterval(3.2))
+        let overdue = AgenTTYReconnectScreenPhase.waitingToRetry(attempt: 1, retryAt: now.addingTimeInterval(-5))
+
+        #expect(Renderer.detail(phase: soon, now: now, progress: nil) == "attempt 4 · retrying in 4s")
+        #expect(Renderer.detail(phase: overdue, now: now, progress: nil) == "attempt 1 · retrying in 1s")
+    }
+
+    @Test
+    func tallTerminalShowsTheWholeNoticeBelowTheDetail() {
+        let layout = Renderer.layout(rows: 40, columns: 80, notice: notice)
+
+        #expect(layout.slots == [
+            .spinner, .blank, .headline, .blank, .detail, .blank,
+            .noticeHeadline("Can’t reach mini.local"),
+            .noticeHint("Make sure this device is on the host’s network."),
+        ])
+        #expect(layout.topPadding == (40 - 8) / 2)
+        #expect(layout.row(of: .detail) == layout.topPadding + 5)
+    }
+
+    @Test
+    func narrowTerminalWrapsTheNoticeAtWordBoundaries() {
+        let layout = Renderer.layout(rows: 40, columns: 26, notice: notice)
+
+        #expect(layout.slots == [
+            .spinner, .blank, .headline, .blank, .detail, .blank,
+            .noticeHeadline("Can’t reach mini.local"),
+            .noticeHint("Make sure this device is"),
+            .noticeHint("on the host’s network."),
+        ])
+    }
+
+    @Test
+    func wordsLongerThanTheLineAreSplit() {
+        #expect(Renderer.wrapped("unreachable-host.example.com", columns: 12) == ["unreachabl", "e-host.exa", "mple.com"])
+        #expect(
+            Renderer.wrapped("Can’t reach averyveryverylonghostname", columns: 12)
+                == ["Can’t", "reach", "averyveryv", "erylonghos", "tname"]
         )
-
-        XCTAssertEqual(Renderer.detail(phase: phase, now: now), "attempt 4 · retrying in 4s")
     }
 
-    func testDetailNeverCountsBelowOneSecond() {
-        let now = Date()
-        let phase = AgenTTYReconnectScreenPhase.waitingToRetry(
-            attempt: 1,
-            retryAt: now.addingTimeInterval(-5)
-        )
-
-        XCTAssertEqual(Renderer.detail(phase: phase, now: now), "attempt 1 · retrying in 1s")
+    @Test
+    func shortTerminalsKeepTheNoticeHeadlineBeforeDroppingIt() {
+        #expect(Renderer.layout(rows: 8, columns: 80, notice: notice).slots == [
+            .spinner, .blank, .headline, .detail, .blank, .noticeHeadline("Can’t reach mini.local"),
+        ])
+        #expect(Renderer.layout(rows: 6, columns: 80, notice: notice).slots == [
+            .spinner, .headline, .detail, .noticeHeadline("Can’t reach mini.local"),
+        ])
+        #expect(Renderer.layout(rows: 4, columns: 80, notice: notice).slots == [.spinner, .headline, .detail])
+        #expect(Renderer.layout(rows: 40, columns: 80, notice: nil).slots == [
+            .spinner, .blank, .headline, .blank, .detail,
+        ])
     }
 
-    // MARK: - Layout
-
-    func testTallTerminalUsesTheFullLayout() {
-        let layout = Renderer.layout(rows: 40)
-
-        XCTAssertEqual(
-            layout.slots,
-            [.spinner, .blank, .headline, .blank, .detail, .blank, .footer]
-        )
-        XCTAssertEqual(layout.topPadding, (40 - 7) / 2)
-        XCTAssertEqual(layout.row(of: .spinner), layout.topPadding + 1)
-        XCTAssertEqual(layout.row(of: .headline), layout.topPadding + 3)
-        XCTAssertEqual(layout.row(of: .detail), layout.topPadding + 5)
-        XCTAssertEqual(layout.row(of: .footer), layout.topPadding + 7)
-    }
-
-    func testShortTerminalDropsTheFooterAndThenTheSeparators() {
-        let compact = Renderer.layout(rows: 7)
-        XCTAssertEqual(compact.slots, [.spinner, .blank, .headline, .detail])
-        XCTAssertNil(compact.row(of: .footer))
-
-        let minimal = Renderer.layout(rows: 4)
-        XCTAssertEqual(minimal.slots, [.spinner, .headline, .detail])
-        XCTAssertEqual(minimal.row(of: .spinner), 1)
-    }
-
-    func testEveryUsableLayoutFitsInsideTheTerminal() {
+    @Test
+    func everyLayoutFitsInsideTheTerminal() {
         for rows in 3...60 {
-            let layout = Renderer.layout(rows: rows)
-            let lastRow = layout.topPadding + layout.slots.count
-            XCTAssertLessThanOrEqual(lastRow, rows, "layout for \(rows) rows overflowed")
+            for columns in [12, 40, 120] {
+                let layout = Renderer.layout(rows: rows, columns: columns, notice: notice)
+                #expect(layout.topPadding + layout.slots.count <= rows, "rows=\(rows) columns=\(columns)")
+            }
         }
     }
 
-    // MARK: - Centering
-
-    func testCenteringPadsAndTruncates() {
-        XCTAssertEqual(Renderer.centered("abc", columns: 9), "   abc")
-        XCTAssertEqual(Renderer.centered("abcdef", columns: 4), "abcd")
-        XCTAssertEqual(Renderer.centered("", columns: 10), "")
+    @Test
+    func centeringPadsAndTruncates() {
+        #expect(Renderer.centered("abc", columns: 9) == "   abc")
+        #expect(Renderer.centered("abcdef", columns: 4) == "abcd")
+        #expect(Renderer.centered("", columns: 10) == "")
     }
 
-    // MARK: - Escape sequences
-
-    func testFullScreenDrawClearsHidesTheCursorAndPaintsTheHeadline() {
+    @Test
+    func fullScreenDrawPaintsTheNoticeWithADimHint() {
         let text = renderedText(
             Renderer.fullScreenData(
                 phase: .connecting(attempt: 2),
@@ -150,56 +144,34 @@ final class ReconnectScreenTests: XCTestCase {
                 columns: 60,
                 rows: 24,
                 tick: 0,
-                now: Date()
+                now: Date(),
+                notice: notice,
+                progress: .signingIn
             )
         )
 
-        XCTAssertTrue(text.hasPrefix("\u{1B}[?25l\u{1B}[0m\u{1B}[2J\u{1B}[H"))
-        XCTAssertTrue(text.contains("Reconnecting to mac-mini"))
-        XCTAssertTrue(text.contains("attempt 2"))
-        XCTAssertTrue(text.contains(Renderer.footerText))
-        XCTAssertTrue(text.contains(Renderer.spinnerFrames[0]))
-        XCTAssertFalse(text.hasSuffix("\r\n"), "a trailing newline would scroll the block")
+        #expect(text.hasPrefix("\u{1B}[?25l\u{1B}[0m\u{1B}[2J\u{1B}[H"))
+        #expect(text.contains("Reconnecting to mac-mini"))
+        #expect(text.contains("attempt 2 · signing in…"))
+        #expect(text.contains("Can’t reach mini.local"))
+        #expect(text.contains("\u{1B}[2m"))
+        #expect(text.contains("Make sure this device is on the host’s network.\u{1B}[22m"))
+        #expect(!text.hasSuffix("\r\n"))
     }
 
-    func testFullScreenDrawOmitsTheFooterOnShortTerminals() {
-        let text = renderedText(
-            Renderer.fullScreenData(
-                phase: .connecting(attempt: 0),
-                hostLabel: "mac-mini",
-                columns: 60,
-                rows: 6,
-                tick: 0,
-                now: Date()
-            )
-        )
-
-        XCTAssertFalse(text.contains(Renderer.footerText))
-        XCTAssertTrue(text.contains("Connecting to mac-mini"))
+    @Test
+    func rowRepaintAddressesAndClearsExactlyOneRow() {
+        #expect(renderedText(Renderer.rowData(text: "attempt 3", row: 12, columns: 21)) == "\u{1B}[12;1H\u{1B}[2K      attempt 3")
     }
 
-    func testRowRepaintAddressesAndClearsExactlyOneRow() {
-        let text = renderedText(Renderer.rowData(text: "attempt 3", row: 12, columns: 21))
-
-        XCTAssertEqual(text, "\u{1B}[12;1H\u{1B}[2K      attempt 3")
-    }
-
-    func testDismissRestoresTheCursor() {
-        let text = renderedText(Renderer.dismissData())
-
-        XCTAssertEqual(text, "\u{1B}[0m\u{1B}[2J\u{1B}[H\u{1B}[?25h")
-    }
-
-    // MARK: - Helpers
-
-    private func renderedText(_ data: Data) -> String {
-        String(decoding: data, as: UTF8.self)
+    @Test
+    func dismissRestoresTheCursor() {
+        #expect(renderedText(Renderer.dismissData()) == "\u{1B}[0m\u{1B}[2J\u{1B}[H\u{1B}[?25h")
     }
 }
 
 @MainActor
-final class ReconnectScreenPresenterTests: XCTestCase {
-    /// Collects everything the presenter would have written to the terminal.
+struct ReconnectScreenPresenterTests {
     private final class WriteRecorder {
         private(set) var sources: [String] = []
         private(set) var text = ""
@@ -222,105 +194,121 @@ final class ReconnectScreenPresenterTests: XCTestCase {
 
     private func makeInput(
         phase: AgenTTYReconnectScreenPhase?,
-        isAnimating: Bool = true
+        notice: AgenTTYSSHRetryNotice? = nil,
+        progress: SSHClientSession.Progress? = nil
     ) -> AgenTTYReconnectScreenInput {
         AgenTTYReconnectScreenInput(
             phase: phase,
             hostLabel: "mac-mini",
             columns: 60,
             rows: 24,
-            isAnimating: isAnimating
+            isAnimating: true,
+            notice: notice,
+            progress: progress
         )
     }
 
-    /// The presenter activates on a later main-queue turn, so tests have to let
-    /// the run loop drain before asserting.
-    private func drainMainQueue() {
-        let drained = expectation(description: "main queue drained")
-        DispatchQueue.main.async { drained.fulfill() }
-        wait(for: [drained], timeout: 1)
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
     }
 
-    func testNothingIsDrawnWhileNoReconnectIsInFlight() {
+    @Test
+    func nothingIsDrawnWhileNoReconnectIsInFlight() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: nil))
-        drainMainQueue()
+        await drainMainQueue()
 
-        XCTAssertFalse(presenter.isPresenting)
-        XCTAssertTrue(recorder.text.isEmpty)
+        #expect(!presenter.isPresenting)
+        #expect(recorder.text.isEmpty)
     }
 
-    func testConnectingDrawsTheScreenAndTakesOverStatusLines() {
+    @Test
+    func connectingDrawsTheScreenAfterTheGracePeriod() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 2)))
-        XCTAssertFalse(presenter.isPresenting, "the screen waits out its activation grace period")
-        drainMainQueue()
+        #expect(!presenter.isPresenting)
+        await drainMainQueue()
 
-        XCTAssertTrue(presenter.isPresenting)
-        XCTAssertTrue(recorder.text.contains("Reconnecting to mac-mini"))
-        XCTAssertEqual(recorder.sources, ["reconnect-screen"])
+        #expect(presenter.isPresenting)
+        #expect(recorder.text.contains("Reconnecting to mac-mini"))
+        #expect(recorder.sources == ["reconnect-screen"])
     }
 
-    func testAFastReconnectNeverFlashesTheScreen() {
+    @Test
+    func aFastReconnectNeverFlashesTheScreen() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 1)))
         presenter.update(makeInput(phase: nil))
-        drainMainQueue()
+        await drainMainQueue()
 
-        XCTAssertFalse(presenter.isPresenting)
-        XCTAssertTrue(recorder.text.isEmpty, "no draw means no clear is needed either")
+        #expect(!presenter.isPresenting)
+        #expect(recorder.text.isEmpty)
     }
 
-    func testReconnectingRestoresTheTerminalOnSuccess() {
+    @Test
+    func reconnectingRestoresTheTerminalOnSuccess() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 1)))
-        drainMainQueue()
+        await drainMainQueue()
         presenter.update(makeInput(phase: nil))
 
-        XCTAssertFalse(presenter.isPresenting)
-        XCTAssertEqual(recorder.sources.last, "reconnect-screen-dismiss")
-        XCTAssertTrue(recorder.text.hasSuffix("\u{1B}[?25h"), "the cursor must come back")
+        #expect(!presenter.isPresenting)
+        #expect(recorder.sources.last == "reconnect-screen-dismiss")
+        #expect(recorder.text.hasSuffix("\u{1B}[?25h"))
     }
 
-    func testTerminalResizeRedrawsTheCenteredBlock() {
+    @Test
+    func resizeAndNoticeChangesRedrawTheWholeBlock() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 1)))
-        drainMainQueue()
+        await drainMainQueue()
         var resized = makeInput(phase: .connecting(attempt: 1))
         resized.columns = 100
         presenter.update(resized)
+        let notice = AgenTTYSSHRetryNotice(headline: "No network connection", hint: "Waiting for Wi-Fi or cellular.")
+        var withNotice = makeInput(phase: .connecting(attempt: 1), notice: notice)
+        withNotice.columns = 100
+        presenter.update(withNotice)
 
-        XCTAssertEqual(recorder.sources, ["reconnect-screen", "reconnect-screen"])
+        #expect(recorder.sources == ["reconnect-screen", "reconnect-screen", "reconnect-screen"])
+        #expect(recorder.text.contains("No network connection"))
     }
 
-    func testCountdownUpdatesRepaintOnlyTheDetailRow() {
+    @Test
+    func countdownAndProgressRepaintOnlyTheDetailRow() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 1)))
-        drainMainQueue()
-        presenter.update(
-            makeInput(phase: .waitingToRetry(attempt: 2, retryAt: Date().addingTimeInterval(4)))
-        )
+        await drainMainQueue()
+        presenter.update(makeInput(phase: .connecting(attempt: 1), progress: .preparingHost))
+        presenter.update(makeInput(phase: .waitingToRetry(attempt: 2, retryAt: Date().addingTimeInterval(4))))
 
-        // Headline is identical for both phases, so no full redraw is needed.
-        XCTAssertEqual(recorder.sources, ["reconnect-screen", "reconnect-screen-detail"])
-        XCTAssertTrue(recorder.text.contains("attempt 2 · retrying in 4s"))
+        #expect(recorder.sources == ["reconnect-screen", "reconnect-screen-detail", "reconnect-screen-detail"])
+        #expect(recorder.text.contains("attempt 1 · preparing host…"))
+        #expect(recorder.text.contains("attempt 2 · retrying in 4s"))
     }
 
-    func testInvalidateDropsTheScreenWithoutWriting() {
+    @Test
+    func invalidateDropsTheScreenWithoutWriting() async {
         let (presenter, recorder) = makePresenter()
 
         presenter.update(makeInput(phase: .connecting(attempt: 1)))
-        drainMainQueue()
+        await drainMainQueue()
         let writesBeforeInvalidate = recorder.sources.count
         presenter.invalidate()
 
-        XCTAssertFalse(presenter.isPresenting)
-        XCTAssertEqual(recorder.sources.count, writesBeforeInvalidate)
+        #expect(!presenter.isPresenting)
+        #expect(recorder.sources.count == writesBeforeInvalidate)
     }
+}
+
+private func renderedText(_ data: Data) -> String {
+    String(decoding: data, as: UTF8.self)
 }

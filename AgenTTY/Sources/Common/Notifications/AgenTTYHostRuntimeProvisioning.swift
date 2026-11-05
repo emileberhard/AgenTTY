@@ -11,7 +11,7 @@ enum AgenTTYHostRuntimeProvisionError: LocalizedError {
     case remoteWriteFailed(String)
     case remoteCommandFailed(String)
     case hostPlatformDetectionFailed(String)
-    case unsupportedHostPlatform(String)
+    case unsupportedHostPlatform(operatingSystem: String, architecture: String)
 
     var errorDescription: String? {
         switch self {
@@ -23,8 +23,8 @@ enum AgenTTYHostRuntimeProvisionError: LocalizedError {
             "Remote host runtime command failed: \(output)"
         case .hostPlatformDetectionFailed(let output):
             "Failed to detect remote host platform: \(output)"
-        case .unsupportedHostPlatform(let description):
-            "Unsupported remote host platform: \(description)"
+        case .unsupportedHostPlatform(let operatingSystem, let architecture):
+            "Unsupported remote host platform: \(operatingSystem) \(architecture)"
         }
     }
 }
@@ -36,28 +36,31 @@ enum AgenTTYRemoteHostPlatform: String, Sendable {
     case linuxX86_64 = "linux-x86_64"
 
     static func detect(ssh: SSHClientSession) async throws -> Self {
-        let (success, output) = await ssh.runCommandCapturingOutput("uname -s && uname -m")
-        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard success else {
-            throw AgenTTYHostRuntimeProvisionError.hostPlatformDetectionFailed(trimmedOutput)
-        }
+        let trimmedOutput = try await ssh.runCommand("uname -s && uname -m").get()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let lines = trimmedOutput
             .split(whereSeparator: \.isNewline)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
         guard lines.count >= 2 else {
             throw AgenTTYHostRuntimeProvisionError.hostPlatformDetectionFailed(trimmedOutput)
         }
 
-        guard let platform = parse(operatingSystem: lines[0], architecture: lines[1]) else {
+        guard let platform = parse(operatingSystem: lines[0].lowercased(), architecture: lines[1].lowercased()) else {
             throw AgenTTYHostRuntimeProvisionError.unsupportedHostPlatform(
-                "\(lines[0]) \(lines[1])"
+                operatingSystem: displayName(lines[0]),
+                architecture: displayName(lines[1])
             )
         }
 
         return platform
+    }
+
+    private static func displayName(_ unameField: String) -> String {
+        let printable = unameField.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        return String(String(String.UnicodeScalarView(printable)).prefix(40))
     }
 
     private static func parse(operatingSystem: String, architecture: String) -> Self? {
@@ -368,7 +371,7 @@ enum AgenTTYHostRuntimeProvisioner {
     /// step-by-step provisioning path, which uploads whatever is missing.
     static func prepareBaseRuntime(ssh: SSHClientSession) async throws {
         let preparationStartedAt = DispatchTime.now().uptimeNanoseconds
-        let gatheredFacts = await gatherHostRuntimeFacts(ssh: ssh)
+        let gatheredFacts = try await gatherHostRuntimeFacts(ssh: ssh)
         EsmaLog.terminal.info(
             "host runtime facts resolved fast_path=\(gatheredFacts != nil) elapsed_ms=\(EsmaDiagnostics.elapsedMilliseconds(since: preparationStartedAt))"
         )
@@ -377,7 +380,7 @@ enum AgenTTYHostRuntimeProvisioner {
         if let gatheredFacts {
             installedStaticMetadata = gatheredFacts.staticMetadata
         } else {
-            installedStaticMetadata = await installedStaticAssetsMetadata(
+            installedStaticMetadata = try await installedStaticAssetsMetadata(
                 ssh: ssh,
                 group: .runtime
             )
@@ -411,7 +414,7 @@ enum AgenTTYHostRuntimeProvisioner {
         if let gatheredFacts {
             installedAgentAssetsMetadata = gatheredFacts.agentAssetsMetadata
         } else {
-            installedAgentAssetsMetadata = await installedStaticAssetsMetadata(
+            installedAgentAssetsMetadata = try await installedStaticAssetsMetadata(
                 ssh: ssh,
                 group: .notifications
             )
@@ -442,7 +445,7 @@ enum AgenTTYHostRuntimeProvisioner {
         if let gatheredFacts {
             installedBinaryMetadata = gatheredFacts.binaryMetadata
         } else {
-            installedBinaryMetadata = await installedBinaryRuntimeMetadata(ssh: ssh)
+            installedBinaryMetadata = try await installedBinaryRuntimeMetadata(ssh: ssh)
         }
         let expectedRuntimeVersionHint = AgenTTYBuildFlavor.current().expectedHostRuntimeVersionHint
         let binaryPayloadKnownCurrent = gatheredFacts?.binaryPayloadPresent == true
@@ -526,12 +529,9 @@ enum AgenTTYHostRuntimeProvisioner {
                 ssh: ssh
             )
                 if codexInstalled {
-                    let (success, output) = await ssh.runCommandCapturingOutput(
+                    _ = try await ssh.runCommand(
                         "\(AgenTTYHostRuntime.notifyBinaryRemotePath) preserve-codex-notify"
-                    )
-                    guard success else {
-                        throw AgenTTYHostRuntimeProvisionError.remoteCommandFailed(output)
-                    }
+                    ).get()
                 } else {
                     try await removeRemoteFiles(
                         [AgenTTYHostRuntime.codexOriginalNotifyRemotePath],
@@ -554,7 +554,7 @@ enum AgenTTYHostRuntimeProvisioner {
     }
 
     static func resolveHostPlatform(ssh: SSHClientSession) async throws -> AgenTTYRemoteHostPlatform {
-        let installedMetadata = await installedStaticAssetsMetadata(
+        let installedMetadata = try await installedStaticAssetsMetadata(
             ssh: ssh,
             group: .runtime
         )
@@ -607,12 +607,7 @@ enum AgenTTYHostRuntimeProvisioner {
             )
             try Task.checkCancellation()
             let command = relayConnectorActivationCommand(candidateRemotePath: candidatePath)
-            let (success, output) = await ssh.runCommandCapturingOutput(command)
-            guard success else {
-                throw AgenTTYHostRuntimeProvisionError.remoteCommandFailed(
-                    output.trimmingCharacters(in: .whitespacesAndNewlines)
-                )
-            }
+            let output = try await ssh.runCommand(command).get()
             EsmaLog.terminal.notice(
                 "relay connector refreshed runtime_version=\(artifact.runtimeVersion, privacy: .public) target=\(hostPlatform.rawValue, privacy: .public) result=\(output.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)"
             )
@@ -658,11 +653,8 @@ enum AgenTTYHostRuntimeProvisioner {
           printf 'stale'
         fi
         """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        let status = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard success else {
-            throw AgenTTYHostRuntimeProvisionError.remoteCommandFailed(status)
-        }
+        let status = try await ssh.runCommand(command).get()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         switch status {
         case "not_installed":
             return .notInstalled
@@ -727,7 +719,7 @@ enum AgenTTYHostRuntimeProvisioner {
     /// original step-by-step path.
     private static func gatherHostRuntimeFacts(
         ssh: SSHClientSession
-    ) async -> AgenTTYGatheredHostRuntimeFacts? {
+    ) async throws -> AgenTTYGatheredHostRuntimeFacts? {
         let staticRequirements = AgenTTYHostRuntimeBundleCache.runtimeStaticRemoteRequirements
         let agentRequirements = AgenTTYHostRuntimeBundleCache.notificationStaticRemoteRequirements
         let binaryRequirements = [
@@ -822,8 +814,7 @@ enum AgenTTYHostRuntimeProvisioner {
         fi
         """
 
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        guard success else {
+        guard case .success(let output) = try await ssh.runCommand(command).answered() else {
             EsmaLog.terminal.notice("host runtime fact gathering failed; using full provisioning path")
             return nil
         }
@@ -951,13 +942,12 @@ enum AgenTTYHostRuntimeProvisioner {
         ssh: SSHClientSession
     ) async throws {
         let expectedSHA256 = sha256Hex(data)
-        let didWrite = await ssh.writeRemoteFile(
+        guard case .failure = try await ssh.writeRemoteFile(
             data,
             remotePath: remotePath,
             executable: executable,
             expectedSHA256: expectedSHA256
-        )
-        if didWrite {
+        ).answered() else {
             return
         }
 
@@ -965,13 +955,12 @@ enum AgenTTYHostRuntimeProvisioner {
             "host runtime remote write failed path=\(remotePath, privacy: .public) retrying=true"
         )
 
-        let didRetryWrite = await ssh.writeRemoteFile(
+        guard case .success = try await ssh.writeRemoteFile(
             data,
             remotePath: remotePath,
             executable: executable,
             expectedSHA256: expectedSHA256
-        )
-        guard didRetryWrite else {
+        ).answered() else {
             throw AgenTTYHostRuntimeProvisionError.remoteWriteFailed(remotePath)
         }
 
@@ -990,10 +979,7 @@ enum AgenTTYHostRuntimeProvisioner {
         set -e
         rm -f \(remotePaths.joined(separator: " "))
         """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        guard success else {
-            throw AgenTTYHostRuntimeProvisionError.remoteCommandFailed(output)
-        }
+        _ = try await ssh.runCommand(command).get()
     }
 
     static func removeLegacyRemoteFiles(
@@ -1046,11 +1032,8 @@ enum AgenTTYHostRuntimeProvisioner {
         printf 'installed_claude=%s\\n' "$(cat "$CLAUDE_REALPATH_FILE" 2>/dev/null || true)"
         printf 'installed_codex=%s\\n' "$(cat "$CODEX_REALPATH_FILE" 2>/dev/null || true)"
         """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        let trimmedOutput = output.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard success else {
-            throw AgenTTYHostRuntimeProvisionError.remoteCommandFailed(trimmedOutput)
-        }
+        let trimmedOutput = try await ssh.runCommand(command).get()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         var values: [String: String] = [:]
         for rawLine in trimmedOutput.split(whereSeparator: \.isNewline) {
@@ -1083,7 +1066,7 @@ enum AgenTTYHostRuntimeProvisioner {
         let assetsPlatformMatchesInstalled = loadedAssets.hostPlatform == installedMetadata.hostPlatform
         let metadataMatchesInstalled = assetsVersionMatchesInstalled && assetsPlatformMatchesInstalled
         let remoteAssetsPresent = metadataMatchesInstalled
-            ? await remoteFilesMatchRequirements(
+            ? try await remoteFilesMatchRequirements(
                 loadedAssets.assets.compactMap { $0.spec.remoteRequirement },
                 ssh: ssh,
                 logLabel: logLabel
@@ -1131,7 +1114,7 @@ enum AgenTTYHostRuntimeProvisioner {
             installedMetadata.runtimeVersion == resolvedArtifacts.runtimeVersion &&
             installedMetadata.hostPlatform == hostPlatform
         if resolvedMetadataMatchesInstalled,
-           await remoteRuntimePayloadMatches(
+           try await remoteRuntimePayloadMatches(
                integrityManifest: integrityManifest,
                ssh: ssh
            ) {
@@ -1198,7 +1181,7 @@ enum AgenTTYHostRuntimeProvisioner {
     private static func remoteRuntimePayloadMatches(
         integrityManifest: String,
         ssh: SSHClientSession
-    ) async -> Bool {
+    ) async throws -> Bool {
         let expectedManifest = SSHClientSession.shellSingleQuoted(integrityManifest)
         let integrityCheck = runtimePayloadIntegrityCheckScript(
             successCommand: "true",
@@ -1211,13 +1194,13 @@ enum AgenTTYHostRuntimeProvisioner {
         [ "$actual_integrity_manifest" = "$expected_integrity_manifest" ]
         \(integrityCheck)
         """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        if !success {
-            EsmaLog.terminal.notice(
-                "host runtime integrity probe failed; payload will be repaired output=\(output.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)"
-            )
+        guard case .failure(let failure) = try await ssh.runCommand(command).answered() else {
+            return true
         }
-        return success
+        EsmaLog.terminal.notice(
+            "host runtime integrity probe failed; payload will be repaired error=\(failure.localizedDescription, privacy: .public)"
+        )
+        return false
     }
 
     private static func runtimePayloadIntegrityCheckScript(
@@ -1323,7 +1306,7 @@ enum AgenTTYHostRuntimeProvisioner {
             )
         }
         let wrapperPresent = staticAssetsCurrent
-            ? await remoteFilesMatchRequirements(
+            ? try await remoteFilesMatchRequirements(
                 [
                     AgenTTYRemoteFileRequirement(
                         remotePath: wrapperRemotePath,
@@ -1352,7 +1335,7 @@ enum AgenTTYHostRuntimeProvisioner {
         _ requirements: [AgenTTYRemoteFileRequirement],
         ssh: SSHClientSession,
         logLabel: String
-    ) async -> Bool {
+    ) async throws -> Bool {
         guard !requirements.isEmpty else {
             return true
         }
@@ -1372,10 +1355,13 @@ enum AgenTTYHostRuntimeProvisioner {
         set +e
         \(checks)
         """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        guard success else {
+        let output: String
+        switch try await ssh.runCommand(command).answered() {
+        case .success(let value):
+            output = value
+        case .failure(let failure):
             EsmaLog.terminal.error(
-                "\(logLabel, privacy: .public) presence probe failed output=\(output.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)"
+                "\(logLabel, privacy: .public) presence probe failed error=\(failure.localizedDescription, privacy: .public)"
             )
             return false
         }
@@ -1417,90 +1403,17 @@ enum AgenTTYHostRuntimeProvisioner {
         return true
     }
 
-    private static func managedTerminfoEntriesPresent(
-        named entryNames: [String],
-        ssh: SSHClientSession
-    ) async -> Bool {
-        guard !entryNames.isEmpty else {
-            return true
-        }
-
-        let checks = entryNames.enumerated().map { index, entryName in
-            """
-            if find "\(AgenTTYHostRuntime.terminfoRootRemotePath)" -type f -name "\(entryName)" -print -quit | grep -q .; then
-              printf 'check_\(index)=ok\\n'
-            else
-              printf 'check_\(index)=missing\\n'
-            fi
-            """
-        }.joined(separator: "\n")
-
-        let command = """
-        set +e
-        if [ ! -d "\(AgenTTYHostRuntime.terminfoRootRemotePath)" ]; then
-          for index in $(seq 0 \(entryNames.count - 1)); do
-            printf 'check_%s=missing\\n' "$index"
-          done
-        else
-        \(checks)
-        fi
-        """
-        let (success, output) = await ssh.runCommandCapturingOutput(command)
-        guard success else {
-            EsmaLog.terminal.error(
-                "host runtime managed terminfo presence probe failed output=\(output.trimmingCharacters(in: .whitespacesAndNewlines), privacy: .public)"
-            )
-            return false
-        }
-
-        var statuses: [Int: String] = [:]
-        var missingEntries: [String] = []
-        for rawLine in output.split(whereSeparator: \.isNewline) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            let parts = line.split(separator: "=", maxSplits: 1)
-            guard parts.count == 2 else {
-                continue
-            }
-
-            let key = String(parts[0])
-            let status = String(parts[1])
-            guard let index = Int(key.replacingOccurrences(of: "check_", with: "")),
-                  entryNames.indices.contains(index) else {
-                continue
-            }
-            statuses[index] = status
-            if status == "missing" {
-                missingEntries.append(entryNames[index])
-            }
-        }
-
-        guard statuses.count == entryNames.count else {
-            EsmaLog.terminal.error(
-                "host runtime managed terminfo presence probe returned incomplete output expected=\(entryNames.count) observed=\(statuses.count)"
-            )
-            return false
-        }
-
-        guard missingEntries.isEmpty else {
-            EsmaLog.terminal.notice(
-                "host runtime managed terminfo drift detected missing_entries=\(missingEntries.joined(separator: ","), privacy: .public)"
-            )
-            return false
-        }
-        return true
-    }
-
     private static func installedStaticAssetsMetadata(
         ssh: SSHClientSession,
         group: AgenTTYHostRuntimeAssetGroup
-    ) async -> AgenTTYInstalledHostRuntimeAssetsMetadata {
+    ) async throws -> AgenTTYInstalledHostRuntimeAssetsMetadata {
         let command = """
         printf 'version='
         cat \(group.versionRemotePath) 2>/dev/null || true
         printf '\\nplatform='
         cat \(AgenTTYHostRuntime.hostPlatformRemotePath) 2>/dev/null || true
         """
-        let (_, output) = await ssh.runCommandCapturingOutput(command)
+        let output = try await ssh.runCommand(command).get()
 
         var installedVersion: String?
         var installedHostPlatform: AgenTTYRemoteHostPlatform?
@@ -1532,14 +1445,14 @@ enum AgenTTYHostRuntimeProvisioner {
 
     private static func installedBinaryRuntimeMetadata(
         ssh: SSHClientSession
-    ) async -> AgenTTYInstalledHostRuntimeBinaryMetadata {
+    ) async throws -> AgenTTYInstalledHostRuntimeBinaryMetadata {
         let command = """
         printf 'runtime_version='
         cat \(AgenTTYHostRuntime.binaryRuntimeVersionRemotePath) 2>/dev/null || true
         printf '\\nplatform='
         cat \(AgenTTYHostRuntime.hostPlatformRemotePath) 2>/dev/null || true
         """
-        let (_, output) = await ssh.runCommandCapturingOutput(command)
+        let output = try await ssh.runCommand(command).get()
 
         var installedRuntimeVersion: String?
         var installedHostPlatform: AgenTTYRemoteHostPlatform?

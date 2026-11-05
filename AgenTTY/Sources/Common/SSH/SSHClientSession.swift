@@ -9,10 +9,17 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         case oneOffCommands
     }
 
+    enum Progress: Equatable, Sendable {
+        case signingIn
+        case preparingHost
+        case startingTerminal
+    }
+
     typealias OutputHandler = @Sendable (Data) -> Void
     typealias ReadyHandler = @Sendable () -> Void
     typealias DisconnectHandler = @Sendable (AgenTTYSSHTerminationOutcome) -> Void
 
+    private let progressHandler: @Sendable (Progress) -> Void
     private let outputHandler: OutputHandler
     private let readyHandler: ReadyHandler
     private let disconnectHandler: DisconnectHandler
@@ -25,6 +32,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
     private let authDelegate: AgenTTYSSHAuthenticationDelegate
     private let hostDelegate: TOFUHostKeysDelegate
     private let failureRecorder = AgenTTYSSHFailureRecorder()
+    private let pendingWork = SSHPendingWork()
     private let sshHandlerName = "agentty.ssh.handler"
     private static let remoteFileUploadChunkSize = 64 * 1024
     private let connectionStartedAtNanoseconds = DispatchTime.now().uptimeNanoseconds
@@ -47,6 +55,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         storesValidatedHostKey: Bool = true,
         purpose: Purpose = .interactiveShell,
         preShellProvisioner: (@Sendable (SSHClientSession) async throws -> Void)? = nil,
+        progressHandler: @escaping @Sendable (Progress) -> Void = { _ in },
         outputHandler: @escaping OutputHandler,
         readyHandler: @escaping ReadyHandler,
         disconnectHandler: @escaping DisconnectHandler
@@ -54,6 +63,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         self.connectionTarget = connectionTarget
         self.purpose = purpose
         self.preShellProvisioner = preShellProvisioner
+        self.progressHandler = progressHandler
         self.outputHandler = outputHandler
         self.readyHandler = readyHandler
         self.disconnectHandler = disconnectHandler
@@ -81,8 +91,11 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
             "connect start user=\(self.connectionTarget.username, privacy: .public) host=\(self.connectionTarget.host, privacy: .public) port=\(self.connectionTarget.port) socket_host=\(self.connectionTarget.connectHost, privacy: .public) socket_port=\(self.connectionTarget.connectPort)"
         )
 
+        let authenticated: @Sendable (Channel) -> Void = { [weak self] channel in
+            self?.authenticationSucceeded(on: channel)
+        }
         let bootstrap = ClientBootstrap(group: group)
-            .channelInitializer { [authDelegate, hostDelegate, failureRecorder] channel in
+            .channelInitializer { [authDelegate, hostDelegate, failureRecorder, sshHandlerName] channel in
                 do {
                     let sshHandler = NIOSSHHandler(
                         role: .client(
@@ -95,9 +108,9 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                         allocator: channel.allocator,
                         inboundChildChannelInitializer: nil
                     )
-                    try channel.pipeline.syncOperations.addHandler(sshHandler, name: self.sshHandlerName)
+                    try channel.pipeline.syncOperations.addHandler(sshHandler, name: sshHandlerName)
                     try channel.pipeline.syncOperations.addHandler(
-                        RootSSHDiagnosticsHandler(failureRecorder: failureRecorder)
+                        RootSSHDiagnosticsHandler(failureRecorder: failureRecorder, authenticated: authenticated)
                     )
                     return channel.eventLoop.makeSucceededFuture(())
                 } catch {
@@ -140,6 +153,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                 stateQueue.sync {
                     self.rootChannel = channel
                 }
+                progressHandler(.signingIn)
 
                 channel.closeFuture.whenComplete { [weak self] _ in
                     guard let self else { return }
@@ -154,30 +168,32 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                         )
                     )
                 }
-                Task { [weak self] in
-                    guard let self else { return }
-                    let provisioningStartedAt = DispatchTime.now().uptimeNanoseconds
-                    do {
-                        try await self.runPreShellProvisionerIfNeeded()
-                    } catch {
-                        self.notifyDisconnect(
-                            Self.preShellFailureOutcome(for: error)
-                        )
-                        return
-                    }
+            }
+        }
+    }
 
-                    EsmaLog.ssh.info(
-                        "ssh auth and pre-shell runtime ready phase_elapsed_ms=\(EsmaDiagnostics.elapsedMilliseconds(since: provisioningStartedAt)) total_elapsed_ms=\(self.elapsedMillisecondsSinceConnectionStart())"
-                    )
-
-                    switch self.purpose {
-                    case .interactiveShell:
-                        self.openShellChannel(on: channel)
-                    case .oneOffCommands:
-                        self.didBecomeReady = true
-                        self.readyHandler()
-                    }
-                }
+    private func authenticationSucceeded(on channel: Channel) {
+        Task { [weak self] in
+            guard let self else { return }
+            self.progressHandler(.preparingHost)
+            let provisioningStartedAt = DispatchTime.now().uptimeNanoseconds
+            do {
+                try await self.runPreShellProvisionerIfNeeded()
+            } catch {
+                self.notifyDisconnect(Self.preShellFailureOutcome(for: error))
+                return
+            }
+            guard channel.isActive else { return }
+            EsmaLog.ssh.info(
+                "ssh auth and pre-shell runtime ready phase_elapsed_ms=\(EsmaDiagnostics.elapsedMilliseconds(since: provisioningStartedAt)) total_elapsed_ms=\(self.elapsedMillisecondsSinceConnectionStart())"
+            )
+            switch self.purpose {
+            case .interactiveShell:
+                self.progressHandler(.startingTerminal)
+                self.openShellChannel(on: channel)
+            case .oneOffCommands:
+                self.didBecomeReady = true
+                self.readyHandler()
             }
         }
     }
@@ -199,90 +215,33 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         }
     }
 
-    func insertTextViaTmux(_ text: String, completion: @escaping @Sendable (Bool) -> Void) {
-        guard !text.isEmpty else {
-            completion(true)
-            return
-        }
-
-        let rootChannel = stateQueue.sync { self.rootChannel }
-        guard let rootChannel else {
-            EsmaLog.ssh.error("tmux insert request dropped: ssh root channel unavailable")
-            completion(false)
-            return
-        }
-
-        let command = Self.tmuxDictationInsertCommand(for: text)
-        runOneOffExec(command: command, on: rootChannel, completion: completion)
-    }
-
-    func runTmuxCommand(
+    func runCommand(
         _ command: String,
-        timeout: TimeAmount = .seconds(20),
-        completion: @escaping @Sendable (Bool, String) -> Void
-    ) {
-        guard !command.isEmpty else {
-            completion(false, "")
-            return
-        }
-
-        let rootChannel = stateQueue.sync { self.rootChannel }
-        guard let rootChannel else {
-            EsmaLog.ssh.error("tmux command dropped: ssh root channel unavailable")
-            completion(false, "")
-            return
-        }
-
-        runOneOffExecCapturingOutput(
-            command: command,
-            on: rootChannel,
-            failureLogPrefix: "tmux command",
-            timeout: timeout,
-            completion: completion
-        )
+        timeout: TimeAmount = .seconds(20)
+    ) async -> SSHCommandResult {
+        await runExec(command: command, input: nil, timeout: timeout, logLabel: "remote command")
     }
 
-    /// Cheap end-to-end transport health check: runs a no-op command through a
-    /// fresh exec channel with a short timeout. A dead-but-not-yet-failed TCP
-    /// transport (for example after a Wi-Fi to cellular switch) fails this probe
-    /// instead of hanging indefinitely.
-    func runLivenessProbe(timeout: TimeAmount = .seconds(6), completion: @escaping @Sendable (Bool) -> Void) {
-        runTmuxCommand("true", timeout: timeout) { success, _ in
-            completion(success)
+    func runLivenessProbe() async -> Bool {
+        if case .success = await runCommand("true", timeout: .seconds(6)) {
+            return true
         }
+        return false
     }
 
     func writeRemoteFile(
         _ data: Data,
         remotePath: String,
         executable: Bool,
-        expectedSHA256: String? = nil,
-        completion: @escaping @Sendable (Bool) -> Void
-    ) {
-        guard !remotePath.isEmpty else {
-            completion(false)
-            return
-        }
-
-        let rootChannel = stateQueue.sync { self.rootChannel }
-        guard let rootChannel else {
-            EsmaLog.ssh.error("remote file write dropped: ssh root channel unavailable")
-            completion(false)
-            return
-        }
-
+        expectedSHA256: String? = nil
+    ) async -> SSHCommandResult {
         let command = Self.remoteFileWriteCommand(
             for: remotePath,
             executable: executable,
             expectedByteCount: data.count,
             expectedSHA256: expectedSHA256
         )
-        runOneOffExecWithInput(
-            command: command,
-            stdinData: data,
-            on: rootChannel,
-            completion: completion
-        )
+        return await runExec(command: command, input: data, timeout: nil, logLabel: "remote file write")
     }
 
     @concurrent
@@ -291,10 +250,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         remotePath: String,
         executable: Bool
     ) async -> Bool {
-        guard !remotePath.isEmpty else { return false }
-
-        let rootChannel = stateQueue.sync { self.rootChannel }
-        guard let rootChannel else {
+        guard let rootChannel = stateQueue.sync(execute: { self.rootChannel }) else {
             EsmaLog.ssh.error("remote file write dropped: ssh root channel unavailable")
             return false
         }
@@ -315,10 +271,9 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         )
 
         do {
-            let (childChannel, execHandler) = try await openOneOffExecChannel(
-                command: command,
-                on: rootChannel
-            )
+            let (childChannel, execHandler) = try await onEventLoop(of: rootChannel) { complete in
+                self.startOneOffExecChannel(command: command, on: rootChannel).whenComplete(complete)
+            }.get()
 
             do {
                 try await streamLocalFile(at: localFileURL, to: childChannel)
@@ -327,7 +282,9 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                 throw error
             }
 
-            await waitForChannelClose(childChannel)
+            _ = await onEventLoop(of: childChannel) { complete in
+                childChannel.closeFuture.whenComplete(complete)
+            }
 
             let success = execHandler.exitStatus == 0
             if !success {
@@ -368,6 +325,7 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
     }
 
     func close() {
+        pendingWork.close()
         let channels: (Channel?, Channel?) = stateQueue.sync {
             let channels = (rootChannel, shellChannel)
             rootChannel = nil
@@ -518,17 +476,6 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         }
     }
 
-    static func preShellFailureOutcome(for error: Error) -> AgenTTYSSHTerminationOutcome {
-        let downloadFailed = error is AgenTTYHostRuntimeArtifactError || error is URLError
-        return AgenTTYSSHTerminationOutcome(
-            category: .other,
-            failureStage: downloadFailed ? .hostToolsDownload : .preShellRuntime,
-            rawReason: "failed to prepare host runtime: \(error.localizedDescription)",
-            wasReady: false,
-            shouldReconnect: false
-        )
-    }
-
     private func notifyDisconnect(_ fallback: AgenTTYSSHTerminationOutcome) {
         let shouldEmit = stateQueue.sync {
             if didDisconnect { return false }
@@ -546,151 +493,118 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
         EsmaDiagnostics.elapsedMilliseconds(since: connectionStartedAtNanoseconds)
     }
 
-    private func runOneOffExec(
+    private func runExec(
         command: String,
-        on rootChannel: Channel,
-        completion: @escaping @Sendable (Bool) -> Void
-    ) {
-        runOneOffExecCapturingOutput(
-            command: command,
-            on: rootChannel,
-            failureLogPrefix: "tmux insert",
-            timeout: .seconds(20),
-            completion: { success, _ in
-                completion(success)
-            }
-        )
-    }
+        input: Data?,
+        timeout: TimeAmount?,
+        logLabel: String
+    ) async -> SSHCommandResult {
+        guard !command.isEmpty else { return .failure(.channelFailed) }
+        guard let rootChannel = stateQueue.sync(execute: { self.rootChannel }) else {
+            EsmaLog.ssh.error("\(logLabel, privacy: .public) dropped: ssh root channel unavailable")
+            return .failure(.channelFailed)
+        }
 
-    private func runOneOffExecCapturingOutput(
-        command: String,
-        on rootChannel: Channel,
-        failureLogPrefix: String,
-        timeout: TimeAmount? = nil,
-        completion: @escaping @Sendable (Bool, String) -> Void
-    ) {
-        // Confined to rootChannel's event loop (NIOSSH child channels share the
-        // parent's loop), so property access needs no locking.
-        let runState = OneOffExecRunState()
-
-        rootChannel.eventLoop.execute {
+        return await onEventLoop(of: rootChannel, ifUnavailable: .failure(.channelFailed)) { complete in
+            let runState = OneOffExecRunState()
             if let timeout {
                 runState.timeoutTask = rootChannel.eventLoop.scheduleTask(in: timeout) {
                     runState.didTimeOut = true
-                    if let runningChildChannel = runState.runningChildChannel {
-                        // closeFuture delivers the (false) completion below.
-                        runningChildChannel.close(promise: nil)
+                    EsmaLog.ssh.error("\(logLabel, privacy: .public) timed out")
+                    guard let runningChildChannel = runState.runningChildChannel else {
+                        complete(.failure(.timedOut))
                         return
                     }
-                    // Channel creation itself hung (dead transport): complete now.
-                    guard !runState.didComplete else { return }
-                    runState.didComplete = true
-                    EsmaLog.ssh.error(
-                        "\(failureLogPrefix, privacy: .public) exec timed out before channel creation"
-                    )
-                    completion(false, "")
+                    runningChildChannel.close(promise: nil)
                 }
             }
 
             self.startOneOffExecChannel(command: command, on: rootChannel)
+                .flatMap { childChannel, execHandler in
+                    Self.finishInput(input, on: childChannel).map { (childChannel, execHandler) }
+                }
                 .whenComplete { result in
                     switch result {
                     case .failure(let error):
                         runState.timeoutTask?.cancel()
-                        guard !runState.didComplete else { return }
-                        runState.didComplete = true
                         EsmaLog.ssh.error(
-                            "\(failureLogPrefix, privacy: .public) exec request failed: \(String(describing: error), privacy: .public)"
+                            "\(logLabel, privacy: .public) exec request failed: \(String(describing: error), privacy: .public)"
                         )
-                        completion(false, "")
+                        complete(.failure(runState.didTimeOut ? .timedOut : .channelFailed))
 
                     case .success(let (childChannel, execHandler)):
-                        if runState.didComplete {
+                        guard !runState.didTimeOut else {
                             childChannel.close(promise: nil)
                             return
                         }
                         runState.runningChildChannel = childChannel
-                        childChannel.close(mode: .output, promise: nil)
                         childChannel.closeFuture.whenComplete { _ in
                             runState.timeoutTask?.cancel()
-                            guard !runState.didComplete else { return }
-                            runState.didComplete = true
-                            if runState.didTimeOut {
-                                EsmaLog.ssh.error(
-                                "\(failureLogPrefix, privacy: .public) exec timed out waiting for completion"
-                            )
-                                completion(false, "")
+                            guard !runState.didTimeOut else {
+                                complete(.failure(.timedOut))
                                 return
                             }
-                            let success = execHandler.exitStatus == 0
-                            let output = execHandler.outputText
                             if execHandler.didTruncateOutput {
-                                EsmaLog.ssh.notice(
-                                    "\(failureLogPrefix, privacy: .public) output truncated at 1048576 bytes"
-                                )
+                                EsmaLog.ssh.notice("\(logLabel, privacy: .public) output truncated at 1048576 bytes")
                             }
-                            if !success {
+                            let result = execHandler.result
+                            if case .failure = result {
                                 EsmaLog.ssh.error(
-                                    "\(failureLogPrefix, privacy: .public) exec failed status=\(String(describing: execHandler.exitStatus), privacy: .public) output=\(execHandler.outputPreview, privacy: .public)"
+                                    "\(logLabel, privacy: .public) exec failed status=\(String(describing: execHandler.exitStatus), privacy: .public) output=\(execHandler.outputPreview, privacy: .public)"
                                 )
                             }
-                            completion(success, output)
+                            complete(result)
                         }
                     }
                 }
         }
     }
 
-    /// Mutable run state for one-off exec channels. All access happens on the
-    /// owning root channel's event loop; `@unchecked Sendable` mirrors the
-    /// session's existing queue-confinement style.
+    private static func finishInput(_ input: Data?, on childChannel: Channel) -> EventLoopFuture<Void> {
+        guard let input else {
+            childChannel.close(mode: .output, promise: nil)
+            return childChannel.eventLoop.makeSucceededVoidFuture()
+        }
+        var buffer = childChannel.allocator.buffer(capacity: input.count)
+        buffer.writeBytes(input)
+        let packet = SSHChannelData(type: .channel, data: .byteBuffer(buffer))
+        return childChannel.writeAndFlush(packet).map {
+            childChannel.close(mode: .output, promise: nil)
+        }
+    }
+
     private final class OneOffExecRunState: @unchecked Sendable {
-        var didComplete = false
         var didTimeOut = false
         var runningChildChannel: Channel?
         var timeoutTask: Scheduled<Void>?
     }
 
-    private func runOneOffExecWithInput(
-        command: String,
-        stdinData: Data,
-        on rootChannel: Channel,
-        completion: @escaping @Sendable (Bool) -> Void
-    ) {
-        rootChannel.eventLoop.execute {
-            self.startOneOffExecChannel(command: command, on: rootChannel)
-                .flatMap { childChannel, execHandler -> EventLoopFuture<(Channel, ExecCommandChannelHandler)> in
-                    var buffer = childChannel.allocator.buffer(capacity: stdinData.count)
-                    buffer.writeBytes(stdinData)
-                    let packet = SSHChannelData(type: .channel, data: .byteBuffer(buffer))
-                    let writePromise = childChannel.eventLoop.makePromise(of: Void.self)
-                    childChannel.writeAndFlush(packet, promise: writePromise)
-                    return writePromise.futureResult.map {
-                        childChannel.close(mode: .output, promise: nil)
-                        return (childChannel, execHandler)
-                    }
+    private func onEventLoop<Value: Sendable>(
+        of channel: Channel,
+        ifUnavailable unavailable: Value,
+        _ body: @escaping @Sendable (_ complete: @escaping @Sendable (Value) -> Void) -> Void
+    ) async -> Value {
+        await withCheckedContinuation { continuation in
+            let resume = SSHOneShot<Value> { continuation.resume(returning: $0) }
+            guard let workID = pendingWork.register({ resume.fire(unavailable) }) else {
+                resume.fire(unavailable)
+                return
+            }
+            let pendingWork = pendingWork
+            channel.eventLoop.execute {
+                body { value in
+                    pendingWork.finish(workID)
+                    resume.fire(value)
                 }
-                .whenComplete { result in
-                    switch result {
-                    case .failure(let error):
-                        EsmaLog.ssh.error(
-                            "remote file upload exec failed: \(String(describing: error), privacy: .public)"
-                        )
-                        completion(false)
-
-                    case .success(let (childChannel, execHandler)):
-                        childChannel.closeFuture.whenComplete { _ in
-                            let success = execHandler.exitStatus == 0
-                            if !success {
-                                EsmaLog.ssh.error(
-                                    "remote file upload failed status=\(String(describing: execHandler.exitStatus), privacy: .public) output=\(execHandler.outputPreview, privacy: .public)"
-                                )
-                            }
-                            completion(success)
-                        }
-                    }
-                }
+            }
         }
+    }
+
+    private func onEventLoop<Success: Sendable>(
+        of channel: Channel,
+        _ body: @escaping @Sendable (_ complete: @escaping @Sendable (Result<Success, Error>) -> Void) -> Void
+    ) async -> Result<Success, Error> {
+        await onEventLoop(of: channel, ifUnavailable: .failure(SSHSessionError.closed), body)
     }
 
     private func startOneOffExecChannel(
@@ -722,20 +636,6 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
             }
     }
 
-    private func openOneOffExecChannel(
-        command: String,
-        on rootChannel: Channel
-    ) async throws -> (Channel, ExecCommandChannelHandler) {
-        try await withCheckedThrowingContinuation { continuation in
-            rootChannel.eventLoop.execute {
-                self.startOneOffExecChannel(command: command, on: rootChannel)
-                    .whenComplete { result in
-                        continuation.resume(with: result)
-                    }
-            }
-        }
-    }
-
     private func streamLocalFile(
         at localFileURL: URL,
         to childChannel: Channel
@@ -752,48 +652,19 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
                 break
             }
             try Task.checkCancellation()
-            try await writeRemoteFileChunk(chunk, on: childChannel)
-        }
-
-        try await closeChannelOutput(childChannel)
-    }
-
-    private func writeRemoteFileChunk(
-        _ chunk: Data,
-        on childChannel: Channel
-    ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            childChannel.eventLoop.execute {
+            try await onEventLoop(of: childChannel) { complete in
                 var buffer = childChannel.allocator.buffer(capacity: chunk.count)
                 buffer.writeBytes(chunk)
                 let packet = SSHChannelData(type: .channel, data: .byteBuffer(buffer))
-                let promise = childChannel.eventLoop.makePromise(of: Void.self)
-                promise.futureResult.whenComplete { result in
-                    continuation.resume(with: result)
-                }
-                childChannel.writeAndFlush(packet, promise: promise)
-            }
+                childChannel.writeAndFlush(packet).whenComplete(complete)
+            }.get()
         }
-    }
 
-    private func closeChannelOutput(_ childChannel: Channel) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            childChannel.eventLoop.execute {
-                let promise = childChannel.eventLoop.makePromise(of: Void.self)
-                promise.futureResult.whenComplete { result in
-                    continuation.resume(with: result)
-                }
-                childChannel.close(mode: .output, promise: promise)
-            }
-        }
-    }
-
-    private func waitForChannelClose(_ childChannel: Channel) async {
-        await withCheckedContinuation { continuation in
-            childChannel.closeFuture.whenComplete { _ in
-                continuation.resume()
-            }
-        }
+        try await onEventLoop(of: childChannel) { complete in
+            let promise = childChannel.eventLoop.makePromise(of: Void.self)
+            promise.futureResult.whenComplete(complete)
+            childChannel.close(mode: .output, promise: promise)
+        }.get()
     }
 
     private func write(_ data: Data, on channel: Channel, source: String) {
@@ -892,4 +763,5 @@ nonisolated final class SSHClientSession: @unchecked Sendable {
 private enum SSHSessionError: Error {
     case invalidChannelType
     case missingSSHHandler
+    case closed
 }

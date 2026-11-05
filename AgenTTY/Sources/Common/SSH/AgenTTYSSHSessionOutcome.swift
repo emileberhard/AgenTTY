@@ -4,15 +4,37 @@ nonisolated enum AgenTTYSSHDisconnectCategory: Equatable, Hashable, Sendable {
     case shellClosed
     case connectTimeout
     case networkError
+    case dnsFailure
+    case keyUnavailable
+    case passwordUnavailable
+    case relayRejected
+    case relayLimit(detail: String)
+    case relayConnectorOffline
+    case relayUnavailable
+    case keyInstallFailed(hostMessage: String?)
+    case hostSetupTimeout
+    case unsupportedHostPlatform(operatingSystem: String, architecture: String)
     case authFailed
     case hostKeyMismatch
     case localClose
     case transportClosed
     case algorithmNegotiationFailed
     case other
+
+    var isNetworkClass: Bool {
+        switch self {
+        case .connectTimeout, .networkError, .dnsFailure, .relayConnectorOffline, .relayUnavailable, .transportClosed:
+            true
+        case .shellClosed, .authFailed, .hostKeyMismatch, .localClose, .algorithmNegotiationFailed,
+             .keyUnavailable, .passwordUnavailable, .relayRejected, .relayLimit, .keyInstallFailed,
+             .hostSetupTimeout, .unsupportedHostPlatform, .other:
+            false
+        }
+    }
 }
 
 nonisolated enum AgenTTYSSHFailureStage: Equatable, Hashable, Sendable {
+    case preflight
     case tcpConnect
     case sshAuth
     case hostToolsDownload
@@ -81,7 +103,10 @@ nonisolated extension AgenTTYSSHDisconnectCategory {
             // permanently. A real `algorithm_negotiation_failed` value has to ship
             // as a paired app release and backend deploy.
             .other
-        case .other:
+        case .dnsFailure, .relayConnectorOffline, .relayUnavailable:
+            .networkError
+        case .keyUnavailable, .passwordUnavailable, .relayRejected, .relayLimit,
+             .keyInstallFailed, .hostSetupTimeout, .unsupportedHostPlatform, .other:
             .other
         }
     }
@@ -90,7 +115,7 @@ nonisolated extension AgenTTYSSHDisconnectCategory {
 nonisolated extension AgenTTYSSHFailureStage {
     var analyticsValue: AgenTTYAnalyticsSSHFailureStage {
         switch self {
-        case .tcpConnect:
+        case .preflight, .tcpConnect:
             .tcpConnect
         case .sshAuth:
             .sshAuth

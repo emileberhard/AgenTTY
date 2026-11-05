@@ -35,7 +35,7 @@ final class AgenTTYSSHKeyStore {
     @ObservationIgnored
     private let flavor: AgenTTYBuildFlavor
     @ObservationIgnored
-    private let materialStore: AgenTTYSSHKeyMaterialStore
+    let materialStore: AgenTTYSSHKeyMaterialStore
     @ObservationIgnored
     private let userDefaults: UserDefaults
 
@@ -217,6 +217,10 @@ final class AgenTTYSSHKeyStore {
 
     func publicKey(for keyID: UUID) -> String? {
         keys.first(where: { $0.id == keyID })?.publicKey
+    }
+
+    func authorizedKeyLine(for keyID: UUID) -> String? {
+        keys.first(where: { $0.id == keyID })?.authorizedKeyLine
     }
 
     func userAuthentication(for keyID: UUID, username: String) throws -> AgenTTYSSHUserAuthentication {

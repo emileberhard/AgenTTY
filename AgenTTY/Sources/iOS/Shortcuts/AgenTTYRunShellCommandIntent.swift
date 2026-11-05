@@ -202,7 +202,7 @@ nonisolated enum AgenTTYRunShellCommandIntentError: Error, CustomLocalizedString
     case foregroundUnavailable
     case foregroundShellFailed
     case invalidTimeout
-    case commandFailed(String)
+    case commandFailed(SSHCommandFailure)
     case connectionFailed(String)
 
     var localizedStringResource: LocalizedStringResource {
@@ -219,10 +219,14 @@ nonisolated enum AgenTTYRunShellCommandIntentError: Error, CustomLocalizedString
             "AgenTTY could not create the new shell."
         case .invalidTimeout:
             "Timeout must be between 1 and 20 seconds."
-        case .commandFailed(let output):
+        case .commandFailed(.remote(_, let output)):
             LocalizedStringResource(stringLiteral: output.isEmpty
-                ? "The remote command failed or timed out."
+                ? "The remote command failed."
                 : "The remote command failed: \(Self.outputPreview(output))")
+        case .commandFailed(.timedOut):
+            "The remote command timed out."
+        case .commandFailed(.channelFailed):
+            "The SSH connection closed before the command finished."
         case .connectionFailed(let reason):
             LocalizedStringResource(stringLiteral: "The SSH connection failed: \(reason)")
         }
@@ -311,8 +315,8 @@ struct AgenTTYRunShellCommandIntent: AppIntent {
                 )
             } catch let error as AgenTTYSSHCommandExecutionError {
                 switch error {
-                case .commandFailed(let output):
-                    throw AgenTTYRunShellCommandIntentError.commandFailed(output)
+                case .commandFailed(let failure):
+                    throw AgenTTYRunShellCommandIntentError.commandFailed(failure)
                 case .disconnected(let outcome):
                     throw AgenTTYRunShellCommandIntentError.connectionFailed(outcome.rawReason)
                 case .sessionUnavailable:

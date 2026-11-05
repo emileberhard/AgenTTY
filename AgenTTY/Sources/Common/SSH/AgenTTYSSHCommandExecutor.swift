@@ -3,7 +3,7 @@ import Foundation
 import Synchronization
 
 enum AgenTTYSSHCommandExecutionError: Error, Sendable {
-    case commandFailed(output: String)
+    case commandFailed(SSHCommandFailure)
     case disconnected(AgenTTYSSHTerminationOutcome)
     case sessionUnavailable
 }
@@ -38,15 +38,15 @@ nonisolated private final class AgenTTYSSHCommandExecutionCoordinator: Sendable 
             return
         }
 
-        session.runTmuxCommand(
-            command,
-            timeout: .seconds(Int64(max(timeoutSeconds, 1)))
-        ) { [weak self] success, output in
+        let timeout = TimeAmount.seconds(Int64(max(timeoutSeconds, 1)))
+        Task { [weak self] in
+            let result = await session.runCommand(command, timeout: timeout)
             guard let self else { return }
-            if success {
+            switch result {
+            case .success(let output):
                 self.finish(with: .success(output))
-            } else {
-                self.finish(with: .failure(AgenTTYSSHCommandExecutionError.commandFailed(output: output)))
+            case .failure(let failure):
+                self.finish(with: .failure(AgenTTYSSHCommandExecutionError.commandFailed(failure)))
             }
         }
     }
@@ -135,8 +135,7 @@ enum AgenTTYSSHCommandExecutor {
                 switch executionError {
                 case .commandFailed:
                     AgenTTYConnectionRouteResolver.recordDirectRouteSuccess(for: host.id)
-                case .disconnected(let outcome)
-                    where [.connectTimeout, .networkError, .transportClosed].contains(outcome.category):
+                case .disconnected(let outcome) where outcome.category.isNetworkClass:
                     AgenTTYConnectionRouteResolver.recordDirectRouteFailure(for: host.id)
                 case .disconnected, .sessionUnavailable:
                     break

@@ -304,7 +304,7 @@ private struct SSHKeyDetailView: View {
                 }
             } else if let existingKey = mode.existing {
                 Section {
-                    SSHPublicKeyExportView(publicKey: existingKey.publicKey)
+                    SSHPublicKeyExportView(publicKey: existingKey.authorizedKeyLine)
                 } header: {
                     Text("Public Key")
                 }

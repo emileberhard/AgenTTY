@@ -5,6 +5,18 @@ enum AgenTTYResolvedConnectionRouteMode: Equatable, Sendable {
     case relay
 }
 
+nonisolated struct AgenTTYRelayFallbackFailure: LocalizedError {
+    let directFailure: (any Error)?
+    let relayFailure: any Error
+
+    var errorDescription: String? {
+        guard let directFailure else {
+            return relayFailure.localizedDescription
+        }
+        return "Direct connection failed: \(directFailure.localizedDescription) Relay failed: \(relayFailure.localizedDescription)"
+    }
+}
+
 @MainActor
 struct AgenTTYResolvedConnectionRoute {
     let bridge: AgenTTYRelayBridge?
@@ -34,7 +46,8 @@ enum AgenTTYConnectionRouteResolver {
             if shouldPreferRelay(for: host.id), host.relayHostID?.isEmpty == false {
                 return try await resolveViaRelayRearmingDirectProbe(
                     for: host,
-                    directConnectionTarget: directConnectionTarget
+                    directConnectionTarget: directConnectionTarget,
+                    directFailure: nil
                 )
             }
             // A recently-ready direct connection on an unchanged network path is
@@ -66,7 +79,8 @@ enum AgenTTYConnectionRouteResolver {
                 }
                 return try await resolveViaRelayRearmingDirectProbe(
                     for: host,
-                    directConnectionTarget: directConnectionTarget
+                    directConnectionTarget: directConnectionTarget,
+                    directFailure: error
                 )
             }
         }
@@ -134,16 +148,19 @@ enum AgenTTYConnectionRouteResolver {
 
     private static func resolveViaRelayRearmingDirectProbe(
         for host: AgenTTYHost,
-        directConnectionTarget: AgenTTYConnectionTarget
+        directConnectionTarget: AgenTTYConnectionTarget,
+        directFailure: (any Error)?
     ) async throws -> AgenTTYResolvedConnectionRoute {
         do {
             return try await resolveViaRelay(
                 for: host,
                 directConnectionTarget: directConnectionTarget
             )
+        } catch is CancellationError {
+            throw CancellationError()
         } catch {
             recordRelayResolutionFailure(for: host.id)
-            throw error
+            throw AgenTTYRelayFallbackFailure(directFailure: directFailure, relayFailure: error)
         }
     }
 
