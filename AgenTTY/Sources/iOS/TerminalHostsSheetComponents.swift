@@ -244,17 +244,10 @@ struct NotificationIssueRow: View {
                 .frame(width: 32, height: 32)
                 .background(Color.orange.gradient, in: .rect(cornerRadius: 8))
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(AppTheme.primaryText)
-                if issue == .permissionDenied {
-                    Text("Allow them for AgenTTY in Settings.")
-                        .font(.caption)
-                        .foregroundStyle(AppTheme.secondaryText)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(AppTheme.primaryText)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
             switch issue {
             case .permissionDenied:
@@ -275,7 +268,7 @@ struct NotificationIssueRow: View {
     private var title: String {
         switch issue {
         case .permissionDenied:
-            "Notifications unavailable"
+            "Notifications are off for AgenTTY"
         case .hostSetupFailed:
             "Couldn’t set up notifications on this host"
         }
