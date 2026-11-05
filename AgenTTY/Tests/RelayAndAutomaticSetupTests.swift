@@ -272,6 +272,7 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             "https://agentty.esmadil.se/v1/pairing-sessions/session-1/status"
         )
         let requestBody = try jsonObject(from: request)
+        XCTAssertEqual(Set(requestBody.keys), ["device_id", "device_secret"])
         XCTAssertEqual(requestBody["device_id"] as? String, identity.deviceID.uuidString)
         XCTAssertEqual(requestBody["device_secret"] as? String, identity.deviceSecret)
     }

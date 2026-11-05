@@ -98,6 +98,11 @@ struct AgenTTYPairingSessionStatusResponse: Decodable, Sendable {
     }
 }
 
+nonisolated struct AgenTTYPairingSessionStatusRequest: Encodable, Sendable {
+    let deviceID: UUID
+    let deviceSecret: String
+}
+
 enum AgenTTYPairingRelayError: LocalizedError {
     case deviceIdentityRejected
     case invalidResponse
@@ -221,7 +226,7 @@ final class AgenTTYPairingRelayClient {
         let request = try AgenTTYRelayTransport.makeJSONRequest(
             baseURL: baseURL,
             path: "v1/pairing-sessions/\(sessionID)/status",
-            body: AgenTTYRelaySessionRequest(
+            body: AgenTTYPairingSessionStatusRequest(
                 deviceID: identity.deviceID,
                 deviceSecret: identity.deviceSecret
             )

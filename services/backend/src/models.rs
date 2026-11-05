@@ -2198,6 +2198,8 @@ const PAIRING_CODE_ALPHABET: &[u8; 32] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 pub struct PairingSessionStatusRequest {
     pub device_id: DeviceId,
     pub device_secret: NonEmptyString,
+    #[serde(default)]
+    pub scope: Option<serde::de::IgnoredAny>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

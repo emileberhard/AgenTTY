@@ -875,6 +875,21 @@ async fn pairing_session_create_claim_complete_and_fetch_status() {
     let status_body = response_json(status_response).await;
     assert_eq!(status_body["status"], "claimed");
 
+    let installed_app_status_response = app
+        .clone()
+        .oneshot(json_request(
+            &format!("/v1/pairing-sessions/{session_id}/status"),
+            serde_json::json!({
+                "device_id": "device-1",
+                "device_secret": "secret-1",
+                "scope": "notify",
+            }),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(installed_app_status_response.status(), StatusCode::OK);
+
     let reclaimed_while_claimed = app
         .clone()
         .oneshot(json_request(
