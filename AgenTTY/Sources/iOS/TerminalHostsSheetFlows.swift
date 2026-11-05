@@ -2419,13 +2419,13 @@ struct AutomaticHostSetupView: View {
         pairingCode: String,
         keyID: UUID
     ) async throws {
-        guard let publicKey = keyStore.publicKey(for: keyID) else {
+        guard let authorizedKeyLine = keyStore.authorizedKeyLine(for: keyID) else {
             throw AgenTTYPairingQRCodeSetupError.missingSSHKey
         }
 
         let claim = try await AgenTTYPairingRelayClient.shared.claimPairingSession(
             code: pairingCode,
-            publicKey: AgenTTYAuthorizedKeyLine.make(publicKey: publicKey, keyName: keyStore.keyName(for: keyID) ?? "")
+            publicKey: authorizedKeyLine
         )
         recordHostSetupFlow(stage: .pairingClaimed)
         EsmaLog.notifications.notice(

@@ -924,10 +924,9 @@ final class TerminalBridge {
             guard let self else { return }
 
             do {
-                let userAuthentication = try await AgenTTYSSHUserAuthenticationResolver.resolve(
-                    keyMaterialStore: self.keyStore.materialStore,
-                    passwordStore: self.passwordStore,
-                    connectionTarget: connectionTarget
+                let userAuthentication = try await self.keyStore.userAuthentication(
+                    for: connectionTarget,
+                    passwordStore: self.passwordStore
                 )
                 let resolvedRoute = try await AgenTTYConnectionRouteResolver.resolve(for: activeHost)
                 try Task.checkCancellation()
@@ -2275,14 +2274,6 @@ final class TerminalBridge {
         )
     }
 
-    @concurrent
-    nonisolated private static func loadPrivateKeyMaterial(
-        keyMaterialStore: AgenTTYSSHKeyMaterialStore,
-        keyID: UUID
-    ) async throws -> AgenTTYStoredSSHPrivateKey {
-        try keyMaterialStore.loadMaterial(for: keyID)
-    }
-
     private func runPasswordBootstrapIfNeeded(
         ssh: SSHClientSession,
         connectionTarget: AgenTTYConnectionTarget,
@@ -2292,14 +2283,7 @@ final class TerminalBridge {
             return
         }
 
-        let targetKeyMaterial = try await Self.loadPrivateKeyMaterial(
-            keyMaterialStore: keyStore.materialStore,
-            keyID: targetKeyID
-        )
-        let authorizedKeyLine = AgenTTYAuthorizedKeyLine.make(
-            publicKey: try targetKeyMaterial.openSSHPublicKey(),
-            keyName: keyStore.keyName(for: targetKeyID) ?? ""
-        )
+        let authorizedKeyLine = try await keyStore.authorizedKeyLineFromPrivateKey(for: targetKeyID)
         try await AgenTTYSSHAuthorizedKeysInstaller.install(authorizedKeyLine: authorizedKeyLine, using: ssh)
 
         guard connectionGeneration == generation else {

@@ -35,7 +35,7 @@ final class AgenTTYSSHKeyStore {
     @ObservationIgnored
     private let flavor: AgenTTYBuildFlavor
     @ObservationIgnored
-    let materialStore: AgenTTYSSHKeyMaterialStore
+    private let materialStore: AgenTTYSSHKeyMaterialStore
     @ObservationIgnored
     private let userDefaults: UserDefaults
 
@@ -215,12 +215,35 @@ final class AgenTTYSSHKeyStore {
         keys.first(where: { $0.id == keyID })?.name
     }
 
-    func publicKey(for keyID: UUID) -> String? {
-        keys.first(where: { $0.id == keyID })?.publicKey
-    }
-
     func authorizedKeyLine(for keyID: UUID) -> String? {
         keys.first(where: { $0.id == keyID })?.authorizedKeyLine
+    }
+
+    func authorizedKeyLineFromPrivateKey(for keyID: UUID) async throws -> String {
+        guard let keyName = keyName(for: keyID) else {
+            throw AgenTTYSSHKeyStoreError.keyNotFound
+        }
+        let publicKey = try await Self.openSSHPublicKey(of: keyID, in: materialStore)
+        return AgenTTYAuthorizedKeyLine.make(publicKey: publicKey, keyName: keyName)
+    }
+
+    @concurrent
+    nonisolated private static func openSSHPublicKey(
+        of keyID: UUID,
+        in materialStore: AgenTTYSSHKeyMaterialStore
+    ) async throws -> String {
+        try materialStore.loadMaterial(for: keyID).openSSHPublicKey()
+    }
+
+    func userAuthentication(
+        for connectionTarget: AgenTTYConnectionTarget,
+        passwordStore: AgenTTYSSHPasswordStore
+    ) async throws -> AgenTTYSSHUserAuthentication {
+        try await AgenTTYSSHUserAuthenticationResolver.resolve(
+            keyMaterialStore: materialStore,
+            passwordStore: passwordStore,
+            connectionTarget: connectionTarget
+        )
     }
 
     func userAuthentication(for keyID: UUID, username: String) throws -> AgenTTYSSHUserAuthentication {
