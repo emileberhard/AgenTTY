@@ -251,7 +251,11 @@ final class ContractFixtureTests: XCTestCase {
                 case (403, .relayConnectorOffline):
                     XCTAssertEqual(path, "ssh-relay-sessions/response/connector-offline-error.json")
                 case (403, .unauthorized(let backendError)):
-                    XCTAssertNotEqual(path, "ssh-relay-sessions/response/connector-offline-error.json")
+                    XCTAssertEqual(path, "ssh-relay-sessions/response/not-allowed-error.json")
+                    XCTAssertEqual(error.localizedDescription, detail)
+                    XCTAssertEqual(backendError.detail, detail)
+                case (403, .verificationRequired(let backendError)):
+                    XCTAssertEqual(path, "ssh-relay-sessions/response/verification-required-error.json")
                     XCTAssertEqual(error.localizedDescription, detail)
                     XCTAssertEqual(backendError.detail, detail)
                 case (503, .unexpectedStatusCode):

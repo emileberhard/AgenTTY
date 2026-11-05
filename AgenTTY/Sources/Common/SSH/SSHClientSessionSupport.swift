@@ -315,6 +315,8 @@ trap - 0 1 2 15
             switch relay {
             case .invalidRelayHostID, .unauthorized:
                 return (.relayRejected, false)
+            case .verificationRequired:
+                return (.relayVerificationRequired, false)
             case .resourceLimit(let detail):
                 return (.relayLimit(detail: detail), false)
             case .relayConnectorOffline:

@@ -214,8 +214,20 @@ struct ConnectionFailureMappingTests {
             .networkError, reconnects: true, title: "Couldn’t Reach the Host"
         ),
         PreflightCase(
-            AgenTTYRelayFallbackFailure(directFailure: URLError(.timedOut), relayFailure: AgenTTYSSHRelayError.unauthorized),
+            AgenTTYRelayFallbackFailure(
+                directFailure: URLError(.timedOut),
+                relayFailure: AgenTTYSSHRelayError.unauthorized(AgenTTYBackendError(status: 403, body: Data(#"{"code":"relay_not_allowed"}"#.utf8)))
+            ),
             .relayRejected, reconnects: false, title: "Relay Access Rejected"
+        ),
+        PreflightCase(
+            AgenTTYRelayFallbackFailure(
+                directFailure: URLError(.timedOut),
+                relayFailure: AgenTTYSSHRelayError.verificationRequired(
+                    AgenTTYBackendError(status: 403, body: Data(#"{"code":"verification_required"}"#.utf8))
+                )
+            ),
+            .relayVerificationRequired, reconnects: false, title: "Relay Requires the App Store Version"
         ),
         PreflightCase(
             AgenTTYRelayFallbackFailure(directFailure: nil, relayFailure: AgenTTYSSHRelayError.resourceLimit("3 of 3 relay sessions in use")),

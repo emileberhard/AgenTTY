@@ -5,6 +5,7 @@ enum AgenTTYSSHRelayError: LocalizedError {
     case invalidResponse
     case relayConnectorOffline
     case unauthorized(AgenTTYBackendError)
+    case verificationRequired(AgenTTYBackendError)
     case unexpectedStatusCode(AgenTTYBackendError)
     case websocketOpenTimedOut
     case resourceLimit(String)
@@ -15,6 +16,8 @@ enum AgenTTYSSHRelayError: LocalizedError {
             self = .unauthorized(error)
         case (403, nil), (403, "relay_connector_offline"):
             self = .relayConnectorOffline
+        case (403, "verification_required"):
+            self = .verificationRequired(error)
         case (403, _):
             self = .unauthorized(error)
         case (429, _):
@@ -34,7 +37,7 @@ enum AgenTTYSSHRelayError: LocalizedError {
             "Invalid relay backend response."
         case .relayConnectorOffline:
             "Relay connector is offline for this host."
-        case .unauthorized(let error), .unexpectedStatusCode(let error):
+        case .unauthorized(let error), .verificationRequired(let error), .unexpectedStatusCode(let error):
             error.localizedDescription
         case .websocketOpenTimedOut:
             "Relay websocket did not open in time."

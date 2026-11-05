@@ -125,6 +125,12 @@ nonisolated enum AgenTTYSSHRecoveryGuidance {
                 message: "The direct connection failed, and the AgenTTY relay didn’t accept this device for this host. Run Automatic Setup on the host again to pair it.",
                 suggestions: []
             )
+        case .relayVerificationRequired:
+            return AgenTTYSSHRecoveryDescription(
+                title: "Relay Requires the App Store Version",
+                message: "The direct connection failed, and the AgenTTY relay serves only verified App Store installs. Install or update AgenTTY from the App Store to use the relay.",
+                suggestions: []
+            )
         case .relayLimit(let detail):
             return AgenTTYSSHRecoveryDescription(
                 title: "Relay Limit Reached",

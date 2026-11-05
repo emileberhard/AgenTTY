@@ -8,6 +8,7 @@ nonisolated enum AgenTTYSSHDisconnectCategory: Equatable, Hashable, Sendable {
     case keyUnavailable
     case passwordUnavailable
     case relayRejected
+    case relayVerificationRequired
     case relayLimit(detail: String)
     case relayConnectorOffline
     case relayUnavailable
@@ -26,7 +27,7 @@ nonisolated enum AgenTTYSSHDisconnectCategory: Equatable, Hashable, Sendable {
         case .connectTimeout, .networkError, .dnsFailure, .relayConnectorOffline, .relayUnavailable, .transportClosed:
             true
         case .shellClosed, .authFailed, .hostKeyMismatch, .localClose, .algorithmNegotiationFailed,
-             .keyUnavailable, .passwordUnavailable, .relayRejected, .relayLimit, .keyInstallFailed,
+             .keyUnavailable, .passwordUnavailable, .relayRejected, .relayVerificationRequired, .relayLimit, .keyInstallFailed,
              .hostSetupTimeout, .unsupportedHostPlatform, .other:
             false
         }
@@ -105,7 +106,7 @@ nonisolated extension AgenTTYSSHDisconnectCategory {
             .other
         case .dnsFailure, .relayConnectorOffline, .relayUnavailable:
             .networkError
-        case .keyUnavailable, .passwordUnavailable, .relayRejected, .relayLimit,
+        case .keyUnavailable, .passwordUnavailable, .relayRejected, .relayVerificationRequired, .relayLimit,
              .keyInstallFailed, .hostSetupTimeout, .unsupportedHostPlatform, .other:
             .other
         }

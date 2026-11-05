@@ -66,10 +66,13 @@ Public app/helper endpoints include:
 JSON routes reject a request with `{"detail": "...", "code": "..."}`. `detail`
 is written for the user; `code` is a stable machine value present only where
 clients must tell rejections with one status apart. The app's
-`AgenTTYRelayTransport` owns decoding: a 4xx shows its detail, and a 5xx or
-unreadable body shows one shared "temporarily unavailable" message.
+`AgenTTYRelayTransport` owns decoding: a 4xx shows its detail without control
+characters and capped at 300 characters, and a 5xx or unreadable body shows
+one shared "temporarily unavailable" message.
 `POST /v1/ssh-relay-sessions` answers 403 with `relay_connector_offline`
 (transient), `relay_not_allowed` or `verification_required` (permanent).
+The app asks the user to pair the host again after `relay_not_allowed` and to
+install the App Store version after `verification_required`.
 Apps before these codes treat every relay 403 as an offline connector, so a
 403 without a code keeps that meaning. Status codes never change for an
 existing rejection, because installed apps map them.
