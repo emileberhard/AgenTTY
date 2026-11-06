@@ -23,8 +23,8 @@ struct Device {
 }
 
 let devices = [
-    "IPHONE_DYNAMIC_ISLAND_MEDIUM_PROFILE": Device(canvas: CGSize(width: 1206, height: 2622), screen: CGSize(width: 402, height: 874),
-                                                   cornerRadius: 62, bezel: 7.5, width: 0.84, top: 0.22, headline: 0.064, subtitle: 0.032),
+    "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE": Device(canvas: CGSize(width: 1320, height: 2868), screen: CGSize(width: 440, height: 956),
+                                                  cornerRadius: 62, bezel: 8, width: 0.84, top: 0.22, headline: 0.064, subtitle: 0.032),
     "IPAD_13_PROFILE": Device(canvas: CGSize(width: 2064, height: 2752), screen: CGSize(width: 1032, height: 1376),
                               cornerRadius: 30, bezel: 14, width: 0.79, top: 0.235, headline: 0.058, subtitle: 0.025),
 ]

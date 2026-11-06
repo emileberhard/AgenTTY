@@ -135,6 +135,10 @@ final class CaptureFixture {
         Machine(label: "build-server", address: "192.0.2.24", session: []),
     ]
 
+    static var clockTime: Date? {
+        CaptureView.directory == nil ? nil : Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: .now)
+    }
+
     static func terminalOutput(for host: AgenTTYHost?) -> String? {
         guard CaptureView.directory != nil,
               let machine = machines.first(where: { $0.address == host?.address }) else {

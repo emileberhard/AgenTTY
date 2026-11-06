@@ -9,6 +9,25 @@ permissions:
   contents: read
 
 jobs:
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      capture: ${{ steps.paths.outputs.capture }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check affected paths
+        id: paths
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [[ -z "$BASE" || "$BASE" =~ ^0+$ ]] || git diff --name-only "$BASE" "$GITHUB_SHA" | grep -Eq '^(AppStore/|AgenTTY/Sources/iOS/Capture\.swift$|\.xcode-version$|\.github/workflows/ci\.yml$)'; then
+            echo 'capture=true' >> "$GITHUB_OUTPUT"
+          fi
+
   rust:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -88,3 +107,15 @@ jobs:
       - name: Remove build output
         if: always()
         run: rm -rf "$ARCHIVE_PATH"
+
+  capture:
+    needs: changes
+    if: needs.changes.outputs.capture == 'true'
+    runs-on: xcode-27
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: scripts/select-xcode
+      - run: AppStore/capture app-store

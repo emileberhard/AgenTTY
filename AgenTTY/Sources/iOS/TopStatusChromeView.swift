@@ -430,6 +430,14 @@ private struct TopStatusClockBatteryView: View {
         battery = BatterySnapshot.current()
     }
 
+    private var shownTime: Date {
+        #if DEBUG
+        CaptureFixture.clockTime ?? now
+        #else
+        now
+        #endif
+    }
+
     var body: some View {
         VStack(alignment: .trailing, spacing: -1) {
             HStack(alignment: .lastTextBaseline, spacing: 2 * chromeScale) {
@@ -442,7 +450,7 @@ private struct TopStatusClockBatteryView: View {
             }
             .foregroundStyle(battery.color)
 
-            Text(now, format: .dateTime.hour().minute())
+            Text(shownTime, format: .dateTime.hour().minute())
                 .font(primaryFont(sizeOffset: 0.5))
                 .fixedSize(horizontal: true, vertical: false)
         }
@@ -459,7 +467,7 @@ private struct TopStatusClockBatteryView: View {
             NotificationCenter.default.publisher(for: UIDevice.batteryStateDidChangeNotification)
         ) { _ in refreshBattery() }
         .accessibilityLabel(
-            "battery \(battery.percentageText), time \(now.formatted(date: .omitted, time: .shortened))"
+            "battery \(battery.percentageText), time \(shownTime.formatted(date: .omitted, time: .shortened))"
         )
     }
 }
