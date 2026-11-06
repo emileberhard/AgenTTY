@@ -1,6 +1,5 @@
 import Foundation
 import GhosttyKit
-
 import UIKit
 
 enum GhosttyRuntimeClipboard {
@@ -13,7 +12,6 @@ enum GhosttyRuntimeClipboard {
         let retainedView = unsafe Unmanaged<AnyObject>.fromOpaque(userdata).retain()
         let retainedUserdataAddress = unsafe UInt(bitPattern: retainedView.toOpaque())
         let stateAddress = unsafe state.map { UInt(bitPattern: $0) }
-        let requestedLocation = location
 
         Task { @MainActor in
             guard
