@@ -109,10 +109,11 @@ The `testflight` environment, limited to version tags, holds the variables
 secrets `APP_STORE_CONNECT_KEY_P8` (the P8 file's contents),
 `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID` and
 `SENTRY_AUTH_TOKEN`. The `agentty-backend-production` environment, also limited
-to version tags, holds `AGENTTY_DEPLOY_SSH_KEY`; the repository variables
-`AGENTTY_DEPLOY_TARGET`, `AGENTTY_DEPLOY_HOST_KEY`, `AGENTTY_TS_CLIENT_ID` and
-`AGENTTY_TS_AUDIENCE` name the forced-command SSH account, its host key and the
-tailnet identity. `scripts/configure-hosted-release` writes the ignored
+to version tags, holds the secret `AGENTTY_DEPLOY_SSH_KEY` and the variables
+`AGENTTY_DEPLOY_HOST_KEY`, `AGENTTY_TS_CLIENT_ID` and `AGENTTY_TS_AUDIENCE`: the
+forced-command key, its host key and the tailnet identity. The repository
+variable `AGENTTY_DEPLOY_TARGET` names the SSH account, so a host move changes
+only that variable. `scripts/configure-hosted-release` writes the ignored
 `Config/Local.xcconfig` from the variables. Official identifiers must exactly
 match previously shipped apps, including their Keychain and iCloud boundaries.
 The App Group and capabilities must be registered on the portal for the app and
