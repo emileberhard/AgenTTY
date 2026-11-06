@@ -21,12 +21,19 @@ updates:
     cooldown:
       default-days: 1
   - package-ecosystem: bun
-    directories: [/tools/agentty-host, /AppStoreScreenshots]
+    directory: /tools/agentty-host
     schedule:
       interval: weekly
     open-pull-requests-limit: 1
     groups:
       dependencies:
         patterns: ["*"]
+    cooldown:
+      default-days: 1
+  - package-ecosystem: docker
+    directory: /services/backend/deploy
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 1
