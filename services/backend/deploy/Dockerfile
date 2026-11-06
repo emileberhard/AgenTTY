@@ -1,4 +1,4 @@
-FROM rust:1.97.0-trixie@sha256:b92b8c8574f8f3b207fcb0912fb3e2de4041580b5934d90312d53938c9a038a9 AS build
+FROM rust:1.99.0-trixie@sha256:81015672d6939b0265f09adf96d5de125482bb1330106076956b0518e74edc90 AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --manifest-path services/backend/Cargo.toml --release --locked
