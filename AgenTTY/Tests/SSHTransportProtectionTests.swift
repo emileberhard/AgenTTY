@@ -2,12 +2,13 @@ import Crypto
 import Foundation
 import NIOCore
 import NIOSSH
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 private typealias Core = AgenTTYAESCTRTransportProtectionCore
 
-final class SSHTransportProtectionTests: XCTestCase {
+@Suite
+struct SSHTransportProtectionTests {
     // MARK: - Fixtures
 
     private let allocator = ByteBufferAllocator()
@@ -78,22 +79,25 @@ final class SSHTransportProtectionTests: XCTestCase {
     ) throws -> [UInt8] {
         try receiver.decryptFirstBlock(&buffer)
 
-        let packetLength = try XCTUnwrap(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
+        let packetLength = try #require(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
         let framedTotal = Int(packetLength) + 4 + Core.macBytes
-        var slice = try XCTUnwrap(buffer.readSlice(length: framedTotal))
+        let sliced = buffer.readSlice(length: framedTotal)
+        var slice = try #require(sliced)
 
         let payload = try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: sequenceNumber)
-        XCTAssertEqual(slice.readableBytes, 0, "the parser requires the whole slice to be consumed")
+        #expect(slice.readableBytes == 0, "the parser requires the whole slice to be consumed")
         return bytes(of: payload)
     }
 
     // MARK: - 5.1 Round trip
 
-    func testRoundTripAES256() throws {
+    @Test
+    func roundTripAES256() throws {
         try assertRoundTrip(encryptionKeySize: 32)
     }
 
-    func testRoundTripAES128() throws {
+    @Test
+    func roundTripAES128() throws {
         try assertRoundTrip(encryptionKeySize: 16)
     }
 
@@ -108,20 +112,17 @@ final class SSHTransportProtectionTests: XCTestCase {
         let plaintextFrame = bytes(of: buffer)
 
         try sender.encryptPacket(&buffer, sequenceNumber: 3)
-        XCTAssertEqual(buffer.readableBytes, framedLength + Core.macBytes)
-        XCTAssertNotEqual(
-            Array(bytes(of: buffer).prefix(framedLength)),
-            plaintextFrame,
-            "ciphertext must differ from plaintext"
-        )
+        #expect(buffer.readableBytes == framedLength + Core.macBytes)
+        #expect(Array(bytes(of: buffer).prefix(framedLength)) != plaintextFrame, "ciphertext must differ from plaintext")
 
-        XCTAssertEqual(try receive(&buffer, with: receiver, sequenceNumber: 3), payload)
-        XCTAssertEqual(buffer.readableBytes, 0)
+        #expect((try receive(&buffer, with: receiver, sequenceNumber: 3)) == payload)
+        #expect(buffer.readableBytes == 0)
     }
 
     // MARK: - 5.2 Multi-packet counter drift
 
-    func testManyPacketsStayKeystreamAligned() throws {
+    @Test
+    func manyPacketsStayKeystreamAligned() throws {
         let keys = makeKeys(encryptionKeySize: 32)
         let sender = try Core(initialKeys: keys, expectedEncryptionKeySize: 32)
         let receiver = try Core(initialKeys: mirrored(keys), expectedEncryptionKeySize: 32)
@@ -141,16 +142,13 @@ final class SSHTransportProtectionTests: XCTestCase {
         }
 
         for sequenceNumber in 0..<20 {
-            XCTAssertEqual(
-                try receive(&wire, with: receiver, sequenceNumber: UInt32(sequenceNumber)),
-                payloads[sequenceNumber],
-                "packet \(sequenceNumber) decrypted incorrectly"
-            )
+            #expect((try receive(&wire, with: receiver, sequenceNumber: UInt32(sequenceNumber))) == payloads[sequenceNumber], "packet \(sequenceNumber) decrypted incorrectly")
         }
-        XCTAssertEqual(wire.readableBytes, 0)
+        #expect(wire.readableBytes == 0)
     }
 
-    func testShortReadBetweenFirstBlockAndRemainderStaysAligned() throws {
+    @Test
+    func shortReadBetweenFirstBlockAndRemainderStaysAligned() throws {
         let keys = makeKeys(encryptionKeySize: 32)
         let sender = try Core(initialKeys: keys, expectedEncryptionKeySize: 32)
         let receiver = try Core(initialKeys: mirrored(keys), expectedEncryptionKeySize: 32)
@@ -165,26 +163,28 @@ final class SSHTransportProtectionTests: XCTestCase {
         partial.writeBytes(wireBytes.prefix(Core.cipherBlockSize))
         try receiver.decryptFirstBlock(&partial)
 
-        let packetLength = try XCTUnwrap(partial.getInteger(at: partial.readerIndex, as: UInt32.self))
-        XCTAssertEqual(Int(packetLength) + 4 + Core.macBytes, wireBytes.count)
+        let packetLength = try #require(partial.getInteger(at: partial.readerIndex, as: UInt32.self))
+        #expect(Int(packetLength) + 4 + Core.macBytes == wireBytes.count)
 
         // Phase two: the rest arrives and the parser resumes without re-decrypting
         // the first block.
         partial.writeBytes(wireBytes.dropFirst(Core.cipherBlockSize))
-        var slice = try XCTUnwrap(partial.readSlice(length: partial.readableBytes))
+        let sliced = partial.readSlice(length: partial.readableBytes)
+        var slice = try #require(sliced)
         let decrypted = try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: 11)
-        XCTAssertEqual(bytes(of: decrypted), payload)
-        XCTAssertEqual(slice.readableBytes, 0)
+        #expect(bytes(of: decrypted) == payload)
+        #expect(slice.readableBytes == 0)
 
         // A following packet must still line up.
         var next = makeFramedPacket(payload: [0x01, 0x02, 0x03])
         try sender.encryptPacket(&next, sequenceNumber: 12)
-        XCTAssertEqual(try receive(&next, with: receiver, sequenceNumber: 12), [0x01, 0x02, 0x03])
+        #expect((try receive(&next, with: receiver, sequenceNumber: 12)) == [0x01, 0x02, 0x03])
     }
 
     // MARK: - 5.3 Rekey
 
-    func testRekeyResetsCiphersAndMACKeys() throws {
+    @Test
+    func rekeyResetsCiphersAndMACKeys() throws {
         let keys = makeKeys(encryptionKeySize: 32)
         let sender = try Core(initialKeys: keys, expectedEncryptionKeySize: 32)
         let receiver = try Core(initialKeys: mirrored(keys), expectedEncryptionKeySize: 32)
@@ -197,10 +197,7 @@ final class SSHTransportProtectionTests: XCTestCase {
             var staleCopy = packet
             try sender.encryptPacket(&packet, sequenceNumber: sequenceNumber)
             try staleSender.encryptPacket(&staleCopy, sequenceNumber: sequenceNumber)
-            XCTAssertEqual(
-                try receive(&packet, with: receiver, sequenceNumber: sequenceNumber),
-                [UInt8(sequenceNumber)]
-            )
+            #expect((try receive(&packet, with: receiver, sequenceNumber: sequenceNumber)) == [UInt8(sequenceNumber)])
         }
 
         let rekeyed = makeKeys(encryptionKeySize: 32, seed: 91)
@@ -209,18 +206,16 @@ final class SSHTransportProtectionTests: XCTestCase {
 
         var freshPacket = makeFramedPacket(payload: Array("after rekey".utf8))
         try sender.encryptPacket(&freshPacket, sequenceNumber: 3)
-        XCTAssertEqual(
-            try receive(&freshPacket, with: receiver, sequenceNumber: 3),
-            Array("after rekey".utf8)
-        )
+        #expect((try receive(&freshPacket, with: receiver, sequenceNumber: 3)) == Array("after rekey".utf8))
 
         // A packet still produced under the old key set must not verify.
         var stalePacket = makeFramedPacket(payload: Array("stale".utf8))
         try staleSender.encryptPacket(&stalePacket, sequenceNumber: 4)
-        XCTAssertThrowsError(try receive(&stalePacket, with: receiver, sequenceNumber: 4))
+        #expect(throws: (any Error).self) { try receive(&stalePacket, with: receiver, sequenceNumber: 4) }
     }
 
-    func testChangingOnlyTheMACKeyBreaksVerification() throws {
+    @Test
+    func changingOnlyTheMACKeyBreaksVerification() throws {
         let senderKeys = makeKeys(encryptionKeySize: 32)
         var receiverKeys = mirrored(senderKeys)
         receiverKeys.inboundMACKey = SymmetricKey(data: Data(repeating: 0x5A, count: 32))
@@ -231,12 +226,11 @@ final class SSHTransportProtectionTests: XCTestCase {
         var packet = makeFramedPacket(payload: Array("mac key drift".utf8))
         try sender.encryptPacket(&packet, sequenceNumber: 0)
 
-        XCTAssertThrowsError(try receive(&packet, with: receiver, sequenceNumber: 0)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHTransportProtectionError, .integrityCheckFailed)
-        }
+        #expect(throws: AgenTTYSSHTransportProtectionError.integrityCheckFailed) { try receive(&packet, with: receiver, sequenceNumber: 0) }
     }
 
-    func testChangingOnlyTheEncryptionKeyBreaksDecryption() throws {
+    @Test
+    func changingOnlyTheEncryptionKeyBreaksDecryption() throws {
         let senderKeys = makeKeys(encryptionKeySize: 32)
         var receiverKeys = mirrored(senderKeys)
         receiverKeys.inboundEncryptionKey = SymmetricKey(data: Data(repeating: 0x3C, count: 32))
@@ -247,51 +241,50 @@ final class SSHTransportProtectionTests: XCTestCase {
         var packet = makeFramedPacket(payload: Array("encryption key drift".utf8))
         try sender.encryptPacket(&packet, sequenceNumber: 0)
 
-        XCTAssertThrowsError(try receive(&packet, with: receiver, sequenceNumber: 0))
+        #expect(throws: (any Error).self) { try receive(&packet, with: receiver, sequenceNumber: 0) }
     }
 
     // MARK: - 5.4 Tampering
 
-    func testTamperedMACIsRejected() throws {
+    @Test
+    func tamperedMACIsRejected() throws {
         var packet = try makeEncryptedPacket(payload: Array("tamper the tag".utf8), sequenceNumber: 2)
         let tagIndex = packet.buffer.writerIndex - Core.macBytes
         flipBit(in: &packet.buffer, at: tagIndex)
 
-        XCTAssertThrowsError(try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHTransportProtectionError, .integrityCheckFailed)
-        }
+        #expect(throws: AgenTTYSSHTransportProtectionError.integrityCheckFailed) { try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2) }
     }
 
-    func testTamperedCiphertextBodyIsRejected() throws {
+    @Test
+    func tamperedCiphertextBodyIsRejected() throws {
         var packet = try makeEncryptedPacket(payload: Array("tamper the body".utf8), sequenceNumber: 2)
         flipBit(in: &packet.buffer, at: packet.buffer.readerIndex + Core.cipherBlockSize + 1)
 
-        XCTAssertThrowsError(try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHTransportProtectionError, .integrityCheckFailed)
-        }
+        #expect(throws: AgenTTYSSHTransportProtectionError.integrityCheckFailed) { try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2) }
     }
 
     /// The first block is decrypted before anything is authenticated, so corruption
     /// there still has to be caught by the MAC.
-    func testTamperedFirstBlockPayloadIsRejected() throws {
+    @Test
+    func tamperedFirstBlockPayloadIsRejected() throws {
         var packet = try makeEncryptedPacket(payload: Array("tamper the padding byte".utf8), sequenceNumber: 2)
         flipBit(in: &packet.buffer, at: packet.buffer.readerIndex + 4)
 
-        XCTAssertThrowsError(try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHTransportProtectionError, .integrityCheckFailed)
-        }
+        #expect(throws: AgenTTYSSHTransportProtectionError.integrityCheckFailed) { try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 2) }
     }
 
-    func testTamperedLengthFieldIsRejected() throws {
+    @Test
+    func tamperedLengthFieldIsRejected() throws {
         var packet = try makeEncryptedPacket(payload: Array("tamper the length".utf8), sequenceNumber: 2)
         // Setting the top length bit pushes the decrypted length far past the bound.
         flipBit(in: &packet.buffer, at: packet.buffer.readerIndex, mask: 0x80)
 
-        XCTAssertThrowsError(try packet.receiver.decryptFirstBlock(&packet.buffer)) { error in
-            guard case .invalidPacketLength = error as? AgenTTYSSHTransportProtectionError else {
-                XCTFail("expected an invalid packet length, got \(error)")
-                return
-            }
+        let error = try #require(throws: AgenTTYSSHTransportProtectionError.self) {
+            try packet.receiver.decryptFirstBlock(&packet.buffer)
+        }
+        guard case .invalidPacketLength = error else {
+            Issue.record("expected an invalid packet length, got \(error)")
+            return
         }
     }
 
@@ -315,7 +308,8 @@ final class SSHTransportProtectionTests: XCTestCase {
 
     // MARK: - 5.5 Length-field guards
 
-    func testDecryptFirstBlockRejectsOutOfRangeLengths() throws {
+    @Test
+    func decryptFirstBlockRejectsOutOfRangeLengths() throws {
         let keys = makeKeys(encryptionKeySize: 32)
         let receiver = try Core(initialKeys: keys, expectedEncryptionKeySize: 32)
         // Matches the receiver's inbound keystream so a chosen plaintext block can
@@ -333,17 +327,14 @@ final class SSHTransportProtectionTests: XCTestCase {
             var buffer = allocator.buffer(capacity: Core.cipherBlockSize)
             buffer.writeBytes(ciphertext)
 
-            XCTAssertThrowsError(try receiver.decryptFirstBlock(&buffer)) { error in
-                XCTAssertEqual(
-                    error as? AgenTTYSSHTransportProtectionError,
-                    .invalidPacketLength(badLength),
-                    "length \(badLength) must be rejected"
-                )
+            #expect(throws: AgenTTYSSHTransportProtectionError.invalidPacketLength(badLength), "length \(badLength) must be rejected") {
+                try receiver.decryptFirstBlock(&buffer)
             }
         }
     }
 
-    func testDecryptFirstBlockAcceptsMinimumAndMaximumLengths() throws {
+    @Test
+    func decryptFirstBlockAcceptsMinimumAndMaximumLengths() throws {
         for acceptedLength: UInt32 in [12, 262_140] {
             let keys = makeKeys(encryptionKeySize: 32)
             let receiver = try Core(initialKeys: keys, expectedEncryptionKeySize: 32)
@@ -358,18 +349,17 @@ final class SSHTransportProtectionTests: XCTestCase {
 
             var buffer = allocator.buffer(capacity: Core.cipherBlockSize)
             buffer.writeBytes(ciphertext)
-            XCTAssertNoThrow(try receiver.decryptFirstBlock(&buffer))
+            #expect(throws: Never.self) { try receiver.decryptFirstBlock(&buffer) }
         }
     }
 
     // MARK: - 5.6 Sequence-number binding
 
-    func testMACIsBoundToTheSequenceNumber() throws {
+    @Test
+    func macIsBoundToTheSequenceNumber() throws {
         var packet = try makeEncryptedPacket(payload: Array("bound to seq".utf8), sequenceNumber: 7)
 
-        XCTAssertThrowsError(try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 8)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHTransportProtectionError, .integrityCheckFailed)
-        }
+        #expect(throws: AgenTTYSSHTransportProtectionError.integrityCheckFailed) { try receive(&packet.buffer, with: packet.receiver, sequenceNumber: 8) }
     }
 
     // MARK: - 5.7 Known-answer vectors
@@ -377,7 +367,8 @@ final class SSHTransportProtectionTests: XCTestCase {
     /// NIST SP 800-38A F.5.5 / F.5.6, CTR-AES256. The four plaintext blocks are fed
     /// across two calls so the derived counter block is proven to advance correctly
     /// between calls, which is exactly what the split first-block/remainder path needs.
-    func testNISTAES256CTRKnownAnswerVectorAcrossTwoCalls() throws {
+    @Test
+    func nistaes256CTRKnownAnswerVectorAcrossTwoCalls() throws {
         let key = SymmetricKey(
             data: Data(hexBytes("603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4"))
         )
@@ -392,151 +383,131 @@ final class SSHTransportProtectionTests: XCTestCase {
         )
 
         let firstCiphertext = try cipher.apply(to: firstBlock)
-        XCTAssertEqual(Array(firstCiphertext), hexBytes("601ec313775789a5b7a7f504bbf3d228"))
+        #expect(Array(firstCiphertext) == hexBytes("601ec313775789a5b7a7f504bbf3d228"))
 
         let remainingCiphertext = try cipher.apply(to: remainingBlocks)
-        XCTAssertEqual(
-            Array(remainingCiphertext),
-            hexBytes(
+        #expect(Array(remainingCiphertext) == hexBytes(
                 "f443e3ca4d62b59aca84e990cacaf5c5"
                     + "2b0930daa23de94ce87017ba2d84988d"
                     + "dfc9c58db67aada613c2dd08457941a6"
-            )
-        )
+            ))
     }
 
-    func testCounterBlockAdvancesBigEndianAcrossByteBoundaries() {
+    @Test
+    func counterBlockAdvancesBigEndianAcrossByteBoundaries() {
         let base = hexBytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff")
 
-        XCTAssertEqual(AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 0), base)
-        XCTAssertEqual(
-            AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 1),
-            hexBytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdff00")
-        )
-        XCTAssertEqual(
-            AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 3),
-            hexBytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdff02")
-        )
-        XCTAssertEqual(
-            AgenTTYAESCTRCipher.counterBlock(
+        #expect(AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 0) == base)
+        #expect(AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 1) == hexBytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdff00"))
+        #expect(AgenTTYAESCTRCipher.counterBlock(base: base, advancedBy: 3) == hexBytes("f0f1f2f3f4f5f6f7f8f9fafbfcfdff02"))
+        #expect(AgenTTYAESCTRCipher.counterBlock(
                 base: hexBytes("000000000000000000000000ffffffff"),
                 advancedBy: 1
-            ),
-            hexBytes("00000000000000000000000100000000")
-        )
+            ) == hexBytes("00000000000000000000000100000000"))
     }
 
     /// RFC 4231 test case 2, which also exercises `constantTimeEquals`.
-    func testRFC4231HMACSHA256Vector() {
+    @Test
+    func rfc4231HMACSHA256Vector() {
         var mac = HMAC<SHA256>(key: SymmetricKey(data: Data("Jefe".utf8)))
         mac.update(data: Data("what do ya want for nothing?".utf8))
         let code = mac.finalize()
 
         let expected = hexBytes("5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843")
-        XCTAssertTrue(Core.constantTimeEquals(code, expected))
-        XCTAssertFalse(Core.constantTimeEquals(code, Array(expected.dropLast())))
+        #expect(Core.constantTimeEquals(code, expected))
+        #expect(!Core.constantTimeEquals(code, Array(expected.dropLast())))
 
         var tampered = expected
         tampered[31] ^= 0x01
-        XCTAssertFalse(Core.constantTimeEquals(code, tampered))
+        #expect(!Core.constantTimeEquals(code, tampered))
     }
 
-    func testSequenceNumberBytesAreBigEndian() {
-        XCTAssertEqual(Core.sequenceNumberBytes(0x0102_0304), [0x01, 0x02, 0x03, 0x04])
-        XCTAssertEqual(Core.sequenceNumberBytes(0), [0, 0, 0, 0])
-        XCTAssertEqual(Core.sequenceNumberBytes(.max), [0xFF, 0xFF, 0xFF, 0xFF])
+    @Test
+    func sequenceNumberBytesAreBigEndian() {
+        #expect(Core.sequenceNumberBytes(0x0102_0304) == [0x01, 0x02, 0x03, 0x04])
+        #expect(Core.sequenceNumberBytes(0) == [0, 0, 0, 0])
+        #expect(Core.sequenceNumberBytes(.max) == [0xFF, 0xFF, 0xFF, 0xFF])
     }
 
     // MARK: - 5.8 Scheme registration
 
-    func testClientSchemesKeepGCMFirstAndAddCTRTail() {
+    @Test
+    func clientSchemesKeepGCMFirstAndAddCTRTail() {
         let schemes = AgenTTYSSHTransportProtectionSchemes.clientSchemes()
-        XCTAssertEqual(schemes.count, 5)
-        XCTAssertEqual(
-            schemes.map { $0.cipherName },
-            [
+        #expect(schemes.count == 5)
+        #expect(schemes.map { $0.cipherName } == [
                 "aes256-gcm@openssh.com",
                 "aes128-gcm@openssh.com",
                 "chacha20-poly1305@openssh.com",
                 "aes256-ctr",
                 "aes128-ctr",
-            ]
-        )
+            ])
 
         for scheme in schemes.suffix(2) {
-            XCTAssertEqual(scheme.macName, "hmac-sha2-256")
-            XCTAssertEqual(scheme.cipherBlockSize, 16)
-            XCTAssertEqual(scheme.keySizes.ivSize, 16)
-            XCTAssertEqual(scheme.keySizes.macKeySize, 32)
+            #expect(scheme.macName == "hmac-sha2-256")
+            #expect(scheme.cipherBlockSize == 16)
+            #expect(scheme.keySizes.ivSize == 16)
+            #expect(scheme.keySizes.macKeySize == 32)
         }
 
-        XCTAssertEqual(AgenTTYAES256CTRTransportProtection.keySizes.encryptionKeySize, 32)
-        XCTAssertEqual(AgenTTYAES128CTRTransportProtection.keySizes.encryptionKeySize, 16)
+        #expect(AgenTTYAES256CTRTransportProtection.keySizes.encryptionKeySize == 32)
+        #expect(AgenTTYAES128CTRTransportProtection.keySizes.encryptionKeySize == 16)
 
         let keys256 = makeKeys(encryptionKeySize: 32)
         let scheme256 = try? AgenTTYAES256CTRTransportProtection(initialKeys: keys256)
-        XCTAssertEqual(scheme256?.macBytes, 32)
-        XCTAssertEqual(scheme256?.lengthEncrypted, true)
+        #expect(scheme256?.macBytes == 32)
+        #expect(scheme256?.lengthEncrypted == true)
 
         let keys128 = makeKeys(encryptionKeySize: 16)
         let scheme128 = try? AgenTTYAES128CTRTransportProtection(initialKeys: keys128)
-        XCTAssertEqual(scheme128?.macBytes, 32)
-        XCTAssertEqual(scheme128?.lengthEncrypted, true)
+        #expect(scheme128?.macBytes == 32)
+        #expect(scheme128?.lengthEncrypted == true)
     }
 
-    func testSchemeRejectsWrongEncryptionKeySize() {
-        XCTAssertThrowsError(
-            try AgenTTYAES256CTRTransportProtection(initialKeys: makeKeys(encryptionKeySize: 16))
-        ) { error in
-            XCTAssertEqual(
-                error as? AgenTTYSSHTransportProtectionError,
-                .invalidEncryptionKeySize(expectedBytes: 32, actualBits: 128)
-            )
-        }
+    @Test
+    func schemeRejectsWrongEncryptionKeySize() {
+        #expect(throws: AgenTTYSSHTransportProtectionError.invalidEncryptionKeySize(expectedBytes: 32, actualBits: 128)) { try AgenTTYAES256CTRTransportProtection(initialKeys: makeKeys(encryptionKeySize: 16)) }
     }
 
     // MARK: - 5.9 Key-exchange failure classification
 
-    func testAlgorithmNegotiationFailureIsClassifiedAsPermanent() {
-        XCTAssertTrue(
-            AgenTTYSSHTransportFailureClassifier.isAlgorithmNegotiationFailure(.keyExchangeNegotiationFailure)
-        )
-        XCTAssertFalse(
-            AgenTTYSSHTransportFailureClassifier.isAlgorithmNegotiationFailure(.invalidOpenSSHPublicKey)
-        )
+    @Test
+    func algorithmNegotiationFailureIsClassifiedAsPermanent() {
+        #expect(AgenTTYSSHTransportFailureClassifier.isAlgorithmNegotiationFailure(.keyExchangeNegotiationFailure))
+        #expect(!AgenTTYSSHTransportFailureClassifier.isAlgorithmNegotiationFailure(.invalidOpenSSHPublicKey))
 
         let outcome = AgenTTYSSHTransportFailureClassifier.algorithmNegotiationOutcome
-        XCTAssertEqual(outcome.category, .algorithmNegotiationFailed)
-        XCTAssertEqual(outcome.failureStage, .transport)
-        XCTAssertFalse(outcome.wasReady)
-        XCTAssertFalse(outcome.shouldReconnect)
+        #expect(outcome.category == .algorithmNegotiationFailed)
+        #expect(outcome.failureStage == .transport)
+        #expect(!outcome.wasReady)
+        #expect(!outcome.shouldReconnect)
     }
 
-    func testUnrelatedErrorsAreNotClassifiedAsNegotiationFailures() {
-        XCTAssertNil(
-            AgenTTYSSHTransportFailureClassifier.outcome(
+    @Test
+    func unrelatedErrorsAreNotClassifiedAsNegotiationFailures() throws {
+        #expect(AgenTTYSSHTransportFailureClassifier.outcome(
                 for: NSError(domain: "test", code: 1)
-            )
-        )
+            ) == nil)
 
-        XCTAssertThrowsError(try NIOSSHPublicKey(openSSHPublicKey: "definitely-not-a-key")) { error in
-            XCTAssertNil(AgenTTYSSHTransportFailureClassifier.outcome(for: error))
-            XCTAssertFalse(SSHClientSession.containsPermanentConnectFailure(error))
-        }
+        let error = try #require(throws: (any Error).self) { try NIOSSHPublicKey(openSSHPublicKey: "definitely-not-a-key") }
+        #expect(AgenTTYSSHTransportFailureClassifier.outcome(for: error) == nil)
+        #expect(!SSHClientSession.containsPermanentConnectFailure(error))
     }
 
-    func testAlgorithmNegotiationOutcomeGetsDedicatedRecoveryGuidance() {
+    @Test
+    func algorithmNegotiationOutcomeGetsDedicatedRecoveryGuidance() {
         let guidance = AgenTTYSSHRecoveryGuidance.guidance(
             for: AgenTTYSSHTransportFailureClassifier.algorithmNegotiationOutcome
         )
 
-        XCTAssertEqual(guidance.title, "No Shared Encryption Method")
-        XCTAssertTrue(guidance.message.contains("aes256-ctr"))
-        XCTAssertTrue(guidance.message.contains("chacha20-poly1305@openssh.com"))
-        XCTAssertTrue(guidance.suggestions.contains { $0.subtitle.contains("aes-ctr") })
+        #expect(guidance.title == "No Shared Encryption Method")
+        #expect(guidance.message.contains("aes256-ctr"))
+        #expect(guidance.message.contains("chacha20-poly1305@openssh.com"))
+        #expect(guidance.suggestions.contains { $0.subtitle.contains("aes-ctr") })
     }
 
-    func testNegotiationRecoveryCardsAreComponentSpecific() {
+    @Test
+    func negotiationRecoveryCardsAreComponentSpecific() {
         let hostKeyOutcome = AgenTTYSSHTerminationOutcome(
             category: .algorithmNegotiationFailed,
             failureStage: .transport,
@@ -550,8 +521,8 @@ final class SSHTransportProtectionTests: XCTestCase {
             )
         )
         let hostKeyGuidance = AgenTTYSSHRecoveryGuidance.guidance(for: hostKeyOutcome)
-        XCTAssertEqual(hostKeyGuidance.title, "No Shared Host Key Type")
-        XCTAssertTrue(hostKeyGuidance.message.contains("This host offers: ssh-dss."))
+        #expect(hostKeyGuidance.title == "No Shared Host Key Type")
+        #expect(hostKeyGuidance.message.contains("This host offers: ssh-dss."))
 
         let kexOutcome = AgenTTYSSHTerminationOutcome(
             category: .algorithmNegotiationFailed,
@@ -565,10 +536,7 @@ final class SSHTransportProtectionTests: XCTestCase {
                 remoteAlgorithms: ["diffie-hellman-group14-sha1"]
             )
         )
-        XCTAssertEqual(
-            AgenTTYSSHRecoveryGuidance.guidance(for: kexOutcome).title,
-            "No Shared Key Exchange Method"
-        )
+        #expect(AgenTTYSSHRecoveryGuidance.guidance(for: kexOutcome).title == "No Shared Key Exchange Method")
 
         let macOutcome = AgenTTYSSHTerminationOutcome(
             category: .algorithmNegotiationFailed,
@@ -582,23 +550,22 @@ final class SSHTransportProtectionTests: XCTestCase {
                 remoteAlgorithms: ["hmac-md5"]
             )
         )
-        XCTAssertEqual(
-            AgenTTYSSHRecoveryGuidance.guidance(for: macOutcome).title,
-            "No Shared Message Authentication"
-        )
+        #expect(AgenTTYSSHRecoveryGuidance.guidance(for: macOutcome).title == "No Shared Message Authentication")
     }
 
-    func testForkComponentsCollapseOntoUserMeaningfulOnes() {
-        XCTAssertEqual(AgenTTYSSHNegotiationFailureDetail.Component(.transportProtection), .encryption)
-        XCTAssertEqual(AgenTTYSSHNegotiationFailureDetail.Component(.asymmetricNegotiation), .encryption)
-        XCTAssertEqual(AgenTTYSSHNegotiationFailureDetail.Component(.hostKey), .hostKey)
-        XCTAssertEqual(AgenTTYSSHNegotiationFailureDetail.Component(.keyExchange), .keyExchange)
-        XCTAssertEqual(AgenTTYSSHNegotiationFailureDetail.Component(.mac), .mac)
+    @Test
+    func forkComponentsCollapseOntoUserMeaningfulOnes() {
+        #expect(AgenTTYSSHNegotiationFailureDetail.Component(.transportProtection) == .encryption)
+        #expect(AgenTTYSSHNegotiationFailureDetail.Component(.asymmetricNegotiation) == .encryption)
+        #expect(AgenTTYSSHNegotiationFailureDetail.Component(.hostKey) == .hostKey)
+        #expect(AgenTTYSSHNegotiationFailureDetail.Component(.keyExchange) == .keyExchange)
+        #expect(AgenTTYSSHNegotiationFailureDetail.Component(.mac) == .mac)
     }
 
-    func testAlgorithmNegotiationFailureCountsTowardCircuitBreaker() {
-        XCTAssertTrue(AgenTTYPreReadyFailureCircuitBreaker.countsTowardTrip(.algorithmNegotiationFailed))
-        XCTAssertEqual(AgenTTYSSHDisconnectCategory.algorithmNegotiationFailed.analyticsValue, .other)
+    @Test
+    func algorithmNegotiationFailureCountsTowardCircuitBreaker() {
+        #expect(AgenTTYPreReadyFailureCircuitBreaker.countsTowardTrip(.algorithmNegotiationFailed))
+        #expect(AgenTTYSSHDisconnectCategory.algorithmNegotiationFailed.analyticsValue == .other)
     }
 
     // MARK: - Helpers

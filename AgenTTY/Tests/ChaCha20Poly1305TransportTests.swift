@@ -2,7 +2,7 @@ import Crypto
 import Foundation
 import NIOCore
 import NIOSSH
-import XCTest
+import Testing
 
 @testable import AgenTTY_iOS
 
@@ -22,22 +22,25 @@ import XCTest
 /// 5. Self round-trips across payload sizes and sequence numbers.
 /// 6. Negatives: tampering and malformed framing must throw, and must throw
 ///    before any payload plaintext is produced.
-final class ChaCha20Poly1305TransportTests: XCTestCase {
+@Suite
+struct ChaCha20Poly1305TransportTests {
     // MARK: - Layer 1: Poly1305 primitive
 
-    func testPoly1305MatchesRFC8439Vectors() {
+    @Test
+    func poly1305MatchesRFC8439Vectors() {
         for vector in Self.poly1305Vectors {
             let tag = Poly1305.computeTag(
                 key: Self.bytes(vector.key),
                 message: Self.bytes(vector.message)
             )
-            XCTAssertEqual(Self.hex(tag), vector.tag, vector.name)
+            #expect(Self.hex(tag) == vector.tag, "\(vector.name)")
         }
     }
 
     /// The incremental path has to agree with the one-shot path for every chunk
     /// size, including chunks that never complete a 16-byte block.
-    func testPoly1305StreamingMatchesOneShot() {
+    @Test
+    func poly1305StreamingMatchesOneShot() {
         let vector = Self.aeadVectors[1]
         let message = Self.bytes(vector.message)
 
@@ -49,55 +52,50 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
                 authenticator.update(Array(message[index..<end]))
                 index = end
             }
-            XCTAssertEqual(Self.hex(authenticator.finalize()), vector.tag, "chunk size \(chunkSize)")
+            #expect(Self.hex(authenticator.finalize()) == vector.tag, "chunk size \(chunkSize)")
         }
     }
 
-    func testPoly1305ConstantTimeEqualsRejectsDifferences() {
+    @Test
+    func poly1305ConstantTimeEqualsRejectsDifferences() {
         let left: [UInt8] = [1, 2, 3, 4]
-        XCTAssertTrue(Poly1305.constantTimeEquals(left, [1, 2, 3, 4]))
-        XCTAssertFalse(Poly1305.constantTimeEquals(left, [1, 2, 3, 5]))
-        XCTAssertFalse(Poly1305.constantTimeEquals(left, [1, 2, 3]))
+        #expect(Poly1305.constantTimeEquals(left, [1, 2, 3, 4]))
+        #expect(!Poly1305.constantTimeEquals(left, [1, 2, 3, 5]))
+        #expect(!Poly1305.constantTimeEquals(left, [1, 2, 3]))
     }
 
     // MARK: - Layer 2: ChaCha20 nonce and counter layout
 
     /// RFC 8439 §2.6.2. If `Insecure.ChaCha20CTR` interpreted the nonce or the
     /// counter differently from OpenSSH, this is where it would show up.
-    func testPolyKeyGenerationMatchesRFC8439() throws {
+    @Test
+    func polyKeyGenerationMatchesRFC8439() throws {
         let output = try ChaCha20Poly1305TransportProtection.polyKey(
             key: SymmetricKey(data: Self.bytes(Self.keyGenerationKey)),
             nonce: Self.bytes(Self.keyGenerationNonce)
         )
-        XCTAssertEqual(Self.hex(output), Self.keyGenerationOutput)
+        #expect(Self.hex(output) == Self.keyGenerationOutput)
     }
 
     /// 4 zero bytes followed by `UInt64(sequenceNumber).bigEndian`, which is how
     /// OpenSSH's 8-byte original-ChaCha IV maps onto RFC 8439's 12-byte nonce.
-    func testNonceIsFourZeroBytesThenBigEndianSequenceNumber() {
-        XCTAssertEqual(
-            Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: 0)),
-            "000000000000000000000000"
-        )
-        XCTAssertEqual(
-            Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: 3)),
-            "000000000000000000000003"
-        )
-        XCTAssertEqual(
-            Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: .max)),
-            "0000000000000000ffffffff"
-        )
+    @Test
+    func nonceIsFourZeroBytesThenBigEndianSequenceNumber() {
+        #expect(Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: 0)) == "000000000000000000000000")
+        #expect(Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: 3)) == "000000000000000000000003")
+        #expect(Self.hex(ChaCha20Poly1305TransportProtection.nonce(for: .max)) == "0000000000000000ffffffff")
     }
 
     // MARK: - Layer 3: Poly1305 over the RFC's AEAD buffers
 
-    func testPoly1305MatchesRFC8439AEADConstructions() {
+    @Test
+    func poly1305MatchesRFC8439AEADConstructions() {
         for vector in Self.aeadVectors {
             let tag = Poly1305.computeTag(
                 key: Self.bytes(vector.key),
                 message: Self.bytes(vector.message)
             )
-            XCTAssertEqual(Self.hex(tag), vector.tag, vector.name)
+            #expect(Self.hex(tag) == vector.tag, "\(vector.name)")
         }
     }
 
@@ -105,54 +103,55 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
 
     /// AgenTTY's padding arithmetic has to produce the same plaintext packet
     /// OpenSSH would, or the ciphertext comparison below would be meaningless.
-    func testPlaintextFramingMatchesOpenSSH() {
+    @Test
+    func plaintextFramingMatchesOpenSSH() {
         for vector in Self.packetVectors {
-            XCTAssertEqual(
-                Self.hex(Self.plaintextPacket(payload: vector.payload)),
-                vector.plaintextPacket,
-                vector.name
-            )
+            #expect(Self.hex(Self.plaintextPacket(payload: vector.payload)) == vector.plaintextPacket, "\(vector.name)")
         }
     }
 
-    func testPolyKeyMatchesOpenSSHForSequenceNumber() throws {
+    @Test
+    func polyKeyMatchesOpenSSHForSequenceNumber() throws {
         for vector in Self.packetVectors {
             let polyKey = try ChaCha20Poly1305TransportProtection.polyKey(
                 key: SymmetricKey(data: Array(Self.packetKey[0..<32])),
                 nonce: ChaCha20Poly1305TransportProtection.nonce(for: vector.sequenceNumber)
             )
-            XCTAssertEqual(Self.hex(polyKey), vector.polyKey, vector.name)
+            #expect(Self.hex(polyKey) == vector.polyKey, "\(vector.name)")
         }
     }
 
-    func testEncryptPacketMatchesOpenSSHVectors() throws {
+    @Test
+    func encryptPacketMatchesOpenSSHVectors() throws {
         for vector in Self.packetVectors {
             let protection = try Self.makeProtection(key: Self.packetKey)
             var buffer = ByteBufferAllocator().buffer(capacity: 256)
             buffer.writeBytes(Self.plaintextPacket(payload: vector.payload))
             try protection.encryptPacket(&buffer, sequenceNumber: vector.sequenceNumber)
 
-            let produced = try XCTUnwrap(buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes))
-            XCTAssertEqual(Self.hex(Array(produced.dropLast(16))), vector.ciphertext, vector.name)
-            XCTAssertEqual(Self.hex(Array(produced.suffix(16))), vector.tag, vector.name)
+            let produced = try #require(buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes))
+            #expect(Self.hex(Array(produced.dropLast(16))) == vector.ciphertext, "\(vector.name)")
+            #expect(Self.hex(Array(produced.suffix(16))) == vector.tag, "\(vector.name)")
         }
     }
 
-    func testDecryptAcceptsOpenSSHVectors() throws {
+    @Test
+    func decryptAcceptsOpenSSHVectors() throws {
         for vector in Self.packetVectors {
             let protection = try Self.makeProtection(key: Self.packetKey)
             var wire = ByteBufferAllocator().buffer(capacity: 256)
             wire.writeBytes(Self.bytes(vector.ciphertext) + Self.bytes(vector.tag))
 
             let payload = try Self.decrypt(&wire, using: protection, sequenceNumber: vector.sequenceNumber)
-            XCTAssertEqual(payload, vector.payload, vector.name)
-            XCTAssertEqual(wire.readableBytes, 0, vector.name)
+            #expect(payload == vector.payload, "\(vector.name)")
+            #expect(wire.readableBytes == 0, "\(vector.name)")
         }
     }
 
     // MARK: - Layer 5: round trips
 
-    func testRoundTripAcrossPayloadSizesAndSequenceNumbers() throws {
+    @Test
+    func roundTripAcrossPayloadSizesAndSequenceNumbers() throws {
         let key = (0..<64).map { UInt8(truncatingIfNeeded: ($0 &* 7) &+ 13) }
 
         for sequenceNumber in [UInt32(0), 1, 255, 65535, .max] {
@@ -168,15 +167,16 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
                 try sender.encryptPacket(&buffer, sequenceNumber: sequenceNumber)
 
                 let recovered = try Self.decrypt(&buffer, using: receiver, sequenceNumber: sequenceNumber)
-                XCTAssertEqual(recovered, payload, "seq \(sequenceNumber) size \(payloadSize)")
-                XCTAssertEqual(buffer.readableBytes, 0)
+                #expect(recovered == payload, "seq \(sequenceNumber) size \(payloadSize)")
+                #expect(buffer.readableBytes == 0)
             }
         }
     }
 
     /// `decryptFirstBlock` runs against the parser's whole accumulated buffer, so
     /// it must touch only the first packet's length field.
-    func testCoalescedPacketsDecryptIndependently() throws {
+    @Test
+    func coalescedPacketsDecryptIndependently() throws {
         let key = (0..<64).map { UInt8(truncatingIfNeeded: ($0 &* 11) &+ 3) }
         let sender = try Self.makeProtection(key: key)
         let receiver = try Self.makeProtection(key: key)
@@ -194,14 +194,15 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         for index in 0..<payloads.count {
             recovered.append(try Self.decrypt(&wire, using: receiver, sequenceNumber: UInt32(index)))
         }
-        XCTAssertEqual(recovered, payloads)
-        XCTAssertEqual(wire.readableBytes, 0)
+        #expect(recovered == payloads)
+        #expect(wire.readableBytes == 0)
     }
 
     /// After one packet the scheme knows the next inbound sequence number without
     /// being told, which is what lets it satisfy NIOSSH's argument-less
     /// `decryptFirstBlock(_:)`.
-    func testInboundSequenceNumberIsTrackedAcrossPackets() throws {
+    @Test
+    func inboundSequenceNumberIsTrackedAcrossPackets() throws {
         let key = (0..<64).map { UInt8(truncatingIfNeeded: ($0 &* 5) &+ 9) }
         let sender = try Self.makeProtection(key: key)
         let receiver = try Self.makeProtection(key: key)
@@ -217,46 +218,46 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
 
         // No sequence number handed to decryptFirstBlock this time.
         try receiver.decryptFirstBlock(&second)
-        let packetLength = try XCTUnwrap(second.getInteger(at: second.readerIndex, as: UInt32.self))
-        var slice = try XCTUnwrap(second.readSlice(length: Int(packetLength) + 20))
+        let packetLength = try #require(second.getInteger(at: second.readerIndex, as: UInt32.self))
+        let sliced = second.readSlice(length: Int(packetLength) + 20)
+        var slice = try #require(sliced)
         var payload = try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: 8)
-        XCTAssertEqual(payload.readBytes(length: payload.readableBytes), [0xcc, 0xdd, 0xee])
+        #expect(payload.readBytes(length: payload.readableBytes) == [0xcc, 0xdd, 0xee])
     }
 
     /// A freshly keyed instance has no way to know the sequence number of the
     /// first packet after `SSH_MSG_NEWKEYS`, so it must refuse rather than guess.
-    func testFirstInboundPacketWithoutSequenceNumberFailsClosed() throws {
+    @Test
+    func firstInboundPacketWithoutSequenceNumberFailsClosed() throws {
         let receiver = try Self.makeProtection(key: Self.packetKey)
         var wire = ByteBufferAllocator().buffer(capacity: 64)
         wire.writeBytes(Self.bytes(Self.packetVectors[0].ciphertext))
 
-        XCTAssertThrowsError(try receiver.decryptFirstBlock(&wire)) { error in
-            XCTAssertEqual(
-                error as? ChaCha20Poly1305TransportProtectionError,
-                .inboundSequenceNumberUnavailable
-            )
-        }
+        #expect(throws: ChaCha20Poly1305TransportProtectionError.inboundSequenceNumberUnavailable) { try receiver.decryptFirstBlock(&wire) }
     }
 
     // MARK: - Layer 6: negatives
 
     /// Sanity check: the fixture the tampering tests start from is itself valid,
     /// so a rejection below can only come from the tampering.
-    func testNegativeFixtureDecryptsUntampered() throws {
+    @Test
+    func negativeFixtureDecryptsUntampered() throws {
         let receiver = try Self.makeProtection(key: Self.negativeKey)
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
         buffer.writeBytes(try Self.negativeFixture())
         let payload = try Self.decrypt(&buffer, using: receiver, sequenceNumber: 12)
-        XCTAssertEqual(payload, Array("negative-test-payload".utf8))
+        #expect(payload == Array("negative-test-payload".utf8))
     }
 
-    func testFlippedTagByteIsRejected() throws {
+    @Test
+    func flippedTagByteIsRejected() throws {
         var wire = try Self.negativeFixture()
         wire[wire.count - 1] ^= 0x01
         try assertRejects(wire, sequenceNumber: 12, as: .integrityCheckFailed)
     }
 
-    func testFlippedCiphertextByteIsRejected() throws {
+    @Test
+    func flippedCiphertextByteIsRejected() throws {
         var wire = try Self.negativeFixture()
         wire[8] ^= 0x01
         try assertRejects(wire, sequenceNumber: 12, as: .integrityCheckFailed)
@@ -264,13 +265,14 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
 
     /// The sequence number keys both the length field and the tag, so a packet
     /// replayed at a different number cannot decrypt.
-    func testWrongSequenceNumberIsRejected() throws {
+    @Test
+    func wrongSequenceNumberIsRejected() throws {
         let receiver = try Self.makeProtection(key: Self.negativeKey)
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
         buffer.writeBytes(try Self.negativeFixture())
         do {
             _ = try Self.decrypt(&buffer, using: receiver, sequenceNumber: 13)
-            XCTFail("a packet decrypted under the wrong sequence number must be rejected")
+            Issue.record("a packet decrypted under the wrong sequence number must be rejected")
         } catch is ChaCha20Poly1305TransportProtectionError {
             // Expected: caught by the length gate or by the tag.
         }
@@ -279,29 +281,29 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
     /// The two decrypt calls must agree on the sequence number. A mismatch means
     /// the caller lost packet framing, which is a bug rather than a tampered
     /// packet, so it is refused instead of silently authenticating something else.
-    func testMismatchedSequenceNumbersBetweenDecryptCallsAreRejected() throws {
+    @Test
+    func mismatchedSequenceNumbersBetweenDecryptCallsAreRejected() throws {
         let receiver = try Self.makeProtection(key: Self.negativeKey)
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
         buffer.writeBytes(try Self.negativeFixture())
 
         try receiver.decryptFirstBlock(&buffer, sequenceNumber: 12)
-        let packetLength = try XCTUnwrap(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
-        var slice = try XCTUnwrap(buffer.readSlice(length: Int(packetLength) + 20))
+        let packetLength = try #require(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
+        let sliced = buffer.readSlice(length: Int(packetLength) + 20)
+        var slice = try #require(sliced)
         do {
             _ = try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: 13)
-            XCTFail("mismatched sequence numbers must be refused")
+            Issue.record("mismatched sequence numbers must be refused")
         } catch {
-            XCTAssertEqual(
-                error as? ChaCha20Poly1305TransportProtectionError,
-                .sequenceNumberMismatch(expected: 12, actual: 13)
-            )
+            #expect(error as? ChaCha20Poly1305TransportProtectionError == .sequenceNumberMismatch(expected: 12, actual: 13))
         }
     }
 
     /// The length field is the only unauthenticated data this scheme exposes, so
     /// an absurd value has to be caught in `decryptFirstBlock`, before the parser
     /// is told to buffer that many bytes.
-    func testOversizedLengthFieldIsRejectedBeforeBuffering() throws {
+    @Test
+    func oversizedLengthFieldIsRejectedBeforeBuffering() throws {
         var wire = try Self.negativeFixture()
         wire[0] ^= 0xff
         wire[1] ^= 0xff
@@ -309,14 +311,17 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         let receiver = try Self.makeProtection(key: Self.negativeKey)
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
         buffer.writeBytes(wire)
-        XCTAssertThrowsError(try receiver.decryptFirstBlock(&buffer, sequenceNumber: 12)) { error in
-            guard case .invalidPacketLength = error as? ChaCha20Poly1305TransportProtectionError else {
-                return XCTFail("unexpected error: \(error)")
-            }
+        let error = try #require(throws: ChaCha20Poly1305TransportProtectionError.self) {
+            try receiver.decryptFirstBlock(&buffer, sequenceNumber: 12)
+        }
+        guard case .invalidPacketLength = error else {
+            Issue.record("unexpected error: \(error)")
+            return
         }
     }
 
-    func testTruncatedPacketIsRejected() throws {
+    @Test
+    func truncatedPacketIsRejected() throws {
         let wire = try Array(Self.negativeFixture().dropLast(4))
         let receiver = try Self.makeProtection(key: Self.negativeKey)
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
@@ -326,25 +331,22 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         // The parser would wait for more bytes here; feeding the short slice through
         // anyway must not produce a payload.
         var slice = buffer
-        XCTAssertThrowsError(try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: 12))
+        #expect(throws: (any Error).self) { try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: 12) }
     }
 
-    func testShortKeyIsRejected() {
-        XCTAssertThrowsError(try Self.makeProtection(key: Array(Self.packetKey[0..<32]))) { error in
-            XCTAssertEqual(
-                error as? ChaCha20Poly1305TransportProtectionError,
-                .invalidEncryptionKeySize(expectedBytes: 64, actualBits: 256)
-            )
-        }
+    @Test
+    func shortKeyIsRejected() {
+        #expect(throws: ChaCha20Poly1305TransportProtectionError.invalidEncryptionKeySize(expectedBytes: 64, actualBits: 256)) { try Self.makeProtection(key: Array(Self.packetKey[0..<32])) }
     }
 
-    func testNegotiationMetadataMatchesOpenSSH() {
-        XCTAssertEqual(ChaCha20Poly1305TransportProtection.cipherName, "chacha20-poly1305@openssh.com")
-        XCTAssertNil(ChaCha20Poly1305TransportProtection.macName)
-        XCTAssertEqual(ChaCha20Poly1305TransportProtection.cipherBlockSize, 8)
-        XCTAssertEqual(ChaCha20Poly1305TransportProtection.keySizes.ivSize, 0)
-        XCTAssertEqual(ChaCha20Poly1305TransportProtection.keySizes.encryptionKeySize, 64)
-        XCTAssertEqual(ChaCha20Poly1305TransportProtection.keySizes.macKeySize, 16)
+    @Test
+    func negotiationMetadataMatchesOpenSSH() {
+        #expect(ChaCha20Poly1305TransportProtection.cipherName == "chacha20-poly1305@openssh.com")
+        #expect(ChaCha20Poly1305TransportProtection.macName == nil)
+        #expect(ChaCha20Poly1305TransportProtection.cipherBlockSize == 8)
+        #expect(ChaCha20Poly1305TransportProtection.keySizes.ivSize == 0)
+        #expect(ChaCha20Poly1305TransportProtection.keySizes.encryptionKeySize == 64)
+        #expect(ChaCha20Poly1305TransportProtection.keySizes.macKeySize == 16)
     }
 
     // MARK: - Helpers
@@ -359,14 +361,11 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         buffer.writeBytes(wire)
 
         try receiver.decryptFirstBlock(&buffer, sequenceNumber: sequenceNumber)
-        let packetLength = try XCTUnwrap(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
-        var slice = try XCTUnwrap(buffer.readSlice(length: Int(packetLength) + 20))
+        let packetLength = try #require(buffer.getInteger(at: buffer.readerIndex, as: UInt32.self))
+        let sliced = buffer.readSlice(length: Int(packetLength) + 20)
+        var slice = try #require(sliced)
 
-        XCTAssertThrowsError(
-            try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: sequenceNumber)
-        ) { error in
-            XCTAssertEqual(error as? ChaCha20Poly1305TransportProtectionError, expected)
-        }
+        #expect(throws: expected) { try receiver.decryptAndVerifyRemainingPacket(&slice, sequenceNumber: sequenceNumber) }
     }
 
     private static let negativeKey = (0..<64).map { UInt8(truncatingIfNeeded: ($0 &* 3) &+ 17) }
@@ -377,7 +376,7 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         var buffer = ByteBufferAllocator().buffer(capacity: 256)
         buffer.writeBytes(plaintextPacket(payload: Array("negative-test-payload".utf8)))
         try sender.encryptPacket(&buffer, sequenceNumber: 12)
-        return try XCTUnwrap(buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes))
+        return try #require(buffer.getBytes(at: buffer.readerIndex, length: buffer.readableBytes))
     }
 
     private static func makeProtection(key: [UInt8]) throws -> ChaCha20Poly1305TransportProtection {
@@ -401,13 +400,14 @@ final class ChaCha20Poly1305TransportTests: XCTestCase {
         sequenceNumber: UInt32
     ) throws -> [UInt8] {
         try protection.decryptFirstBlock(&wire, sequenceNumber: sequenceNumber)
-        let packetLength = try XCTUnwrap(wire.getInteger(at: wire.readerIndex, as: UInt32.self))
-        var slice = try XCTUnwrap(wire.readSlice(length: Int(packetLength) + 20))
+        let packetLength = try #require(wire.getInteger(at: wire.readerIndex, as: UInt32.self))
+        let sliced = wire.readSlice(length: Int(packetLength) + 20)
+        var slice = try #require(sliced)
         var payload = try protection.decryptAndVerifyRemainingPacket(
             &slice,
             sequenceNumber: sequenceNumber
         )
-        XCTAssertEqual(slice.readableBytes, 0, "the parser requires the whole slice to be consumed")
+        #expect(slice.readableBytes == 0, "the parser requires the whole slice to be consumed")
         return payload.readBytes(length: payload.readableBytes) ?? []
     }
 

@@ -1,67 +1,66 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AgenTTY_iOS
 
-final class HostConnectionMethodTests: XCTestCase {
+@Suite
+struct HostConnectionMethodTests {
     @MainActor
-    func testHostConnectionMethodClassifiesTailscaleMagicDNSHostname() {
-        XCTAssertEqual(
-            AgenTTYHostConnectionMethod.forAddress("dev-host.tail123.ts.net"),
-            .tailscale
-        )
+    @Test
+    func hostConnectionMethodClassifiesTailscaleMagicDNSHostname() {
+        #expect(AgenTTYHostConnectionMethod.forAddress("dev-host.tail123.ts.net") == .tailscale)
     }
 
     @MainActor
-    func testHostConnectionMethodClassifiesTailscaleAddressForCGNATRange() {
-        XCTAssertEqual(AgenTTYHostConnectionMethod.forAddress("100.64.0.10"), .tailscale)
+    @Test
+    func hostConnectionMethodClassifiesTailscaleAddressForCGNATRange() {
+        #expect(AgenTTYHostConnectionMethod.forAddress("100.64.0.10") == .tailscale)
     }
 
     @MainActor
-    func testHostConnectionMethodClassifiesSingleLabelHostnameAsLocalNetwork() {
-        XCTAssertEqual(AgenTTYHostConnectionMethod.forAddress("dev-host"), .localNetwork)
+    @Test
+    func hostConnectionMethodClassifiesSingleLabelHostnameAsLocalNetwork() {
+        #expect(AgenTTYHostConnectionMethod.forAddress("dev-host") == .localNetwork)
     }
 
     @MainActor
-    func testHostConnectionMethodClassifiesRFC1918AddressAsLocalNetwork() {
-        XCTAssertEqual(AgenTTYHostConnectionMethod.forAddress("192.168.1.50"), .localNetwork)
+    @Test
+    func hostConnectionMethodClassifiesRFC1918AddressAsLocalNetwork() {
+        #expect(AgenTTYHostConnectionMethod.forAddress("192.168.1.50") == .localNetwork)
     }
 
     @MainActor
-    func testHostConnectionMethodClassifiesPublicHostnameAsPublicInternet() {
-        XCTAssertEqual(AgenTTYHostConnectionMethod.forAddress("ssh.example.com"), .publicInternet)
+    @Test
+    func hostConnectionMethodClassifiesPublicHostnameAsPublicInternet() {
+        #expect(AgenTTYHostConnectionMethod.forAddress("ssh.example.com") == .publicInternet)
     }
 
     @MainActor
-    func testResolvedAddressClassificationUsesTailscaleWhenAnyResolvedIPIsTailnetAddress() {
-        XCTAssertEqual(
-            AgenTTYHostConnectionMethod.resolvedMethod(
+    @Test
+    func resolvedAddressClassificationUsesTailscaleWhenAnyResolvedIPIsTailnetAddress() {
+        #expect(AgenTTYHostConnectionMethod.resolvedMethod(
                 forResolvedAddresses: ["192.168.1.50", "100.64.0.10"]
-            ),
-            .tailscale
-        )
+            ) == .tailscale)
     }
 
     @MainActor
-    func testResolvedAddressClassificationUsesLocalNetworkWhenAllResolvedIPsArePrivate() {
-        XCTAssertEqual(
-            AgenTTYHostConnectionMethod.resolvedMethod(
+    @Test
+    func resolvedAddressClassificationUsesLocalNetworkWhenAllResolvedIPsArePrivate() {
+        #expect(AgenTTYHostConnectionMethod.resolvedMethod(
                 forResolvedAddresses: ["192.168.1.50", "fe80::1234"]
-            ),
-            .localNetwork
-        )
+            ) == .localNetwork)
     }
 
     @MainActor
-    func testResolvedAddressClassificationUsesPublicInternetForPublicIPAddress() {
-        XCTAssertEqual(
-            AgenTTYHostConnectionMethod.resolvedMethod(
+    @Test
+    func resolvedAddressClassificationUsesPublicInternetForPublicIPAddress() {
+        #expect(AgenTTYHostConnectionMethod.resolvedMethod(
                 forResolvedAddresses: ["203.0.113.10"]
-            ),
-            .publicInternet
-        )
+            ) == .publicInternet)
     }
 
     @MainActor
-    func testHostDecodesPersistedTailscaleAddressHint() throws {
+    @Test
+    func hostDecodesPersistedTailscaleAddressHint() throws {
         let json = #"""
         {
           "id": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE",
@@ -81,19 +80,21 @@ final class HostConnectionMethodTests: XCTestCase {
 
         let host = try JSONDecoder().decode(AgenTTYHost.self, from: Data(json.utf8))
 
-        XCTAssertTrue(host.usesTailscaleAddress)
-        XCTAssertEqual(AgenTTYHostConnectionMethod.directMethod(for: host), .tailscale)
+        #expect(host.usesTailscaleAddress)
+        #expect(AgenTTYHostConnectionMethod.directMethod(for: host) == .tailscale)
     }
 
     @MainActor
-    func testConnectionMethodStatusUsesPersistedTailscaleHintForShortHostname() {
+    @Test
+    func connectionMethodStatusUsesPersistedTailscaleHintForShortHostname() {
         let status = AgenTTYHostConnectionMethodStatus(method: .tailscale)
 
-        XCTAssertEqual(status.method, .tailscale)
+        #expect(status.method == .tailscale)
     }
 
     @MainActor
-    func testCurrentMethodUsesLiveMethodForConnectedActiveHost() {
+    @Test
+    func currentMethodUsesLiveMethodForConnectedActiveHost() {
         let resolution = AgenTTYHostConnectionMethodResolver.currentStatusResolution(
                 liveMethod: .relay,
                 isActiveHostConnected: true,
@@ -105,12 +106,13 @@ final class HostConnectionMethodTests: XCTestCase {
                 relayFailureMessage: nil
             )
 
-        XCTAssertEqual(resolution.method, .relay)
-        XCTAssertTrue(resolution.isReachable)
+        #expect(resolution.method == .relay)
+        #expect(resolution.isReachable)
     }
 
     @MainActor
-    func testCurrentMethodUsesDirectMethodWhenRelayFallbackIsUnavailable() {
+    @Test
+    func currentMethodUsesDirectMethodWhenRelayFallbackIsUnavailable() {
         let resolution = AgenTTYHostConnectionMethodResolver.currentStatusResolution(
                 liveMethod: nil,
                 isActiveHostConnected: false,
@@ -122,13 +124,14 @@ final class HostConnectionMethodTests: XCTestCase {
                 relayFailureMessage: nil
             )
 
-        XCTAssertEqual(resolution.method, .tailscale)
-        XCTAssertFalse(resolution.isReachable)
-        XCTAssertEqual(resolution.failureMessage, "timed out")
+        #expect(resolution.method == .tailscale)
+        #expect(!resolution.isReachable)
+        #expect(resolution.failureMessage == "timed out")
     }
 
     @MainActor
-    func testCurrentMethodUsesRelayWhenDirectPathIsUnavailable() {
+    @Test
+    func currentMethodUsesRelayWhenDirectPathIsUnavailable() {
         let resolution = AgenTTYHostConnectionMethodResolver.currentStatusResolution(
                 liveMethod: nil,
                 isActiveHostConnected: false,
@@ -140,12 +143,13 @@ final class HostConnectionMethodTests: XCTestCase {
                 relayFailureMessage: nil
             )
 
-        XCTAssertEqual(resolution.method, .relay)
-        XCTAssertTrue(resolution.isReachable)
+        #expect(resolution.method == .relay)
+        #expect(resolution.isReachable)
     }
 
     @MainActor
-    func testCurrentMethodUsesDirectMethodWhenDirectPathIsReachable() {
+    @Test
+    func currentMethodUsesDirectMethodWhenDirectPathIsReachable() {
         let resolution = AgenTTYHostConnectionMethodResolver.currentStatusResolution(
                 liveMethod: nil,
                 isActiveHostConnected: false,
@@ -157,12 +161,13 @@ final class HostConnectionMethodTests: XCTestCase {
                 relayFailureMessage: nil
             )
 
-        XCTAssertEqual(resolution.method, .tailscale)
-        XCTAssertTrue(resolution.isReachable)
+        #expect(resolution.method == .tailscale)
+        #expect(resolution.isReachable)
     }
 
     @MainActor
-    func testCurrentMethodUsesRelayAndOfflineWhenBothDirectAndRelayFail() {
+    @Test
+    func currentMethodUsesRelayAndOfflineWhenBothDirectAndRelayFail() {
         let resolution = AgenTTYHostConnectionMethodResolver.currentStatusResolution(
             liveMethod: nil,
             isActiveHostConnected: false,
@@ -174,9 +179,9 @@ final class HostConnectionMethodTests: XCTestCase {
             relayFailureMessage: "relay offline"
         )
 
-        XCTAssertEqual(resolution.method, .relay)
-        XCTAssertFalse(resolution.isReachable)
-        XCTAssertEqual(resolution.failureMessage, "relay offline")
+        #expect(resolution.method == .relay)
+        #expect(!resolution.isReachable)
+        #expect(resolution.failureMessage == "relay offline")
     }
 
     @MainActor

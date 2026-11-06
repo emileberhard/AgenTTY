@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 private final class ContractFixtureBundleMarker {}
@@ -11,24 +11,23 @@ private let fixtureIdentity = AgenTTYNotificationDeviceIdentity(
 )
 
 private func fixtureData(_ path: String) throws -> Data {
-    let root = try XCTUnwrap(
-        Bundle(for: ContractFixtureBundleMarker.self).url(forResource: "contract-fixtures", withExtension: nil)
-    )
+    let root = try #require(Bundle(for: ContractFixtureBundleMarker.self).url(forResource: "contract-fixtures", withExtension: nil))
     return try Data(contentsOf: root.appending(path: path))
 }
 
 private func fixtureObject(_ path: String) throws -> NSDictionary {
-    try XCTUnwrap(JSONSerialization.jsonObject(with: fixtureData(path)) as? NSDictionary, path)
+    try #require(JSONSerialization.jsonObject(with: fixtureData(path)) as? NSDictionary, "\(path)")
 }
 
 private func encodedObject(_ value: some Encodable) throws -> NSDictionary {
     let data = try AgenTTYRelayTransport.makeEncoder().encode(value)
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? NSDictionary)
+    return try #require(JSONSerialization.jsonObject(with: data) as? NSDictionary)
 }
 
 private func requestObject(_ request: URLRequest?) throws -> NSDictionary {
-    let body = try XCTUnwrap(requestBodyData(from: try XCTUnwrap(request)))
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? NSDictionary)
+    let request = try #require(request)
+    let body = try #require(requestBodyData(from: request))
+    return try #require(JSONSerialization.jsonObject(with: body) as? NSDictionary)
 }
 
 private func fixtureResponse(
@@ -36,9 +35,8 @@ private func fixtureResponse(
     statusCode: Int,
     fixture path: String
 ) throws -> (HTTPURLResponse, Data) {
-    let response = try XCTUnwrap(
-        HTTPURLResponse(url: try XCTUnwrap(request.url), statusCode: statusCode, httpVersion: nil, headerFields: nil)
-    )
+    let url = try #require(request.url)
+    let response = try #require(HTTPURLResponse(url: url, statusCode: statusCode, httpVersion: nil, headerFields: nil))
     return (response, try fixtureData(path))
 }
 
@@ -71,58 +69,49 @@ private struct PairingEnumValues: Decodable {
     }
 }
 
-final class ContractFixtureTests: XCTestCase {
-    func testRequestTypesEncodeToTheirFixtures() throws {
-        XCTAssertEqual(
-            try encodedObject(AgenTTYRelayEnsureDeviceRequest(
+@Suite
+struct ContractFixtureTests {
+    @Test
+    func requestTypesEncodeToTheirFixtures() throws {
+        #expect((try encodedObject(AgenTTYRelayEnsureDeviceRequest(
                 deviceID: fixtureIdentity.deviceID,
                 deviceSecret: fixtureIdentity.deviceSecret,
                 bundleID: "dev.tuist.agentty.iOS.dev",
                 pushEnvironment: .development,
                 signedAppTransaction: nil
-            )),
-            try fixtureObject("devices-ensure/request/ensure.json")
-        )
-        XCTAssertEqual(
-            try encodedObject(AgenTTYRelaySessionRequest(
+            ))) == (try fixtureObject("devices-ensure/request/ensure.json")))
+        #expect((try encodedObject(AgenTTYRelaySessionRequest(
                 deviceID: fixtureIdentity.deviceID,
                 deviceSecret: fixtureIdentity.deviceSecret
-            )),
-            try fixtureObject("relay-sessions/request/notify.json")
-        )
-        XCTAssertEqual(
-            try encodedObject(AgenTTYLegacyDictationSessionRequest(
+            ))) == (try fixtureObject("relay-sessions/request/notify.json")))
+        #expect((try encodedObject(AgenTTYLegacyDictationSessionRequest(
                 deviceID: fixtureIdentity.deviceID,
                 deviceSecret: fixtureIdentity.deviceSecret
-            )),
-            try fixtureObject("relay-sessions/request/unsigned-dictation.json")
-        )
-        XCTAssertEqual(
-            try encodedObject(AgenTTYDictationSessionRequest(
+            ))) == (try fixtureObject("relay-sessions/request/unsigned-dictation.json")))
+        #expect((try encodedObject(AgenTTYDictationSessionRequest(
                 deviceID: fixtureIdentity.deviceID,
                 deviceSecret: fixtureIdentity.deviceSecret,
                 signedAppTransaction: "signed-app-transaction",
                 signedLifetimeTransaction: "signed-lifetime-transaction"
-            )),
-            try fixtureObject("dictation-sessions/request/signed.json")
-        )
+            ))) == (try fixtureObject("dictation-sessions/request/signed.json")))
     }
 
-    func testResponseFixturesDecodeWithTheClientDecoders() throws {
+    @Test
+    func responseFixturesDecodeWithTheClientDecoders() throws {
         let decoder = AgenTTYRelayTransport.makeDecoder()
         let notify = try decoder.decode(
             AgenTTYNotifyRelaySession.self,
             from: fixtureData("relay-sessions/response/session.json")
         )
-        XCTAssertEqual(notify.relayToken, "relay-token")
-        XCTAssertEqual(notify.expiresAtEpochSeconds, 1_800_000_000)
+        #expect(notify.relayToken == "relay-token")
+        #expect(notify.expiresAtEpochSeconds == 1_800_000_000)
 
         for (path, tier) in [
             ("dictation-sessions/response/free.json", AgenTTYDictationRelaySession.Tier.free),
             ("dictation-sessions/response/lifetime.json", .lifetime),
         ] {
             let session = try decoder.decode(AgenTTYDictationRelaySession.self, from: fixtureData(path))
-            XCTAssertEqual(session.dictationTier, tier, path)
+            #expect(session.dictationTier == tier, "\(path)")
         }
 
         let enums = try JSONDecoder().decode(
@@ -130,25 +119,26 @@ final class ContractFixtureTests: XCTestCase {
             from: fixtureData("pairing-status/response/enum-values.json")
         )
         let raw = try fixtureObject("pairing-status/response/enum-values.json")
-        XCTAssertEqual(enums.status.map(\.rawValue), raw["status"] as? [String])
-        XCTAssertEqual(enums.detectedUsernameSource.map(\.rawValue), raw["detected_username_source"] as? [String])
-        XCTAssertEqual(enums.hostEnvironmentFlags.map(\.rawValue), raw["host_environment_flags"] as? [String])
-        XCTAssertEqual(enums.hostCandidateKind.map(\.rawValue), raw["host_candidate_kind"] as? [String])
-        XCTAssertEqual(enums.hostCandidateSource.map(\.rawValue), raw["host_candidate_source"] as? [String])
+        #expect(enums.status.map(\.rawValue) == raw["status"] as? [String])
+        #expect(enums.detectedUsernameSource.map(\.rawValue) == raw["detected_username_source"] as? [String])
+        #expect(enums.hostEnvironmentFlags.map(\.rawValue) == raw["host_environment_flags"] as? [String])
+        #expect(enums.hostCandidateKind.map(\.rawValue) == raw["host_candidate_kind"] as? [String])
+        #expect(enums.hostCandidateSource.map(\.rawValue) == raw["host_candidate_source"] as? [String])
 
         let rejection = AgenTTYAnalyticsValidationRejection(
             status: 400,
             body: try fixtureData("analytics-events/response/validation-error.json")
         )
-        XCTAssertEqual(rejection.eventID, "event-1")
-        XCTAssertEqual(rejection.eventType, .hostSetupFlowEvent)
-        XCTAssertEqual(rejection.field, "saved_host_count")
-        XCTAssertEqual(rejection.rule, "positive")
-        XCTAssertEqual(rejection.backendError.detail, "Analytics host-setup payload is invalid.")
+        #expect(rejection.eventID == "event-1")
+        #expect(rejection.eventType == .hostSetupFlowEvent)
+        #expect(rejection.field == "saved_host_count")
+        #expect(rejection.rule == "positive")
+        #expect(rejection.backendError.detail == "Analytics host-setup payload is invalid.")
     }
 
     @MainActor
-    func testPairingClientMatchesClaimAndStatusFixtures() async throws {
+    @Test
+    func pairingClientMatchesClaimAndStatusFixtures() async throws {
         let requests = CapturedRequests()
         let client = AgenTTYPairingRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
@@ -164,7 +154,7 @@ final class ContractFixtureTests: XCTestCase {
             },
             baseURLProvider: { fixtureBaseURL },
             deviceIdentityProvider: { fixtureIdentity },
-            deviceIdentityEnsurer: { _, _, _ in XCTFail("Fixture responses never reject the device") }
+            deviceIdentityEnsurer: { _, _, _ in Issue.record("Fixture responses never reject the device") }
         )
 
         let claim = try await client.claimPairingSession(
@@ -173,23 +163,24 @@ final class ContractFixtureTests: XCTestCase {
         )
         let status = try await client.fetchPairingSessionStatus(sessionID: claim.sessionID)
 
-        XCTAssertEqual(claim.sessionID, "session-1")
-        XCTAssertEqual(claim.expiresAtEpochSeconds, 1_800_000_000)
-        XCTAssertEqual(status.status, .completed)
-        let completion = try XCTUnwrap(status.completion)
-        XCTAssertEqual(completion.detectedUsername, "developer")
-        XCTAssertEqual(completion.detectedUsernameSource, .accountLookup)
-        XCTAssertEqual(completion.hostCandidates.first?.kind, .localDomain)
-        XCTAssertEqual(completion.hostEnvironmentFlags, [.wsl])
-        XCTAssertEqual(completion.relayHostID, "relay-host-1")
-        XCTAssertEqual(completion.platform, "linux")
+        #expect(claim.sessionID == "session-1")
+        #expect(claim.expiresAtEpochSeconds == 1_800_000_000)
+        #expect(status.status == .completed)
+        let completion = try #require(status.completion)
+        #expect(completion.detectedUsername == "developer")
+        #expect(completion.detectedUsernameSource == .accountLookup)
+        #expect(completion.hostCandidates.first?.kind == .localDomain)
+        #expect(completion.hostEnvironmentFlags == [.wsl])
+        #expect(completion.relayHostID == "relay-host-1")
+        #expect(completion.platform == "linux")
 
-        XCTAssertEqual(try requestObject(requests.all.first), try fixtureObject("pairing-claim/request/claim.json"))
-        XCTAssertEqual(try requestObject(requests.all.last), try fixtureObject("pairing-status/request/status.json"))
+        #expect((try requestObject(requests.all.first)) == (try fixtureObject("pairing-claim/request/claim.json")))
+        #expect((try requestObject(requests.all.last)) == (try fixtureObject("pairing-status/request/status.json")))
     }
 
     @MainActor
-    func testPairingClaimRejectionShowsTheBackendDetail() async throws {
+    @Test
+    func pairingClaimRejectionShowsTheBackendDetail() async throws {
         let client = AgenTTYPairingRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
                 try fixtureResponse(request, statusCode: 400, fixture: "pairing-claim/response/invalid-code-error.json")
@@ -200,14 +191,15 @@ final class ContractFixtureTests: XCTestCase {
 
         do {
             _ = try await client.claimPairingSession(code: "ABCD-EFGH", publicKey: "ssh-ed25519 AAAATEST agentty@fixture")
-            XCTFail("Expected the claim to be rejected")
+            Issue.record("Expected the claim to be rejected")
         } catch {
-            XCTAssertEqual(error.localizedDescription, "Invalid or unavailable pairing code.")
+            #expect(error.localizedDescription == "Invalid or unavailable pairing code.")
         }
     }
 
     @MainActor
-    func testSSHRelayClientMatchesSessionFixtures() async throws {
+    @Test
+    func sshRelayClientMatchesSessionFixtures() async throws {
         let requests = CapturedRequests()
         let client = AgenTTYSSHRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
@@ -220,15 +212,16 @@ final class ContractFixtureTests: XCTestCase {
 
         let session = try await client.issueRelaySession(relayHostID: "relay-host-1")
 
-        XCTAssertEqual(session.relaySessionID, "relay-session-1")
-        XCTAssertEqual(session.expiresAtEpochSeconds, 1_800_000_000)
-        XCTAssertEqual(session.authorizationToken, "relay-authorization-token")
-        XCTAssertEqual(session.websocketURL, "wss://relay.example.test/v1/ssh-relay-sessions/relay-session-1/ws")
-        XCTAssertEqual(try requestObject(requests.all.first), try fixtureObject("ssh-relay-sessions/request/session.json"))
+        #expect(session.relaySessionID == "relay-session-1")
+        #expect(session.expiresAtEpochSeconds == 1_800_000_000)
+        #expect(session.authorizationToken == "relay-authorization-token")
+        #expect(session.websocketURL == "wss://relay.example.test/v1/ssh-relay-sessions/relay-session-1/ws")
+        #expect((try requestObject(requests.all.first)) == (try fixtureObject("ssh-relay-sessions/request/session.json")))
     }
 
     @MainActor
-    func testSSHRelayRejectionsMapByCode() async throws {
+    @Test
+    func sshRelayRejectionsMapByCode() async throws {
         for (status, path) in [
             (403, "ssh-relay-sessions/response/connector-offline-error.json"),
             (403, "ssh-relay-sessions/response/not-allowed-error.json"),
@@ -244,31 +237,32 @@ final class ContractFixtureTests: XCTestCase {
             )
             do {
                 _ = try await client.issueRelaySession(relayHostID: "relay-host-1")
-                XCTFail("Expected \(path) to be rejected")
+                Issue.record("Expected \(path) to be rejected")
             } catch let error as AgenTTYSSHRelayError {
                 let detail = try fixtureObject(path)["detail"] as? String
                 switch (status, error) {
                 case (403, .relayConnectorOffline):
-                    XCTAssertEqual(path, "ssh-relay-sessions/response/connector-offline-error.json")
+                    #expect(path == "ssh-relay-sessions/response/connector-offline-error.json")
                 case (403, .unauthorized(let backendError)):
-                    XCTAssertEqual(path, "ssh-relay-sessions/response/not-allowed-error.json")
-                    XCTAssertEqual(error.localizedDescription, detail)
-                    XCTAssertEqual(backendError.detail, detail)
+                    #expect(path == "ssh-relay-sessions/response/not-allowed-error.json")
+                    #expect(error.localizedDescription == detail)
+                    #expect(backendError.detail == detail)
                 case (403, .verificationRequired(let backendError)):
-                    XCTAssertEqual(path, "ssh-relay-sessions/response/verification-required-error.json")
-                    XCTAssertEqual(error.localizedDescription, detail)
-                    XCTAssertEqual(backendError.detail, detail)
+                    #expect(path == "ssh-relay-sessions/response/verification-required-error.json")
+                    #expect(error.localizedDescription == detail)
+                    #expect(backendError.detail == detail)
                 case (503, .unexpectedStatusCode):
-                    XCTAssertEqual(error.localizedDescription, AgenTTYBackendError.temporarilyUnavailableMessage)
+                    #expect(error.localizedDescription == AgenTTYBackendError.temporarilyUnavailableMessage)
                 default:
-                    XCTFail("\(path) mapped to \(error)")
+                    Issue.record("\(path) mapped to \(error)")
                 }
             }
         }
     }
 
     @MainActor
-    func testPairingCodesNormalizeLikeTheBackend() {
+    @Test
+    func pairingCodesNormalizeLikeTheBackend() {
         let cases: [(String, String?)] = [
             ("abcd-efgh", "ABCD-EFGH"),
             (" ABCD EFGH\n", "ABCD-EFGH"),
@@ -281,7 +275,7 @@ final class ContractFixtureTests: XCTestCase {
             ("", nil),
         ]
         for (input, expected) in cases {
-            XCTAssertEqual(AgenTTYPairingRelayClient.pairingCode(from: input), expected, input)
+            #expect(AgenTTYPairingRelayClient.pairingCode(from: input) == expected, "\(input)")
         }
     }
 }

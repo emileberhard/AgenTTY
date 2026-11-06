@@ -1,7 +1,8 @@
 import CoreGraphics
 import Foundation
+import UIKit
 import UniformTypeIdentifiers
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 private struct TestTerminalClipboardPasteboard: TerminalClipboardPasteboard {
@@ -34,35 +35,40 @@ private struct TestTerminalClipboardItemProvider: TerminalClipboardItemProvider 
     }
 }
 
-final class AgenTTYTests: XCTestCase {
-    func testElevenLabsRealtimeIsTheDefaultDirectDictationModel() {
-        XCTAssertEqual(AgenTTYDictation.defaultModel, .elevenLabsScribeV2Realtime)
-        XCTAssertEqual(AgenTTYDictation.defaultModel.capture, .streaming)
+@Suite
+struct AgenTTYTests {
+    @Test
+    func elevenLabsRealtimeIsTheDefaultDirectDictationModel() {
+        #expect(AgenTTYDictation.defaultModel == .elevenLabsScribeV2Realtime)
+        #expect(AgenTTYDictation.defaultModel.capture == .streaming)
     }
 
-    func testPersistedProviderSelectionsFromBeforeTheModelPickerStillResolve() {
-        XCTAssertEqual(AgenTTYDictation.Model(rawValue: "elevenLabs"), .elevenLabsScribeV2Realtime)
-        XCTAssertEqual(AgenTTYDictation.Model(rawValue: "openai"), .openAIGPT4oMiniTranscribe)
-        XCTAssertEqual(AgenTTYDictation.Model(rawValue: "gemini"), .gemini31Pro)
+    @Test
+    func persistedProviderSelectionsFromBeforeTheModelPickerStillResolve() {
+        #expect(AgenTTYDictation.Model(rawValue: "elevenLabs") == .elevenLabsScribeV2Realtime)
+        #expect(AgenTTYDictation.Model(rawValue: "openai") == .openAIGPT4oMiniTranscribe)
+        #expect(AgenTTYDictation.Model(rawValue: "gemini") == .gemini31Pro)
     }
 
     @MainActor
-    func testDictationKeyMatchesBottomRowActionKeyWidth() throws {
-        let letterBottomRow = try XCTUnwrap(KeyboardLayouts.letterRows().last)
-        let symbolBottomRow = try XCTUnwrap(KeyboardLayouts.symbolRows.last)
+    @Test
+    func dictationKeyMatchesBottomRowActionKeyWidth() throws {
+        let letterBottomRow = try #require(KeyboardLayouts.letterRows().last)
+        let symbolBottomRow = try #require(KeyboardLayouts.symbolRows.last)
 
         for row in [letterBottomRow, symbolBottomRow] {
-            let dictationKey = try XCTUnwrap(row.first { $0.action == .dictation })
-            let enterKey = try XCTUnwrap(row.first { $0.action == .enter })
-            let symbolLayerKey = try XCTUnwrap(row.first { $0.action == .symbolLayer })
+            let dictationKey = try #require(row.first { $0.action == .dictation })
+            let enterKey = try #require(row.first { $0.action == .enter })
+            let symbolLayerKey = try #require(row.first { $0.action == .symbolLayer })
 
-            XCTAssertEqual(dictationKey.widthWeight, enterKey.widthWeight)
-            XCTAssertEqual(dictationKey.widthWeight, symbolLayerKey.widthWeight)
+            #expect(dictationKey.widthWeight == enterKey.widthWeight)
+            #expect(dictationKey.widthWeight == symbolLayerKey.widthWeight)
         }
     }
 
     @MainActor
-    func testSymbolsLayerCoversEveryShellPunctuationCharacter() {
+    @Test
+    func symbolsLayerCoversEveryShellPunctuationCharacter() {
         let symbolChars = Set(
             KeyboardLayouts.symbolRows.flatMap { $0 }.compactMap { key -> String? in
                 guard case .character(let c) = key.action else { return nil }
@@ -77,66 +83,65 @@ final class AgenTTYTests: XCTestCase {
         )
 
         let required = Set("0123456789-/:;()$&@\"[]{}#%^*+=_\\|<>,!?'`".map(String.init))
-        XCTAssertTrue(required.isSubset(of: symbolChars), "missing: \(required.subtracting(symbolChars))")
-        XCTAssertTrue(letterChars.contains("~"))
-        XCTAssertTrue(letterChars.contains("."))
+        #expect(required.isSubset(of: symbolChars), "missing: \(required.subtracting(symbolChars))")
+        #expect(letterChars.contains("~"))
+        #expect(letterChars.contains("."))
     }
 
     @MainActor
-    func testSymbolsLayerKeyIDsAreUniqueWithinTheMountedLayer() {
+    @Test
+    func symbolsLayerKeyIDsAreUniqueWithinTheMountedLayer() {
         for rows in [KeyboardLayouts.symbolRows, KeyboardLayouts.letterRows()] {
             let ids = rows.flatMap { $0 }.map(\.id)
-            XCTAssertEqual(Set(ids).count, ids.count, "duplicate key id inside one mounted layer")
+            #expect(Set(ids).count == ids.count, "duplicate key id inside one mounted layer")
         }
     }
 
     @MainActor
-    func testSymbolsCharacterRowsAreTenKeysWide() {
+    @Test
+    func symbolsCharacterRowsAreTenKeysWide() {
         let charRows = KeyboardLayouts.symbolRows.dropLast()
         for row in charRows {
-            XCTAssertEqual(row.count, 10)
+            #expect(row.count == 10)
         }
     }
 
-    func testElapsedMillisecondsUsesMonotonicNanoseconds() {
-        XCTAssertEqual(
-            EsmaDiagnostics.elapsedMilliseconds(
+    @Test
+    func elapsedMillisecondsUsesMonotonicNanoseconds() {
+        #expect(EsmaDiagnostics.elapsedMilliseconds(
                 since: 1_000_000,
                 nowNanoseconds: 3_500_000
-            ),
-            2
-        )
-        XCTAssertEqual(
-            EsmaDiagnostics.elapsedMilliseconds(
+            ) == 2)
+        #expect(EsmaDiagnostics.elapsedMilliseconds(
                 since: 2_000_000,
                 nowNanoseconds: 1_000_000
-            ),
-            0
-        )
+            ) == 0)
     }
 
     @MainActor
-    func testKeyCalloutRowsTrackSimultaneousPressesAndDeactivateCleanly() {
+    @Test
+    func keyCalloutRowsTrackSimultaneousPressesAndDeactivateCleanly() {
         let keyboardState = KeyboardState()
 
         keyboardState.beginKeyCallout(id: "char-q", rowIndex: 1)
         keyboardState.beginKeyCallout(id: "char-a", rowIndex: 2)
 
-        XCTAssertTrue(keyboardState.hasActiveKeyCallout(in: 1))
-        XCTAssertTrue(keyboardState.hasActiveKeyCallout(in: 2))
+        #expect(keyboardState.hasActiveKeyCallout(in: 1))
+        #expect(keyboardState.hasActiveKeyCallout(in: 2))
 
         keyboardState.endKeyCallout(id: "char-q")
 
-        XCTAssertFalse(keyboardState.hasActiveKeyCallout(in: 1))
-        XCTAssertTrue(keyboardState.hasActiveKeyCallout(in: 2))
+        #expect(!keyboardState.hasActiveKeyCallout(in: 1))
+        #expect(keyboardState.hasActiveKeyCallout(in: 2))
 
         keyboardState.handleAppWillDeactivate()
 
-        XCTAssertFalse(keyboardState.hasActiveKeyCallout(in: 2))
+        #expect(!keyboardState.hasActiveKeyCallout(in: 2))
     }
 
     @MainActor
-    func testHostDecodesLegacyNameKeyIntoLabel() throws {
+    @Test
+    func hostDecodesLegacyNameKeyIntoLabel() throws {
         let json = #"""
         {
           "id": "6F31FDF8-1CC0-4DD0-9F80-2A30FCF0A5A6",
@@ -153,12 +158,13 @@ final class AgenTTYTests: XCTestCase {
 
         let host = try JSONDecoder().decode(AgenTTYHost.self, from: Data(json.utf8))
 
-        XCTAssertEqual(host.label, "dev-host")
-        XCTAssertEqual(host.address, "100.64.0.10")
+        #expect(host.label == "dev-host")
+        #expect(host.address == "100.64.0.10")
     }
 
     @MainActor
-    func testHostEncodesLabelKey() throws {
+    @Test
+    func hostEncodesLabelKey() throws {
         let host = AgenTTYHost(
             id: UUID(uuidString: "6F31FDF8-1CC0-4DD0-9F80-2A30FCF0A5A6")!,
             label: "macbook",
@@ -169,14 +175,15 @@ final class AgenTTYTests: XCTestCase {
         )
 
         let encoded = try JSONEncoder().encode(host)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        let object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
 
-        XCTAssertEqual(object["label"] as? String, "macbook")
-        XCTAssertNil(object["name"])
+        #expect(object["label"] as? String == "macbook")
+        #expect(object["name"] == nil)
     }
 
     @MainActor
-    func testHostDecodingPrefersLabelOverLegacyNameWhenBothArePresent() throws {
+    @Test
+    func hostDecodingPrefersLabelOverLegacyNameWhenBothArePresent() throws {
         let json = #"""
         {
           "id": "6F31FDF8-1CC0-4DD0-9F80-2A30FCF0A5A6",
@@ -194,11 +201,12 @@ final class AgenTTYTests: XCTestCase {
 
         let host = try JSONDecoder().decode(AgenTTYHost.self, from: Data(json.utf8))
 
-        XCTAssertEqual(host.label, "macbook")
+        #expect(host.label == "macbook")
     }
 
     @MainActor
-    func testPairingCandidateRankingPrefersLocalDomainOverSingleLabelForLegacyCandidates() throws {
+    @Test
+    func pairingCandidateRankingPrefersLocalDomainOverSingleLabelForLegacyCandidates() throws {
         let json = #"""
         {
           "detected_username": "developer",
@@ -215,12 +223,13 @@ final class AgenTTYTests: XCTestCase {
         )
         let ranked = AgenTTYPairingHostCandidateRanking.resolvedCandidates(from: completion)
 
-        XCTAssertEqual(ranked.map { $0.value }, ["agentty.local", "agentty"])
-        XCTAssertEqual(ranked.map { $0.kind }, [.localDomain, .singleLabel])
+        #expect(ranked.map { $0.value } == ["agentty.local", "agentty"])
+        #expect(ranked.map { $0.kind } == [.localDomain, .singleLabel])
     }
 
     @MainActor
-    func testPairingCandidateRankingPreservesRelayProvidedRankForCanonicalCandidates() throws {
+    @Test
+    func pairingCandidateRankingPreservesRelayProvidedRankForCanonicalCandidates() throws {
         let json = #"""
         {
           "detected_username": "developer",
@@ -251,12 +260,13 @@ final class AgenTTYTests: XCTestCase {
         )
         let ranked = AgenTTYPairingHostCandidateRanking.resolvedCandidates(from: completion)
 
-        XCTAssertEqual(ranked.map { $0.value }, ["agentty", "agentty.local"])
-        XCTAssertEqual(ranked.map { $0.rank }, [1, 2])
+        #expect(ranked.map { $0.value } == ["agentty", "agentty.local"])
+        #expect(ranked.map { $0.rank } == [1, 2])
     }
 
     @MainActor
-    func testPairingCandidateRankingCompactsCanonicalRanksAfterDeduplication() throws {
+    @Test
+    func pairingCandidateRankingCompactsCanonicalRanksAfterDeduplication() throws {
         let json = #"""
         {
           "detected_username": "developer",
@@ -287,12 +297,13 @@ final class AgenTTYTests: XCTestCase {
         )
         let ranked = AgenTTYPairingHostCandidateRanking.resolvedCandidates(from: completion)
 
-        XCTAssertEqual(ranked.map { $0.value }, ["agentty"])
-        XCTAssertEqual(ranked.map { $0.rank }, [1])
+        #expect(ranked.map { $0.value } == ["agentty"])
+        #expect(ranked.map { $0.rank } == [1])
     }
 
     @MainActor
-    func testPairingSessionCompletionMetadataDecodesUsernameDiagnosticsAndEnvironmentFlags() throws {
+    @Test
+    func pairingSessionCompletionMetadataDecodesUsernameDiagnosticsAndEnvironmentFlags() throws {
         let json = #"""
         {
           "detected_username": "developer",
@@ -319,70 +330,65 @@ final class AgenTTYTests: XCTestCase {
             from: Data(json.utf8)
         )
 
-        XCTAssertEqual(completion.detectedUsername, "developer")
-        XCTAssertEqual(completion.detectedUsernameSource, .whoamiCommand)
-        XCTAssertEqual(completion.detectedUsernameSuspicious, true)
-        XCTAssertEqual(completion.hostEnvironmentFlags, [.wsl, .container])
+        #expect(completion.detectedUsername == "developer")
+        #expect(completion.detectedUsernameSource == .whoamiCommand)
+        #expect(completion.detectedUsernameSuspicious == true)
+        #expect(completion.hostEnvironmentFlags == [.wsl, .container])
     }
 
     @MainActor
-    func testHostStoreAddHostMatchReturnsExactMatchForNormalizedAddress() throws {
+    @Test
+    func hostStoreAddHostMatchReturnsExactMatchForNormalizedAddress() throws {
         let suiteName = "AgenTTYTests.HostStore.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = AgenTTYHostStore(userDefaults: defaults, flavor: .main)
         let existingHostID = store.addHost(
-            try XCTUnwrap(
-                AgenTTYHostDraft(
+            try #require(AgenTTYHostDraft(
                     label: "Mac",
                     address: "Agentty.Local",
                     port: 22,
                     username: "developer",
                     authentication: .key(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
-                )
-            )
+                ))
         )
 
         let match = store.addHostMatch(
-            for: try XCTUnwrap(
-                AgenTTYHostDraft(
+            for: try #require(AgenTTYHostDraft(
                     label: "Mac Again",
                     address: "agentty.local",
                     port: 22,
                     username: "developer",
                     authentication: .key(UUID(uuidString: "FFFFFFFF-1111-2222-3333-444444444444")!)
-                )
-            )
+                ))
         )
 
         guard case .exact(let existingHost)? = match else {
-            return XCTFail("Expected an exact host match.")
+            Issue.record("Expected an exact host match.")
+            return
         }
 
-        XCTAssertEqual(existingHost.id, existingHostID)
+        #expect(existingHost.id == existingHostID)
     }
 
     @MainActor
-    func testHostAddressNormalizationTrimsInvisibleWhitespaceAndUnicodeDashes() throws {
-        let draft = try XCTUnwrap(
-            AgenTTYHostDraft(
+    @Test
+    func hostAddressNormalizationTrimsInvisibleWhitespaceAndUnicodeDashes() throws {
+        let draft = try #require(AgenTTYHostDraft(
                 label: "Mac",
                 address: "\u{200B} dev\u{2011}host \u{FEFF}",
                 port: 22,
                 username: "developer",
                 authentication: .key(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
-            )
-        )
+            ))
 
-        XCTAssertEqual(draft.address, "dev-host")
-        XCTAssertEqual(
-            AgenTTYHostStore.normalizedAddress("Dev\u{2011}Host"),
-            "dev-host"
-        )
+        #expect(draft.address == "dev-host")
+        #expect(AgenTTYHostStore.normalizedAddress("Dev\u{2011}Host") == "dev-host")
     }
 
-    func testDNSReachabilityErrorUsesDNSRecoveryGuidance() {
+    @Test
+    func dnsReachabilityErrorUsesDNSRecoveryGuidance() {
         let error = AgenTTYHostReachabilityError.failed(
             host: "dev-host",
             port: 22,
@@ -391,42 +397,33 @@ final class AgenTTYTests: XCTestCase {
         )
         let guidance = AgenTTYHostReachabilityGuidance.guidance(for: error)
 
-        XCTAssertEqual(error.localizedDescription, "The hostname dev-host does not resolve from this iPhone.")
-        XCTAssertEqual(guidance.title, "Hostname Does Not Resolve")
-        XCTAssertTrue(guidance.message.contains("does not resolve from this iPhone"))
-        XCTAssertTrue(guidance.suggestions.contains { $0.title == "Use an IP address" })
-        XCTAssertTrue(guidance.suggestions.contains { $0.title == "Try the full Tailscale name" })
-        XCTAssertTrue(guidance.suggestions.contains { $0.title == "Try the .local name" })
-        XCTAssertTrue(guidance.suggestions.contains { $0.title == "Run Automatic Setup again" })
+        #expect(error.localizedDescription == "The hostname dev-host does not resolve from this iPhone.")
+        #expect(guidance.title == "Hostname Does Not Resolve")
+        #expect(guidance.message.contains("does not resolve from this iPhone"))
+        #expect(guidance.suggestions.contains { $0.title == "Use an IP address" })
+        #expect(guidance.suggestions.contains { $0.title == "Try the full Tailscale name" })
+        #expect(guidance.suggestions.contains { $0.title == "Try the .local name" })
+        #expect(guidance.suggestions.contains { $0.title == "Run Automatic Setup again" })
     }
 
     @MainActor
-    func testPreReadyFailureCircuitBreakerTripsOnThirdFailureWithinWindow() {
+    @Test
+    func preReadyFailureCircuitBreakerTripsOnThirdFailureWithinWindow() {
         let hostID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         var breaker = AgenTTYPreReadyFailureCircuitBreaker()
         let startedAt = Date(timeIntervalSince1970: 1_715_000_000)
 
-        XCTAssertFalse(breaker.recordFailure(hostID: hostID, authMode: .key, category: .other, at: startedAt))
-        XCTAssertFalse(
-            breaker.recordFailure(
-                hostID: hostID,
-                authMode: .key,
-                category: .other,
-                at: startedAt.addingTimeInterval(10)
-            )
-        )
-        XCTAssertTrue(
-            breaker.recordFailure(
-                hostID: hostID,
-                authMode: .key,
-                category: .other,
-                at: startedAt.addingTimeInterval(20)
-            )
-        )
+        let first = breaker.recordFailure(hostID: hostID, authMode: .key, category: .other, at: startedAt)
+        #expect(!first)
+        let second = breaker.recordFailure(hostID: hostID, authMode: .key, category: .other, at: startedAt.addingTimeInterval(10))
+        #expect(!second)
+        let third = breaker.recordFailure(hostID: hostID, authMode: .key, category: .other, at: startedAt.addingTimeInterval(20))
+        #expect(third)
     }
 
     @MainActor
-    func testPreReadyFailureCircuitBreakerIgnoresTransientNetworkCategories() {
+    @Test
+    func preReadyFailureCircuitBreakerIgnoresTransientNetworkCategories() {
         let hostID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         var breaker = AgenTTYPreReadyFailureCircuitBreaker()
         let startedAt = Date(timeIntervalSince1970: 1_715_000_000)
@@ -436,130 +433,105 @@ final class AgenTTYTests: XCTestCase {
         ]
         for (index, category) in transientCategories.enumerated() {
             for attempt in 0..<5 {
-                XCTAssertFalse(
-                    breaker.recordFailure(
-                        hostID: hostID,
-                        authMode: .key,
-                        category: category,
-                        at: startedAt.addingTimeInterval(Double(index * 10 + attempt))
-                    ),
-                    "transient category \(category) must never trip the breaker"
-                )
+                let tripped = breaker.recordFailure(hostID: hostID, authMode: .key, category: category, at: startedAt.addingTimeInterval(Double(index * 10 + attempt)))
+                #expect(!tripped, "transient category \(category) must never trip the breaker")
             }
         }
 
         // Transient failures must not have advanced the countable streak either.
-        XCTAssertFalse(
-            breaker.recordFailure(
-                hostID: hostID,
-                authMode: .key,
-                category: .other,
-                at: startedAt.addingTimeInterval(50)
-            )
-        )
+        let afterTransients = breaker.recordFailure(hostID: hostID, authMode: .key, category: .other, at: startedAt.addingTimeInterval(50))
+        #expect(!afterTransients)
     }
 
     @MainActor
-    func testUnknownClientBootstrapChannelFailureIsTransientNetworkFailure() {
+    @Test
+    func unknownClientBootstrapChannelFailureIsTransientNetworkFailure() {
         let error = NSError(domain: "NIOCore.ChannelError", code: 0)
         let outcome = SSHClientSession.connectFailureOutcome(
             for: error,
             rawReason: "connect failed: NIOCore.ChannelError error 0"
         )
 
-        XCTAssertEqual(outcome.category, .networkError)
-        XCTAssertEqual(outcome.failureStage, .tcpConnect)
-        XCTAssertTrue(outcome.shouldReconnect)
-        XCTAssertFalse(AgenTTYPreReadyFailureCircuitBreaker.countsTowardTrip(outcome.category))
+        #expect(outcome.category == .networkError)
+        #expect(outcome.failureStage == .tcpConnect)
+        #expect(outcome.shouldReconnect)
+        #expect(!AgenTTYPreReadyFailureCircuitBreaker.countsTowardTrip(outcome.category))
     }
 
     @MainActor
-    func testRelayResolutionFailureRearmsDirectProbeForNextRetry() {
+    @Test
+    func relayResolutionFailureRearmsDirectProbeForNextRetry() {
         let hostID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         AgenTTYConnectionRouteResolver.invalidateRouteMemory()
         defer { AgenTTYConnectionRouteResolver.invalidateRouteMemory() }
 
         AgenTTYConnectionRouteResolver.recordDirectRouteFailure(for: hostID)
-        XCTAssertTrue(AgenTTYConnectionRouteResolver.shouldPreferRelay(for: hostID))
+        #expect(AgenTTYConnectionRouteResolver.shouldPreferRelay(for: hostID))
 
         AgenTTYConnectionRouteResolver.recordRelayResolutionFailure(for: hostID)
-        XCTAssertFalse(AgenTTYConnectionRouteResolver.shouldPreferRelay(for: hostID))
+        #expect(!AgenTTYConnectionRouteResolver.shouldPreferRelay(for: hostID))
     }
 
     @MainActor
-    func testPreReadyFailureCircuitBreakerResetsForNewHostOrExpiredWindow() {
+    @Test
+    func preReadyFailureCircuitBreakerResetsForNewHostOrExpiredWindow() {
         let firstHostID = UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!
         let secondHostID = UUID(uuidString: "FFFFFFFF-1111-2222-3333-444444444444")!
         let startedAt = Date(timeIntervalSince1970: 1_715_000_000)
 
         var breaker = AgenTTYPreReadyFailureCircuitBreaker()
-        XCTAssertFalse(
-            breaker.recordFailure(hostID: firstHostID, authMode: .key, category: .other, at: startedAt)
-        )
-        XCTAssertFalse(
-            breaker.recordFailure(
-                hostID: secondHostID,
-                authMode: .key,
-                category: .other,
-                at: startedAt.addingTimeInterval(10)
-            )
-        )
+        let firstHost = breaker.recordFailure(hostID: firstHostID, authMode: .key, category: .other, at: startedAt)
+        #expect(!firstHost)
+        let secondHost = breaker.recordFailure(hostID: secondHostID, authMode: .key, category: .other, at: startedAt.addingTimeInterval(10))
+        #expect(!secondHost)
 
         breaker.reset()
-        XCTAssertFalse(
-            breaker.recordFailure(hostID: firstHostID, authMode: .key, category: .other, at: startedAt)
-        )
-        XCTAssertFalse(
-            breaker.recordFailure(
-                hostID: firstHostID,
-                authMode: .key,
-                category: .other,
-                at: startedAt.addingTimeInterval(61)
-            )
-        )
+        let afterReset = breaker.recordFailure(hostID: firstHostID, authMode: .key, category: .other, at: startedAt)
+        #expect(!afterReset)
+        let afterWindow = breaker.recordFailure(hostID: firstHostID, authMode: .key, category: .other, at: startedAt.addingTimeInterval(61))
+        #expect(!afterWindow)
     }
 
     @MainActor
-    func testHostStoreAddHostMatchReturnsRelatedMatchForAutomaticCandidateAlias() throws {
+    @Test
+    func hostStoreAddHostMatchReturnsRelatedMatchForAutomaticCandidateAlias() throws {
         let suiteName = "AgenTTYTests.HostStoreRelated.\(UUID().uuidString)"
-        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let defaults = try #require(UserDefaults(suiteName: suiteName))
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let store = AgenTTYHostStore(userDefaults: defaults, flavor: .main)
         let existingHostID = store.addHost(
-            try XCTUnwrap(
-                AgenTTYHostDraft(
+            try #require(AgenTTYHostDraft(
                     label: "Mac",
                     address: "agentty.local",
                     port: 22,
                     username: "developer",
                     authentication: .key(UUID(uuidString: "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE")!)
-                )
-            )
+                ))
         )
 
         let match = store.addHostMatch(
-            for: try XCTUnwrap(
-                AgenTTYHostDraft(
+            for: try #require(AgenTTYHostDraft(
                     label: "Mac Alias",
                     address: "agentty",
                     port: 22,
                     username: "developer",
                     authentication: .key(UUID(uuidString: "FFFFFFFF-1111-2222-3333-444444444444")!)
-                )
-            ),
+                )),
             relatedAddresses: ["agentty.local", "agentty"]
         )
 
         guard case .related(let existingHost)? = match else {
-            return XCTFail("Expected a related host match.")
+            Issue.record("Expected a related host match.")
+            return
         }
 
-        XCTAssertEqual(existingHost.id, existingHostID)
+        #expect(existingHost.id == existingHostID)
     }
 
     @MainActor
-    func testSheetNavigationCoordinatorResetToRootClearsNavigationStateAndRestoresMediumDetent() {
+    @Test
+    func sheetNavigationCoordinatorResetToRootClearsNavigationStateAndRestoresMediumDetent() {
         let coordinator = SheetNavigationCoordinator<String>()
         coordinator.path = ["automatic", "review"]
         coordinator.pendingRoute = "stale"
@@ -567,52 +539,56 @@ final class AgenTTYTests: XCTestCase {
 
         coordinator.resetToRoot()
 
-        XCTAssertTrue(coordinator.path.isEmpty)
-        XCTAssertNil(coordinator.pendingRoute)
-        XCTAssertEqual(coordinator.selectedDetent, .medium)
+        #expect(coordinator.path.isEmpty)
+        #expect(coordinator.pendingRoute == nil)
+        #expect(coordinator.selectedDetent == .medium)
     }
 
     @MainActor
-    func testHostListReachabilityTrackerUsesWarningOnlyForFirstFailureAfterSuccess() {
+    @Test
+    func hostListReachabilityTrackerUsesWarningOnlyForFirstFailureAfterSuccess() {
         var tracker = HostListReachabilityTracker()
 
-        XCTAssertEqual(tracker.indicatorState, .checking)
+        #expect(tracker.indicatorState == .checking)
 
         tracker.recordSuccess()
-        XCTAssertEqual(tracker.indicatorState, .reachable)
+        #expect(tracker.indicatorState == .reachable)
 
         tracker.recordFailure()
-        XCTAssertEqual(tracker.indicatorState, .warning)
+        #expect(tracker.indicatorState == .warning)
 
         tracker.recordFailure()
-        XCTAssertEqual(tracker.indicatorState, .unreachable)
+        #expect(tracker.indicatorState == .unreachable)
     }
 
     @MainActor
-    func testHostListReachabilityTrackerStartsRedWhenInitialCheckFails() {
+    @Test
+    func hostListReachabilityTrackerStartsRedWhenInitialCheckFails() {
         var tracker = HostListReachabilityTracker()
 
         tracker.recordFailure()
 
-        XCTAssertEqual(tracker.indicatorState, .unreachable)
+        #expect(tracker.indicatorState == .unreachable)
     }
 
     @MainActor
-    func testHostListReachabilityTrackerCanTemporarilyReturnToCheckingDuringManualRefresh() {
+    @Test
+    func hostListReachabilityTrackerCanTemporarilyReturnToCheckingDuringManualRefresh() {
         var tracker = HostListReachabilityTracker()
 
         tracker.recordSuccess()
-        XCTAssertEqual(tracker.indicatorState, .reachable)
+        #expect(tracker.indicatorState == .reachable)
 
         tracker.beginCheck()
-        XCTAssertEqual(tracker.indicatorState, .checking)
+        #expect(tracker.indicatorState == .checking)
 
         tracker.recordFailure(message: "AgenTTY could not reach backup-host:22.")
-        XCTAssertEqual(tracker.indicatorState, .warning)
-        XCTAssertEqual(tracker.lastFailureMessage, "AgenTTY could not reach backup-host:22.")
+        #expect(tracker.indicatorState == .warning)
+        #expect(tracker.lastFailureMessage == "AgenTTY could not reach backup-host:22.")
     }
 
-    func testHostRuntimeManifestDecodesTerminfoEntries() throws {
+    @Test
+    func hostRuntimeManifestDecodesTerminfoEntries() throws {
         let json = #"""
         {
           "schema_version": 1,
@@ -658,17 +634,12 @@ final class AgenTTYTests: XCTestCase {
             from: Data(json.utf8)
         )
 
-        XCTAssertEqual(
-            try manifest.target(for: .linuxArm64).terminfoEntries.map(\.relativePath),
-            ["74/tmux-256color", "78/xterm-256color"]
-        )
-        XCTAssertEqual(
-            try manifest.target(for: .linuxArm64).agenttyHostConnector?.sha256,
-            "connector-sha"
-        )
+        #expect((try manifest.target(for: .linuxArm64).terminfoEntries.map(\.relativePath)) == ["74/tmux-256color", "78/xterm-256color"])
+        #expect((try manifest.target(for: .linuxArm64).agenttyHostConnector?.sha256) == "connector-sha")
     }
 
-    func testHostRuntimeManifestRejectsInvalidTerminfoRelativePaths() {
+    @Test
+    func hostRuntimeManifestRejectsInvalidTerminfoRelativePaths() {
         let json = #"""
         {
           "schema_version": 1,
@@ -696,23 +667,20 @@ final class AgenTTYTests: XCTestCase {
         }
         """#
 
-        XCTAssertThrowsError(
-            try JSONDecoder().decode(
+        #expect(throws: (any Error).self) { try JSONDecoder().decode(
                 AgenTTYHostRuntimeArtifactManifest.self,
                 from: Data(json.utf8)
-            )
-        )
+            ) }
     }
 
-    func testHostRuntimeTerminfoPathsUseManagedShareDirectory() {
-        XCTAssertEqual(AgenTTYHostRuntime.terminfoRootRemotePath, "$HOME/.agentty/share/terminfo")
-        XCTAssertEqual(
-            AgenTTYHostRuntime.terminfoEntryRemotePath(relativePath: "74/tmux-256color"),
-            "$HOME/.agentty/share/terminfo/74/tmux-256color"
-        )
+    @Test
+    func hostRuntimeTerminfoPathsUseManagedShareDirectory() {
+        #expect(AgenTTYHostRuntime.terminfoRootRemotePath == "$HOME/.agentty/share/terminfo")
+        #expect(AgenTTYHostRuntime.terminfoEntryRemotePath(relativePath: "74/tmux-256color") == "$HOME/.agentty/share/terminfo/74/tmux-256color")
     }
 
-    func testRemoteFileWriteStagesAndVerifiesBeforeAtomicReplacement() throws {
+    @Test
+    func remoteFileWriteStagesAndVerifiesBeforeAtomicReplacement() throws {
         let command = SSHClientSession.remoteFileWriteCommand(
             for: "$HOME/.agentty/libexec/tmux",
             executable: true,
@@ -720,36 +688,38 @@ final class AgenTTYTests: XCTestCase {
             expectedSHA256: "abc123"
         )
 
-        XCTAssertTrue(command.contains(#"tmp_path="${target_path}.part.$$""#))
-        XCTAssertTrue(command.contains(#"[ "$actual_byte_count" != "1089320" ]"#))
-        XCTAssertTrue(command.contains("sha256sum"))
-        XCTAssertTrue(command.contains("shasum -a 256"))
-        XCTAssertTrue(command.contains(#"chmod 700 "$tmp_path""#))
-        XCTAssertTrue(command.contains(#"mv -f "$tmp_path" "$target_path""#))
+        #expect(command.contains(#"tmp_path="${target_path}.part.$$""#))
+        #expect(command.contains(#"[ "$actual_byte_count" != "1089320" ]"#))
+        #expect(command.contains("sha256sum"))
+        #expect(command.contains("shasum -a 256"))
+        #expect(command.contains(#"chmod 700 "$tmp_path""#))
+        #expect(command.contains(#"mv -f "$tmp_path" "$target_path""#))
 
-        let byteCountCheck = try XCTUnwrap(command.range(of: "actual_byte_count="))
-        let checksumCheck = try XCTUnwrap(command.range(of: "actual_sha256="))
-        let permissionChange = try XCTUnwrap(command.range(of: #"chmod 700 "$tmp_path""#))
-        let replacement = try XCTUnwrap(command.range(of: #"mv -f "$tmp_path" "$target_path""#))
-        XCTAssertLessThan(byteCountCheck.lowerBound, checksumCheck.lowerBound)
-        XCTAssertLessThan(checksumCheck.lowerBound, permissionChange.lowerBound)
-        XCTAssertLessThan(permissionChange.lowerBound, replacement.lowerBound)
+        let byteCountCheck = try #require(command.range(of: "actual_byte_count="))
+        let checksumCheck = try #require(command.range(of: "actual_sha256="))
+        let permissionChange = try #require(command.range(of: #"chmod 700 "$tmp_path""#))
+        let replacement = try #require(command.range(of: #"mv -f "$tmp_path" "$target_path""#))
+        #expect(byteCountCheck.lowerBound < checksumCheck.lowerBound)
+        #expect(checksumCheck.lowerBound < permissionChange.lowerBound)
+        #expect(permissionChange.lowerBound < replacement.lowerBound)
     }
 
-    func testRelayConnectorActivationProbesBeforeAtomicReplacementAndRestart() throws {
+    @Test
+    func relayConnectorActivationProbesBeforeAtomicReplacementAndRestart() throws {
         let command = AgenTTYHostRuntimeProvisioner.relayConnectorActivationCommand(
             candidateRemotePath: "$HOME/.agentty/libexec/agentty-host-connector.update.test"
         )
 
-        let probe = try XCTUnwrap(command.range(of: "probe-control --config"))
-        let replacement = try XCTUnwrap(command.range(of: #"mv -f "$candidate_path" "$target_path""#))
-        let restart = try XCTUnwrap(command.range(of: #"kill -TERM "$pid""#))
-        XCTAssertLessThan(probe.lowerBound, replacement.lowerBound)
-        XCTAssertLessThan(replacement.lowerBound, restart.lowerBound)
-        XCTAssertTrue(command.contains(#"[ "$command" = "$expected_command" ]"#))
+        let probe = try #require(command.range(of: "probe-control --config"))
+        let replacement = try #require(command.range(of: #"mv -f "$candidate_path" "$target_path""#))
+        let restart = try #require(command.range(of: #"kill -TERM "$pid""#))
+        #expect(probe.lowerBound < replacement.lowerBound)
+        #expect(replacement.lowerBound < restart.lowerBound)
+        #expect(command.contains(#"[ "$command" = "$expected_command" ]"#))
     }
 
-    func testHostRuntimeIntegrityManifestIsStableAndUsesManagedRelativePaths() {
+    @Test
+    func hostRuntimeIntegrityManifestIsStableAndUsesManagedRelativePaths() {
         let artifacts = AgenTTYResolvedHostRuntimeArtifacts(
             runtimeVersion: "2.8.4",
             hostPlatform: .darwinArm64,
@@ -771,54 +741,49 @@ final class AgenTTYTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(
-            AgenTTYHostRuntimeProvisioner.runtimePayloadIntegrityManifest(for: artifacts),
-            """
+        #expect(AgenTTYHostRuntimeProvisioner.runtimePayloadIntegrityManifest(for: artifacts) == """
             tmux-hash  libexec/tmux
             notify-hash  libexec/agentty-notify
             terminfo-hash  share/terminfo/74/tmux-256color
             xterm-hash  share/terminfo/78/xterm-256color
-            """
-        )
+            """)
     }
 
-    func testTmuxBootstrapCommandRunsBundledBootstrapViaPOSIXSh() {
+    @Test
+    func tmuxBootstrapCommandRunsBundledBootstrapViaPOSIXSh() {
         let command = AgenTTYConnection.tmuxBootstrapCommand
-        XCTAssertTrue(command.contains("exec /bin/sh -lc"))
-        XCTAssertTrue(command.contains("agentty-bootstrap"))
+        #expect(command.contains("exec /bin/sh -lc"))
+        #expect(command.contains("agentty-bootstrap"))
     }
 
-    func testTmuxBootstrapCommandAvoidsSystemTmuxFallbacks() {
+    @Test
+    func tmuxBootstrapCommandAvoidsSystemTmuxFallbacks() {
         let command = AgenTTYConnection.tmuxBootstrapCommand
-        XCTAssertFalse(command.contains("command -v tmux"))
-        XCTAssertFalse(command.contains("tmux-resurrect"))
-        XCTAssertFalse(command.contains("brew install tmux"))
-        XCTAssertFalse(command.contains("/bin/zsh -lc"))
+        #expect(!command.contains("command -v tmux"))
+        #expect(!command.contains("tmux-resurrect"))
+        #expect(!command.contains("brew install tmux"))
+        #expect(!command.contains("/bin/zsh -lc"))
     }
 
     @MainActor
-    func testTmuxCommandBuildersUseBundledWrapperPath() {
-        XCTAssertEqual(AgenTTYHostRuntime.tmuxWrapperRemotePath, "$HOME/.agentty/bin/tmux")
-        XCTAssertTrue(
-            TerminalBridge.tmuxListWindowsCommand.contains(AgenTTYHostRuntime.tmuxWrapperShellLiteral)
-        )
-        XCTAssertTrue(
-            SSHClientSession.tmuxDictationInsertCommand(for: "hello")
-                .contains(AgenTTYHostRuntime.tmuxWrapperShellLiteral)
-        )
+    @Test
+    func tmuxCommandBuildersUseBundledWrapperPath() {
+        #expect(AgenTTYHostRuntime.tmuxWrapperRemotePath == "$HOME/.agentty/bin/tmux")
+        #expect(TerminalBridge.tmuxListWindowsCommand.contains(AgenTTYHostRuntime.tmuxWrapperShellLiteral))
+        #expect(SSHClientSession.tmuxDictationInsertCommand(for: "hello")
+                .contains(AgenTTYHostRuntime.tmuxWrapperShellLiteral))
     }
 
     @MainActor
-    func testClipboardImagePasteEventDelayIsOnlyUsedForMultiImagePaste() {
-        XCTAssertNil(TerminalBridge.clipboardImagePasteEventDelayNanoseconds(forImageCount: 1))
-        XCTAssertEqual(
-            TerminalBridge.clipboardImagePasteEventDelayNanoseconds(forImageCount: 3),
-            500_000_000
-        )
+    @Test
+    func clipboardImagePasteEventDelayIsOnlyUsedForMultiImagePaste() {
+        #expect(TerminalBridge.clipboardImagePasteEventDelayNanoseconds(forImageCount: 1) == nil)
+        #expect(TerminalBridge.clipboardImagePasteEventDelayNanoseconds(forImageCount: 3) == 500_000_000)
     }
 
     @MainActor
-    func testClipboardPlainTextStillResolvesAsText() async {
+    @Test
+    func clipboardPlainTextStillResolvesAsText() async {
         let pasteboard = TestTerminalClipboardPasteboard(
             hasImages: false,
             hasFiles: false,
@@ -830,14 +795,15 @@ final class AgenTTYTests: XCTestCase {
         let payload = await TerminalClipboard.generalPastePayload(pasteboard: pasteboard)
 
         guard case .text(let text)? = payload else {
-            XCTFail("expected plain text payload")
+            Issue.record("expected plain text payload")
             return
         }
-        XCTAssertEqual(text, "hello")
+        #expect(text == "hello")
     }
 
     @MainActor
-    func testClipboardTextFilePayloadBeatsPlainTextFallback() async throws {
+    @Test
+    func clipboardTextFilePayloadBeatsPlainTextFallback() async throws {
         let fileURL = try makeTemporaryClipboardTestFile(
             named: "notes.txt",
             contents: Data("hello".utf8)
@@ -861,23 +827,24 @@ final class AgenTTYTests: XCTestCase {
         let payload = await TerminalClipboard.generalPastePayload(pasteboard: pasteboard)
 
         guard case .files(let fileProviders)? = payload else {
-            XCTFail("expected file payload")
+            Issue.record("expected file payload")
             return
         }
-        XCTAssertEqual(fileProviders.count, 1)
+        #expect(fileProviders.count == 1)
         guard let filePayload = await fileProviders[0].loadFilePayload() else {
-            XCTFail("expected resolved file payload")
+            Issue.record("expected resolved file payload")
             return
         }
         let filename = filePayload.filename
         let byteCount = filePayload.byteCount
-        XCTAssertEqual(filename, "notes.txt")
-        XCTAssertEqual(byteCount, 5)
+        #expect(filename == "notes.txt")
+        #expect(byteCount == 5)
         TerminalClipboard.removeTemporaryFile(at: filePayload.localFileURL)
     }
 
     @MainActor
-    func testClipboardImagesStillWinOverGenericFiles() async throws {
+    @Test
+    func clipboardImagesStillWinOverGenericFiles() async throws {
         let fileURL = try makeTemporaryClipboardTestFile(
             named: "document.pdf",
             contents: Data([0x25, 0x50, 0x44, 0x46])
@@ -904,16 +871,17 @@ final class AgenTTYTests: XCTestCase {
         let payload = await TerminalClipboard.generalPastePayload(pasteboard: pasteboard)
 
         guard case .images(let imagePayloads)? = payload else {
-            XCTFail("expected image payload")
+            Issue.record("expected image payload")
             return
         }
-        XCTAssertEqual(imagePayloads.count, 1)
+        #expect(imagePayloads.count == 1)
         let preferredExtension = imagePayloads[0].preferredExtension
-        XCTAssertEqual(preferredExtension, "png")
+        #expect(preferredExtension == "png")
     }
 
     @MainActor
-    func testClipboardDataOnlyGenericProviderDoesNotResolveAsFile() async {
+    @Test
+    func clipboardDataOnlyGenericProviderDoesNotResolveAsFile() async {
         let provider = TestTerminalClipboardItemProvider(
             registeredContentTypes: [.pdf],
             suggestedName: "paper.pdf",
@@ -930,25 +898,27 @@ final class AgenTTYTests: XCTestCase {
         let payload = await TerminalClipboard.generalPastePayload(pasteboard: pasteboard)
 
         guard case .files(let fileProviders)? = payload else {
-            XCTFail("expected provider-backed file payload")
+            Issue.record("expected provider-backed file payload")
             return
         }
-        XCTAssertEqual(fileProviders.count, 1)
+        #expect(fileProviders.count == 1)
         let resolvedPayload = await fileProviders[0].loadFilePayload()
-        XCTAssertNil(resolvedPayload)
+        #expect(resolvedPayload == nil)
     }
 
-    func testClipboardGenericFileTypeFilterRejectsDirectoriesAndURLs() {
-        XCTAssertFalse(TerminalClipboard.isSupportedGenericFileContentType(.directory))
-        XCTAssertFalse(TerminalClipboard.isSupportedGenericFileContentType(.folder))
-        XCTAssertFalse(TerminalClipboard.isSupportedGenericFileContentType(.url))
-        XCTAssertTrue(TerminalClipboard.isSupportedGenericFileContentType(.pdf))
-        XCTAssertTrue(TerminalClipboard.isSupportedGenericFileContentType(.movie))
-        XCTAssertTrue(TerminalClipboard.isSupportedGenericFileContentType(.plainText))
+    @Test
+    func clipboardGenericFileTypeFilterRejectsDirectoriesAndURLs() {
+        #expect(!TerminalClipboard.isSupportedGenericFileContentType(.directory))
+        #expect(!TerminalClipboard.isSupportedGenericFileContentType(.folder))
+        #expect(!TerminalClipboard.isSupportedGenericFileContentType(.url))
+        #expect(TerminalClipboard.isSupportedGenericFileContentType(.pdf))
+        #expect(TerminalClipboard.isSupportedGenericFileContentType(.movie))
+        #expect(TerminalClipboard.isSupportedGenericFileContentType(.plainText))
     }
 
     @MainActor
-    func testClipboardPasteAvailabilityIncludesSupportedFiles() {
+    @Test
+    func clipboardPasteAvailabilityIncludesSupportedFiles() {
         let provider = TestTerminalClipboardItemProvider(
             registeredContentTypes: [.pdf],
             registeredContentTypesForOpenInPlace: [.pdf],
@@ -962,33 +932,36 @@ final class AgenTTYTests: XCTestCase {
             string: nil
         )
 
-        XCTAssertTrue(TerminalClipboard.hasPasteableContent(pasteboard: pasteboard))
+        #expect(TerminalClipboard.hasPasteableContent(pasteboard: pasteboard))
     }
 
     @MainActor
-    func testRemoteClipboardFilePathPreservesFilenameExtension() {
+    @Test
+    func remoteClipboardFilePathPreservesFilenameExtension() {
         let path = TerminalClipboard.remoteClipboardFilePath(
             filename: "My Report 2026.final.pdf",
             preferredExtension: nil
         )
 
-        XCTAssertTrue(path.hasPrefix("/tmp/agentty-clipboard-"))
-        XCTAssertTrue(path.hasSuffix(".pdf"))
-        XCTAssertTrue(path.contains("-MyReport2026final"))
+        #expect(path.hasPrefix("/tmp/agentty-clipboard-"))
+        #expect(path.hasSuffix(".pdf"))
+        #expect(path.contains("-MyReport2026final"))
     }
 
     @MainActor
-    func testRemoteClipboardFilePathFallsBackToPreferredExtension() {
+    @Test
+    func remoteClipboardFilePathFallsBackToPreferredExtension() {
         let path = TerminalClipboard.remoteClipboardFilePath(
             filename: "video",
             preferredExtension: "mp4"
         )
 
-        XCTAssertTrue(path.hasSuffix(".mp4"))
+        #expect(path.hasSuffix(".mp4"))
     }
 
     @MainActor
-    func testClipboardTemporaryFileCleanupRemovesOwnedFiles() throws {
+    @Test
+    func clipboardTemporaryFileCleanupRemovesOwnedFiles() throws {
         let fileURL = try makeTemporaryClipboardTestFile(
             named: "cleanup.txt",
             contents: Data("bye".utf8)
@@ -1004,25 +977,21 @@ final class AgenTTYTests: XCTestCase {
 
         TerminalClipboard.removeTemporaryFiles(for: [payload])
 
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)))
+        #expect(!FileManager.default.fileExists(atPath: fileURL.path(percentEncoded: false)))
     }
 
     @MainActor
-    func testGhosttyWindowPaddingCLIValueEncoding() {
-        XCTAssertEqual(
-            AgenTTYGhosttyConfig.WindowPadding(topLeft: 3, bottomRight: 3).cliValue,
-            "3"
-        )
-        XCTAssertEqual(
-            AgenTTYGhosttyConfig.WindowPadding(topLeft: 1, bottomRight: 4).cliValue,
-            "1,4"
-        )
+    @Test
+    func ghosttyWindowPaddingCLIValueEncoding() {
+        #expect(AgenTTYGhosttyConfig.WindowPadding(topLeft: 3, bottomRight: 3).cliValue == "3")
+        #expect(AgenTTYGhosttyConfig.WindowPadding(topLeft: 1, bottomRight: 4).cliValue == "1,4")
     }
 
     @MainActor
-    func testBackspaceRepeatAccelerationIsMonotonicAndCappedAfterRamp() {
+    @Test
+    func backspaceRepeatAccelerationIsMonotonicAndCappedAfterRamp() {
         guard case .accelerated(let behavior) = KeyAction.backspace.repeatBehavior else {
-            XCTFail("backspace should use accelerated repeat behavior")
+            Issue.record("backspace should use accelerated repeat behavior")
             return
         }
 
@@ -1030,51 +999,55 @@ final class AgenTTYTests: XCTestCase {
         let intervals = checkpoints.map { behavior.interval(forHoldDuration: $0) }
 
         for index in 1..<intervals.count {
-            XCTAssertLessThanOrEqual(intervals[index], intervals[index - 1] + 0.000_001)
+            #expect(intervals[index] <= intervals[index - 1] + 0.000_001)
         }
 
-        XCTAssertEqual(intervals[7], intervals[8], accuracy: 0.000_000_1)
+        #expect(abs(intervals[7] - intervals[8]) <= 0.000_000_1)
     }
 
     @MainActor
-    func testBackspaceRepeatHitsConfiguredPeakAtTenSeconds() {
+    @Test
+    func backspaceRepeatHitsConfiguredPeakAtTenSeconds() {
         guard case .accelerated(let behavior) = KeyAction.backspace.repeatBehavior else {
-            XCTFail("backspace should use accelerated repeat behavior")
+            Issue.record("backspace should use accelerated repeat behavior")
             return
         }
 
         let peakInterval = 1 / behavior.maximumRatePerSecond
-        XCTAssertEqual(behavior.maximumRatePerSecond, 140, accuracy: 0.000_000_1)
-        XCTAssertEqual(behavior.interval(forHoldDuration: 10), peakInterval, accuracy: 0.000_000_1)
-        XCTAssertEqual(behavior.interval(forHoldDuration: 16), peakInterval, accuracy: 0.000_000_1)
+        #expect(abs(behavior.maximumRatePerSecond - 140) <= 0.000_000_1)
+        #expect(abs(behavior.interval(forHoldDuration: 10) - peakInterval) <= 0.000_000_1)
+        #expect(abs(behavior.interval(forHoldDuration: 16) - peakInterval) <= 0.000_000_1)
     }
 
     @MainActor
-    func testStandardRepeatProfileIsUnchangedForCharacterKeys() {
+    @Test
+    func standardRepeatProfileIsUnchangedForCharacterKeys() {
         guard case .fixed(let behavior) = KeyAction.character("x").repeatBehavior else {
-            XCTFail("character keys should use fixed repeat behavior")
+            Issue.record("character keys should use fixed repeat behavior")
             return
         }
 
-        XCTAssertEqual(behavior.initialDelay, 0.45, accuracy: 0.000_000_1)
-        XCTAssertEqual(behavior.interval, 0.065, accuracy: 0.000_000_1)
+        #expect(abs(behavior.initialDelay - 0.45) <= 0.000_000_1)
+        #expect(abs(behavior.interval - 0.065) <= 0.000_000_1)
     }
 
     @MainActor
-    func testRepeatAccelerationCurveReachesConfiguredMultiplierAtTenSeconds() {
+    @Test
+    func repeatAccelerationCurveReachesConfiguredMultiplierAtTenSeconds() {
         let curve = RepeatAccelerationCurve(
             rampDuration: 10,
             curveFactor: 2.4,
             maximumMultiplier: 10
         )
 
-        XCTAssertEqual(curve.multiplier(forHoldDuration: 0), 1, accuracy: 0.000_000_1)
-        XCTAssertEqual(curve.multiplier(forHoldDuration: 10), 10, accuracy: 0.000_000_1)
-        XCTAssertEqual(curve.multiplier(forHoldDuration: 14), 10, accuracy: 0.000_000_1)
+        #expect(abs(curve.multiplier(forHoldDuration: 0) - 1) <= 0.000_000_1)
+        #expect(abs(curve.multiplier(forHoldDuration: 10) - 10) <= 0.000_000_1)
+        #expect(abs(curve.multiplier(forHoldDuration: 14) - 10) <= 0.000_000_1)
     }
 
     @MainActor
-    func testDirectionPadDistanceScaledRateMapsTriggerToQuarterAndCapToTen() {
+    @Test
+    func directionPadDistanceScaledRateMapsTriggerToQuarterAndCapToTen() {
         let distanceRate = DistanceScaledRepeatBaseRate(
             triggerDistance: 25,
             maxDistanceForRateGain: 300,
@@ -1082,13 +1055,14 @@ final class AgenTTYTests: XCTestCase {
             maximumRatePerSecond: 10
         )
 
-        XCTAssertEqual(distanceRate.rate(forDistanceFromCenter: 25), 0.25, accuracy: 0.000_000_1)
-        XCTAssertEqual(distanceRate.rate(forDistanceFromCenter: 325), 10, accuracy: 0.000_000_1)
-        XCTAssertEqual(distanceRate.rate(forDistanceFromCenter: 420), 10, accuracy: 0.000_000_1)
+        #expect(abs(distanceRate.rate(forDistanceFromCenter: 25) - 0.25) <= 0.000_000_1)
+        #expect(abs(distanceRate.rate(forDistanceFromCenter: 325) - 10) <= 0.000_000_1)
+        #expect(abs(distanceRate.rate(forDistanceFromCenter: 420) - 10) <= 0.000_000_1)
     }
 
     @MainActor
-    func testNotificationTraceContextParsesSharedPayloadFields() {
+    @Test
+    func notificationTraceContextParsesSharedPayloadFields() {
         let context = NotificationTraceContext.parse(
             userInfo: [
                 "attempt_id": "attempt-1",
@@ -1097,13 +1071,14 @@ final class AgenTTYTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(context.attemptID, "attempt-1")
-        XCTAssertEqual(context.source, "Claude Code")
-        XCTAssertEqual(context.tmuxWindowID, 42)
+        #expect(context.attemptID == "attempt-1")
+        #expect(context.source == "Claude Code")
+        #expect(context.tmuxWindowID == 42)
     }
 
     @MainActor
-    func testNotificationTraceContextFallsBackToTitleWhenSourceIsMissing() {
+    @Test
+    func notificationTraceContextFallsBackToTitleWhenSourceIsMissing() {
         let context = NotificationTraceContext.parse(
             userInfo: [
                 "attempt_id": "attempt-2",
@@ -1112,44 +1087,46 @@ final class AgenTTYTests: XCTestCase {
             fallbackSource: "Codex"
         )
 
-        XCTAssertEqual(context.attemptID, "attempt-2")
-        XCTAssertEqual(context.source, "Codex")
-        XCTAssertEqual(context.tmuxWindowID, 7)
+        #expect(context.attemptID == "attempt-2")
+        #expect(context.source == "Codex")
+        #expect(context.tmuxWindowID == 7)
     }
 
     @MainActor
-    func testTerminalTouchGeometryClampsPointsInsideSurfaceBounds() {
+    @Test
+    func terminalTouchGeometryClampsPointsInsideSurfaceBounds() {
         let bounds = CGRect(x: 10, y: 20, width: 90, height: 30)
         let clamped = TerminalTouchGeometry.clampedSurfacePoint(
             CGPoint(x: 400, y: -50),
             within: bounds
         )
 
-        XCTAssertNotNil(clamped)
-        XCTAssertEqual(clamped?.x, bounds.maxX.nextDown)
-        XCTAssertEqual(clamped?.y, bounds.minY)
+        #expect(clamped != nil)
+        #expect(clamped?.x == bounds.maxX.nextDown)
+        #expect(clamped?.y == bounds.minY)
     }
 
     @MainActor
-    func testTerminalTouchGeometryRejectsEmptyBounds() {
-        XCTAssertNil(
-            TerminalTouchGeometry.clampedSurfacePoint(
+    @Test
+    func terminalTouchGeometryRejectsEmptyBounds() {
+        #expect(TerminalTouchGeometry.clampedSurfacePoint(
                 CGPoint(x: 0, y: 0),
                 within: .zero
-            )
-        )
+            ) == nil)
     }
 
     @MainActor
-    func testTmuxWindowIDParsingHandlesPrefixedAndPlainValues() {
-        XCTAssertEqual(TmuxWindowIDParsing.parse("@42"), 42)
-        XCTAssertEqual(TmuxWindowIDParsing.parse("42"), 42)
-        XCTAssertNil(TmuxWindowIDParsing.parse("  "))
-        XCTAssertNil(TmuxWindowIDParsing.parse("window-42"))
-        XCTAssertEqual(TerminalBridge.parseTmuxWindowID(Substring("@7")), 7)
+    @Test
+    func tmuxWindowIDParsingHandlesPrefixedAndPlainValues() {
+        #expect(TmuxWindowIDParsing.parse("@42") == 42)
+        #expect(TmuxWindowIDParsing.parse("42") == 42)
+        #expect(TmuxWindowIDParsing.parse("  ") == nil)
+        #expect(TmuxWindowIDParsing.parse("window-42") == nil)
+        #expect(TerminalBridge.parseTmuxWindowID(Substring("@7")) == 7)
     }
 
-    func testUsageTrialPolicyStartsFreshAtZeroUsage() {
+    @Test
+    func usageTrialPolicyStartsFreshAtZeroUsage() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let record = AgenTTYTrialPolicy.mergeRecord(
             keychainRecord: nil,
@@ -1157,15 +1134,16 @@ final class AgenTTYTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(record.startedAt, now)
-        XCTAssertEqual(record.consumedUsage, 0, accuracy: 0.000_000_1)
+        #expect(record.startedAt == now)
+        #expect(abs(record.consumedUsage - 0) <= 0.000_000_1)
 
         let status = AgenTTYTrialPolicy.status(for: record)
-        XCTAssertFalse(status.isExpired)
-        XCTAssertEqual(status.remainingUsage, AgenTTYTrialPolicy.usageLimit, accuracy: 0.000_000_1)
+        #expect(!status.isExpired)
+        #expect(abs(status.remainingUsage - AgenTTYTrialPolicy.usageLimit) <= 0.000_000_1)
     }
 
-    func testUsageTrialPolicyPrefersEarliestStartAndGreatestUsageAcrossStores() {
+    @Test
+    func usageTrialPolicyPrefersEarliestStartAndGreatestUsageAcrossStores() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let keychainRecord = AgenTTYUsageTrialRecord(
             startedAt: now.addingTimeInterval(-3_600),
@@ -1182,11 +1160,12 @@ final class AgenTTYTests: XCTestCase {
             now: now
         )
 
-        XCTAssertEqual(merged.startedAt, mirroredRecord.startedAt)
-        XCTAssertEqual(merged.consumedUsage, mirroredRecord.consumedUsage, accuracy: 0.000_000_1)
+        #expect(merged.startedAt == mirroredRecord.startedAt)
+        #expect(abs(merged.consumedUsage - mirroredRecord.consumedUsage) <= 0.000_000_1)
     }
 
-    func testUsageTrialPolicyMeasuresElapsedUsageFromSystemUptimeWhenAvailable() {
+    @Test
+    func usageTrialPolicyMeasuresElapsedUsageFromSystemUptimeWhenAvailable() {
         let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let elapsedUsage = AgenTTYTrialPolicy.measuredElapsedUsage(
             wallClockStartedAt: startedAt,
@@ -1195,10 +1174,11 @@ final class AgenTTYTests: XCTestCase {
             systemUptime: 145
         )
 
-        XCTAssertEqual(elapsedUsage, 45, accuracy: 0.000_000_1)
+        #expect(abs(elapsedUsage - 45) <= 0.000_000_1)
     }
 
-    func testUsageTrialPolicyFallsBackToWallClockWhenSystemUptimeMovesBackward() {
+    @Test
+    func usageTrialPolicyFallsBackToWallClockWhenSystemUptimeMovesBackward() {
         let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
         let elapsedUsage = AgenTTYTrialPolicy.measuredElapsedUsage(
             wallClockStartedAt: startedAt,
@@ -1207,10 +1187,11 @@ final class AgenTTYTests: XCTestCase {
             systemUptime: 20
         )
 
-        XCTAssertEqual(elapsedUsage, 90, accuracy: 0.000_000_1)
+        #expect(abs(elapsedUsage - 90) <= 0.000_000_1)
     }
 
-    func testUsageTrialPolicyClampsConsumedUsageAtLimit() {
+    @Test
+    func usageTrialPolicyClampsConsumedUsageAtLimit() {
         let record = AgenTTYUsageTrialRecord(
             startedAt: Date(timeIntervalSince1970: 1_700_000_000),
             consumedUsage: AgenTTYTrialPolicy.usageLimit - 30
@@ -1219,187 +1200,167 @@ final class AgenTTYTests: XCTestCase {
         let updated = AgenTTYTrialPolicy.updatedRecord(from: record, adding: 120)
         let status = AgenTTYTrialPolicy.status(for: updated)
 
-        XCTAssertEqual(updated.consumedUsage, AgenTTYTrialPolicy.usageLimit, accuracy: 0.000_000_1)
-        XCTAssertTrue(status.isExpired)
-        XCTAssertEqual(status.remainingUsage, 0, accuracy: 0.000_000_1)
+        #expect(abs(updated.consumedUsage - AgenTTYTrialPolicy.usageLimit) <= 0.000_000_1)
+        #expect(status.isExpired)
+        #expect(abs(status.remainingUsage - 0) <= 0.000_000_1)
     }
 
-    func testLifetimeAccessPolicyRendersInteractiveContentWhileInitialLookupRuns() {
-        XCTAssertTrue(
-            AgenTTYLifetimeAccessPolicy.shouldRenderInteractiveContent(
+    @Test
+    func lifetimeAccessPolicyRendersInteractiveContentWhileInitialLookupRuns() {
+        #expect(AgenTTYLifetimeAccessPolicy.shouldRenderInteractiveContent(
                 enforcesPaywall: true,
                 hasFinishedInitialAccessLoad: false,
                 hasLifetimeAccess: false,
                 trialStatus: nil
-            )
-        )
-        XCTAssertFalse(
-            AgenTTYLifetimeAccessPolicy.shouldBlockWithGate(
+            ))
+        #expect(!AgenTTYLifetimeAccessPolicy.shouldBlockWithGate(
                 enforcesPaywall: true,
                 hasFinishedInitialAccessLoad: false,
                 hasLifetimeAccess: false,
                 trialStatus: nil
-            )
-        )
+            ))
     }
 
-    func testLifetimeAccessPolicyDoesNotRevokeKnownPurchaseForEmptyLookup() {
-        XCTAssertTrue(
-            AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
+    @Test
+    func lifetimeAccessPolicyDoesNotRevokeKnownPurchaseForEmptyLookup() {
+        #expect(AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
                 currentValue: true,
                 lookup: .absent
-            )
-        )
-        XCTAssertTrue(
-            AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
+            ))
+        #expect(AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
                 currentValue: true,
                 lookup: .inconclusive
-            )
-        )
+            ))
     }
 
-    func testLifetimeAccessPolicyRequiresExplicitRevocationToRemoveKnownPurchase() {
-        XCTAssertFalse(
-            AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
+    @Test
+    func lifetimeAccessPolicyRequiresExplicitRevocationToRemoveKnownPurchase() {
+        #expect(!AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
                 currentValue: true,
                 lookup: .revoked
-            )
-        )
-        XCTAssertTrue(
-            AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
+            ))
+        #expect(AgenTTYLifetimeAccessPolicy.reconciledLifetimeAccess(
                 currentValue: false,
                 lookup: .active
-            )
-        )
+            ))
     }
 
-    func testLifetimeAccessPolicyBlocksExpiredTrialAfterLookupFinishes() {
+    @Test
+    func lifetimeAccessPolicyBlocksExpiredTrialAfterLookupFinishes() {
         let expiredTrial = AgenTTYTrialStatus(
             startedAt: Date(timeIntervalSince1970: 1_700_000_000),
             usageLimit: AgenTTYTrialPolicy.usageLimit,
             consumedUsage: AgenTTYTrialPolicy.usageLimit
         )
 
-        XCTAssertFalse(
-            AgenTTYLifetimeAccessPolicy.shouldRenderInteractiveContent(
+        #expect(!AgenTTYLifetimeAccessPolicy.shouldRenderInteractiveContent(
                 enforcesPaywall: true,
                 hasFinishedInitialAccessLoad: true,
                 hasLifetimeAccess: false,
                 trialStatus: expiredTrial
-            )
-        )
-        XCTAssertTrue(
-            AgenTTYLifetimeAccessPolicy.shouldBlockWithGate(
+            ))
+        #expect(AgenTTYLifetimeAccessPolicy.shouldBlockWithGate(
                 enforcesPaywall: true,
                 hasFinishedInitialAccessLoad: true,
                 hasLifetimeAccess: false,
                 trialStatus: expiredTrial
-            )
-        )
+            ))
     }
 
     @MainActor
-    func testMainFlavorLocalInstallUnlockBypassesPaywall() {
+    @Test
+    func mainFlavorLocalInstallUnlockBypassesPaywall() {
         let controller = AgenTTYLifetimeAccessController(
             flavor: .main,
             localMainInstallUnlockEnabled: true
         )
 
-        XCTAssertTrue(controller.hasFinishedInitialAccessLoad)
-        XCTAssertTrue(controller.hasLifetimeAccess)
-        XCTAssertTrue(controller.shouldRenderInteractiveContent)
-        XCTAssertFalse(controller.shouldBlockWithGate)
-        XCTAssertNil(controller.trialStatus)
+        #expect(controller.hasFinishedInitialAccessLoad)
+        #expect(controller.hasLifetimeAccess)
+        #expect(controller.shouldRenderInteractiveContent)
+        #expect(!controller.shouldBlockWithGate)
+        #expect(controller.trialStatus == nil)
     }
 
     @MainActor
-    func testKeyboardPresentationPolicyKeepsIPadLandscapeOnTheHardwarePath() {
-        XCTAssertEqual(
-            KeyboardPresentationPolicy.resolve(
+    @Test
+    func keyboardPresentationPolicyKeepsIPadLandscapeOnTheHardwarePath() {
+        #expect(KeyboardPresentationPolicy.resolve(
                 idiom: .pad,
                 sceneSize: CGSize(width: 1210, height: 900),
                 inputMode: .system,
                 isHiddenByUser: false
-            ),
-            .hidden
-        )
-        XCTAssertEqual(
-            KeyboardPresentationPolicy.resolve(
+            ) == .hidden)
+        #expect(KeyboardPresentationPolicy.resolve(
                 idiom: .pad,
                 sceneSize: CGSize(width: 900, height: 1210),
                 inputMode: .custom,
                 isHiddenByUser: false
-            ),
-            .customGrid
-        )
+            ) == .customGrid)
     }
 
     @MainActor
-    func testKeyboardPresentationPolicyResolvesIPhoneModes() {
+    @Test
+    func keyboardPresentationPolicyResolvesIPhoneModes() {
         let phone = CGSize(width: 402, height: 874)
-        XCTAssertEqual(
-            KeyboardPresentationPolicy.resolve(
+        #expect(KeyboardPresentationPolicy.resolve(
                 idiom: .phone,
                 sceneSize: phone,
                 inputMode: .custom,
                 isHiddenByUser: false
-            ),
-            .customGrid
-        )
-        XCTAssertEqual(
-            KeyboardPresentationPolicy.resolve(
+            ) == .customGrid)
+        #expect(KeyboardPresentationPolicy.resolve(
                 idiom: .phone,
                 sceneSize: phone,
                 inputMode: .system,
                 isHiddenByUser: false
-            ),
-            .systemKeyboard
-        )
-        XCTAssertEqual(
-            KeyboardPresentationPolicy.resolve(
+            ) == .systemKeyboard)
+        #expect(KeyboardPresentationPolicy.resolve(
                 idiom: .phone,
                 sceneSize: phone,
                 inputMode: .system,
                 isHiddenByUser: true
-            ),
-            .hidden
-        )
+            ) == .hidden)
     }
 
     @MainActor
-    func testHidingTheKeyboardSuppressesTheLifecycleUndoBackspace() {
+    @Test
+    func hidingTheKeyboardSuppressesTheLifecycleUndoBackspace() {
         let keyboardState = KeyboardState()
         keyboardState.recordLifecycleUndoCandidate(for: .character("a"))
 
         keyboardState.hideKeyboard()
 
-        XCTAssertTrue(keyboardState.isKeyboardHidden)
-        XCTAssertFalse(keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
+        #expect(keyboardState.isKeyboardHidden)
+        #expect(!keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
     }
 
     @MainActor
-    func testLifecycleUndoSuppressionOnlyAppliesToTheNextConsumption() {
+    @Test
+    func lifecycleUndoSuppressionOnlyAppliesToTheNextConsumption() {
         let keyboardState = KeyboardState()
         keyboardState.suppressLifecycleUndo()
-        XCTAssertFalse(keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
+        #expect(!keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
 
         keyboardState.recordLifecycleUndoCandidate(for: .space)
-        XCTAssertTrue(keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
+        #expect(keyboardState.consumeLifecycleUndoCandidate(within: 0.5))
     }
 
     @MainActor
-    func testShowKeyboardClearsTheHiddenState() {
+    @Test
+    func showKeyboardClearsTheHiddenState() {
         let keyboardState = KeyboardState()
         keyboardState.hideKeyboard()
         keyboardState.showKeyboard()
 
-        XCTAssertFalse(keyboardState.isKeyboardHidden)
+        #expect(!keyboardState.isKeyboardHidden)
     }
 
     @MainActor
-    func testKeyboardInputModeDefaultsToTheCustomKeyboard() {
-        XCTAssertEqual(KeyboardInputMode.defaultValue, .custom)
-        XCTAssertEqual(KeyboardInputMode(rawValue: "system"), .system)
+    @Test
+    func keyboardInputModeDefaultsToTheCustomKeyboard() {
+        #expect(KeyboardInputMode.defaultValue == .custom)
+        #expect(KeyboardInputMode(rawValue: "system") == .system)
     }
 
     private func makeTemporaryClipboardTestFile(named filename: String, contents: Data) throws -> URL {

@@ -1,10 +1,12 @@
 import Foundation
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
-final class AnalyticsTests: XCTestCase {
+@Suite
+struct AnalyticsTests {
     @MainActor
-    func testSaveSucceededUnverifiedAnalyticsIncludesVerificationFailure() {
+    @Test
+    func saveSucceededUnverifiedAnalyticsIncludesVerificationFailure() {
         let verificationFailure = AgenTTYSSHTerminationOutcome(
             category: .authFailed,
             failureStage: .sshAuth,
@@ -18,25 +20,27 @@ final class AnalyticsTests: XCTestCase {
             verificationFailureOutcome: verificationFailure
         )
 
-        XCTAssertEqual(outcome.stage, .saveSucceededUnverified)
-        XCTAssertEqual(outcome.verificationAttemptCount, 1)
-        XCTAssertEqual(outcome.verificationFailureOutcome, verificationFailure)
+        #expect(outcome.stage == .saveSucceededUnverified)
+        #expect(outcome.verificationAttemptCount == 1)
+        #expect(outcome.verificationFailureOutcome == verificationFailure)
     }
 
     @MainActor
-    func testSaveSucceededUnreachableAnalyticsDoesNotAttachVerificationPayload() {
+    @Test
+    func saveSucceededUnreachableAnalyticsDoesNotAttachVerificationPayload() {
         let outcome = HostSetupSaveAnalyticsOutcome(
             overrideValidationWarning: true,
             verificationFailureOutcome: nil
         )
 
-        XCTAssertEqual(outcome.stage, .saveSucceededUnreachable)
-        XCTAssertNil(outcome.verificationAttemptCount)
-        XCTAssertNil(outcome.verificationFailureOutcome)
+        #expect(outcome.stage == .saveSucceededUnreachable)
+        #expect(outcome.verificationAttemptCount == nil)
+        #expect(outcome.verificationFailureOutcome == nil)
     }
 
     @MainActor
-    func testAnalyticsHostSetupPayloadEncodesStructuredDiagnosticsKeys() throws {
+    @Test
+    func analyticsHostSetupPayloadEncodesStructuredDiagnosticsKeys() throws {
         let payload = AgenTTYAnalyticsHostSetupFlowPayload(
             context: AgenTTYAnalyticsContextInfo(appSessionID: "app-session-1"),
             flow: AgenTTYAnalyticsHostSetupFlowInfoPayload(
@@ -85,25 +89,26 @@ final class AnalyticsTests: XCTestCase {
         )
 
         let object = try analyticsJSONObject(payload)
-        let context = try XCTUnwrap(object["context"] as? [String: Any])
-        let flow = try XCTUnwrap(object["flow"] as? [String: Any])
-        let detectedUsername = try XCTUnwrap(object["detected_username"] as? [String: Any])
-        let candidates = try XCTUnwrap(object["candidates"] as? [String: Any])
-        let selectedCandidate = try XCTUnwrap(candidates["selected"] as? [String: Any])
-        let hostEnvironment = try XCTUnwrap(object["host_environment"] as? [String: Any])
+        let context = try #require(object["context"] as? [String: Any])
+        let flow = try #require(object["flow"] as? [String: Any])
+        let detectedUsername = try #require(object["detected_username"] as? [String: Any])
+        let candidates = try #require(object["candidates"] as? [String: Any])
+        let selectedCandidate = try #require(candidates["selected"] as? [String: Any])
+        let hostEnvironment = try #require(object["host_environment"] as? [String: Any])
 
-        XCTAssertEqual(context["app_session_id"] as? String, "app-session-1")
-        XCTAssertEqual(flow["id"] as? String, "flow-1")
-        XCTAssertEqual(detectedUsername["source"] as? String, "whoami_command")
-        XCTAssertEqual(selectedCandidate["source"] as? String, "hostname")
-        XCTAssertEqual(candidates["count"] as? Int, 1)
-        XCTAssertEqual(candidates["all_low_confidence"] as? Bool, true)
-        XCTAssertEqual(hostEnvironment["platform"] as? String, "linux")
-        XCTAssertEqual(hostEnvironment["flags"] as? [String], ["wsl"])
+        #expect(context["app_session_id"] as? String == "app-session-1")
+        #expect(flow["id"] as? String == "flow-1")
+        #expect(detectedUsername["source"] as? String == "whoami_command")
+        #expect(selectedCandidate["source"] as? String == "hostname")
+        #expect(candidates["count"] as? Int == 1)
+        #expect(candidates["all_low_confidence"] as? Bool == true)
+        #expect(hostEnvironment["platform"] as? String == "linux")
+        #expect(hostEnvironment["flags"] as? [String] == ["wsl"])
     }
 
     @MainActor
-    func testAnalyticsHostSetupPayloadEncodesVerificationFields() throws {
+    @Test
+    func analyticsHostSetupPayloadEncodesVerificationFields() throws {
         let payload = AgenTTYAnalyticsHostSetupFlowPayload(
             context: AgenTTYAnalyticsContextInfo(appSessionID: "app-session-1"),
             flow: AgenTTYAnalyticsHostSetupFlowInfoPayload(
@@ -150,53 +155,47 @@ final class AnalyticsTests: XCTestCase {
         )
 
         let object = try analyticsJSONObject(payload)
-        let flow = try XCTUnwrap(object["flow"] as? [String: Any])
-        let error = try XCTUnwrap(object["error"] as? [String: Any])
-        let verification = try XCTUnwrap(object["verification"] as? [String: Any])
+        let flow = try #require(object["flow"] as? [String: Any])
+        let error = try #require(object["error"] as? [String: Any])
+        let verification = try #require(object["verification"] as? [String: Any])
 
-        XCTAssertEqual(flow["stage"] as? String, "verification_failed")
-        XCTAssertEqual(error["category"] as? String, "connection_verification")
-        XCTAssertEqual(verification["attempt_count"] as? Int, 2)
-        XCTAssertEqual(verification["failure_stage"] as? String, "ssh_auth")
-        XCTAssertEqual(verification["disconnect_category"] as? String, "auth_failed")
+        #expect(flow["stage"] as? String == "verification_failed")
+        #expect(error["category"] as? String == "connection_verification")
+        #expect(verification["attempt_count"] as? Int == 2)
+        #expect(verification["failure_stage"] as? String == "ssh_auth")
+        #expect(verification["disconnect_category"] as? String == "auth_failed")
     }
 
-    func testAnalyticsHashingIsDeterministic() {
-        XCTAssertEqual(
-            AgenTTYAnalyticsHashing.sha256Hex("host-id"),
-            AgenTTYAnalyticsHashing.sha256Hex("host-id")
-        )
-        XCTAssertNotEqual(
-            AgenTTYAnalyticsHashing.sha256Hex("host-id"),
-            AgenTTYAnalyticsHashing.sha256Hex("host-id-2")
-        )
+    @Test
+    func analyticsHashingIsDeterministic() {
+        #expect(AgenTTYAnalyticsHashing.sha256Hex("host-id") == AgenTTYAnalyticsHashing.sha256Hex("host-id"))
+        #expect(AgenTTYAnalyticsHashing.sha256Hex("host-id") != AgenTTYAnalyticsHashing.sha256Hex("host-id-2"))
     }
 
     @MainActor
-    func testExpiredTrialPreviewProducesBlockedAnalyticsAccessState() {
+    @Test
+    func expiredTrialPreviewProducesBlockedAnalyticsAccessState() {
         let state = AgenTTYLifetimeAccessController.previewExpiredTrial().analyticsAccessState
 
-        XCTAssertFalse(state.hasLifetimeAccess)
-        XCTAssertTrue(state.trialExpired)
-        XCTAssertEqual(state.trialRemainingUsageSeconds, 0, accuracy: 0.000_000_1)
-        XCTAssertEqual(
-            state.trialConsumedUsageSeconds,
-            AgenTTYTrialPolicy.usageLimit,
-            accuracy: 0.000_000_1
-        )
+        #expect(!state.hasLifetimeAccess)
+        #expect(state.trialExpired)
+        #expect(abs(state.trialRemainingUsageSeconds - 0) <= 0.000_000_1)
+        #expect(abs(state.trialConsumedUsageSeconds - AgenTTYTrialPolicy.usageLimit) <= 0.000_000_1)
     }
 
     @MainActor
-    func testUnlockedPreviewProducesUnlockedAnalyticsAccessState() {
+    @Test
+    func unlockedPreviewProducesUnlockedAnalyticsAccessState() {
         let state = AgenTTYLifetimeAccessController.previewUnlocked().analyticsAccessState
 
-        XCTAssertTrue(state.hasLifetimeAccess)
-        XCTAssertFalse(state.trialExpired)
-        XCTAssertEqual(state.trialConsumedUsageSeconds, 0, accuracy: 0.000_000_1)
-        XCTAssertEqual(state.trialRemainingUsageSeconds, 0, accuracy: 0.000_000_1)
+        #expect(state.hasLifetimeAccess)
+        #expect(!state.trialExpired)
+        #expect(abs(state.trialConsumedUsageSeconds - 0) <= 0.000_000_1)
+        #expect(abs(state.trialRemainingUsageSeconds - 0) <= 0.000_000_1)
     }
 
-    func testAnalyticsClientFlushEncodesDeviceContextAndRicherEvents() async throws {
+    @Test
+    func analyticsClientFlushEncodesDeviceContextAndRicherEvents() async throws {
         let transport = AnalyticsClientTestTransport()
         let client = makeAnalyticsClient(
             transport: transport,
@@ -257,46 +256,43 @@ final class AnalyticsTests: XCTestCase {
         )
         await client.flushPendingEvents()
 
-        XCTAssertEqual(transport.ensureDeviceIdentityCallCount, 1)
-        XCTAssertEqual(transport.requests.count, 1)
+        #expect(transport.ensureDeviceIdentityCallCount == 1)
+        #expect(transport.requests.count == 1)
 
-        let requestBody = try XCTUnwrap(transport.requestBodies.first)
-        let requestJSON = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
-        )
+        let requestBody = try #require(transport.requestBodies.first)
+        let requestJSON = try #require(try JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
 
-        XCTAssertEqual(requestJSON["device_id"] as? String, "11111111-2222-3333-4444-555555555555")
-        XCTAssertEqual(requestJSON["device_secret"] as? String, "device-secret")
+        #expect(requestJSON["device_id"] as? String == "11111111-2222-3333-4444-555555555555")
+        #expect(requestJSON["device_secret"] as? String == "device-secret")
 
-        let deviceContext = try XCTUnwrap(requestJSON["device_context"] as? [String: Any])
-        XCTAssertEqual(deviceContext["system_version"] as? String, "26.2")
-        XCTAssertEqual(deviceContext["device_model_identifier"] as? String, "iPhone17,3")
-        XCTAssertEqual(deviceContext["device_family"] as? String, "phone")
-        XCTAssertEqual(deviceContext["locale_identifier"] as? String, "en_SE")
-        XCTAssertEqual(deviceContext["preferred_languages"] as? [String], ["en-SE", "sv-SE"])
+        let deviceContext = try #require(requestJSON["device_context"] as? [String: Any])
+        #expect(deviceContext["system_version"] as? String == "26.2")
+        #expect(deviceContext["device_model_identifier"] as? String == "iPhone17,3")
+        #expect(deviceContext["device_family"] as? String == "phone")
+        #expect(deviceContext["locale_identifier"] as? String == "en_SE")
+        #expect(deviceContext["preferred_languages"] as? [String] == ["en-SE", "sv-SE"])
 
-        let events = try XCTUnwrap(requestJSON["events"] as? [[String: Any]])
-        XCTAssertEqual(events.count, 3)
-        XCTAssertTrue(events.allSatisfy { $0["payload_version"] as? Int == 2 })
+        let events = try #require(requestJSON["events"] as? [[String: Any]])
+        #expect(events.count == 3)
+        #expect(events.allSatisfy { $0["payload_version"] as? Int == 2 })
 
         let payloadObjects = events.compactMap { $0["payload"] as? [String: Any] }
-        XCTAssertEqual(payloadObjects.count, 3)
-        XCTAssertTrue(payloadObjects.contains(where: { payload in
+        #expect(payloadObjects.count == 3)
+        #expect(payloadObjects.contains(where: { payload in
             let flow = payload["flow"] as? [String: Any]
             return flow?["stage"] as? String == "save_succeeded"
         }))
-        XCTAssertTrue(payloadObjects.contains(where: { $0["stage"] as? String == "shown" }))
-        XCTAssertTrue(
-            payloadObjects.contains(where: { payload in
+        #expect(payloadObjects.contains(where: { $0["stage"] as? String == "shown" }))
+        #expect(payloadObjects.contains(where: { payload in
                 let disconnect = payload["disconnect"] as? [String: Any]
                 let input = payload["input"] as? [String: Any]
                 return disconnect?["category"] as? String == "shell_closed"
                     && input?["event_count"] as? Int == 3
-            })
-        )
+            }))
     }
 
-    func testAnalyticsClientHostSetupFlowEncodesExtendedAutomaticSetupFields() async throws {
+    @Test
+    func analyticsClientHostSetupFlowEncodesExtendedAutomaticSetupFields() async throws {
         let transport = AnalyticsClientTestTransport()
         let client = makeAnalyticsClient(
             transport: transport,
@@ -339,28 +335,27 @@ final class AnalyticsTests: XCTestCase {
         )
         await client.flushPendingEvents()
 
-        let requestBody = try XCTUnwrap(transport.requestBodies.first)
-        let requestJSON = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
-        )
-        let events = try XCTUnwrap(requestJSON["events"] as? [[String: Any]])
-        let hostSetupPayload = try XCTUnwrap(events.first?["payload"] as? [String: Any])
+        let requestBody = try #require(transport.requestBodies.first)
+        let requestJSON = try #require(try JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+        let events = try #require(requestJSON["events"] as? [[String: Any]])
+        let hostSetupPayload = try #require(events.first?["payload"] as? [String: Any])
 
-        let edits = try XCTUnwrap(hostSetupPayload["edits"] as? [String: Any])
-        let candidates = try XCTUnwrap(hostSetupPayload["candidates"] as? [String: Any])
-        let reachability = try XCTUnwrap(hostSetupPayload["reachability"] as? [String: Any])
-        let error = try XCTUnwrap(hostSetupPayload["error"] as? [String: Any])
+        let edits = try #require(hostSetupPayload["edits"] as? [String: Any])
+        let candidates = try #require(hostSetupPayload["candidates"] as? [String: Any])
+        let reachability = try #require(hostSetupPayload["reachability"] as? [String: Any])
+        let error = try #require(hostSetupPayload["error"] as? [String: Any])
 
-        XCTAssertEqual(edits["host"] as? Bool, true)
-        XCTAssertEqual(edits["port"] as? Bool, false)
-        XCTAssertEqual(edits["username"] as? Bool, true)
-        XCTAssertEqual((candidates["selected"] as? [String: Any])?["kind"] as? String, "local_domain")
-        XCTAssertEqual(reachability["attempt_count"] as? Int, 2)
-        XCTAssertEqual(reachability["failure_subtype"] as? String, "dns")
-        XCTAssertEqual(error["category"] as? String, "reachability")
+        #expect(edits["host"] as? Bool == true)
+        #expect(edits["port"] as? Bool == false)
+        #expect(edits["username"] as? Bool == true)
+        #expect((candidates["selected"] as? [String: Any])?["kind"] as? String == "local_domain")
+        #expect(reachability["attempt_count"] as? Int == 2)
+        #expect(reachability["failure_subtype"] as? String == "dns")
+        #expect(error["category"] as? String == "reachability")
     }
 
-    func testAnalyticsClientAppSessionCompletedIncludesSessionCounters() async throws {
+    @Test
+    func analyticsClientAppSessionCompletedIncludesSessionCounters() async throws {
         let transport = AnalyticsClientTestTransport()
         let dateBox = AnalyticsClientDateBox(Date(timeIntervalSince1970: 1_715_000_000))
         let client = makeAnalyticsClient(
@@ -403,30 +398,29 @@ final class AnalyticsTests: XCTestCase {
             activeHostPresent: true
         )
 
-        XCTAssertGreaterThanOrEqual(transport.requests.count, 1)
+        #expect(transport.requests.count >= 1)
 
-        let appSessionEvent = try XCTUnwrap(
-            try transport.requestBodies
+        let appSessionEvent = try #require(try transport.requestBodies
                 .compactMap { requestBody in
                     try JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
                 }
                 .compactMap { $0["events"] as? [[String: Any]] }
                 .flatMap { $0 }
-                .first(where: { $0["event_type"] as? String == "app_session_completed" })
-        )
-        let payload = try XCTUnwrap(appSessionEvent["payload"] as? [String: Any])
-        let session = try XCTUnwrap(payload["session"] as? [String: Any])
+                .first(where: { $0["event_type"] as? String == "app_session_completed" }))
+        let payload = try #require(appSessionEvent["payload"] as? [String: Any])
+        let session = try #require(payload["session"] as? [String: Any])
 
-        XCTAssertEqual(session["saved_host_count"] as? Int, 2)
-        XCTAssertEqual(session["active_host_present"] as? Bool, true)
-        XCTAssertEqual(session["had_paywall_visible"] as? Bool, true)
-        XCTAssertEqual(session["ssh_session_count"] as? Int, 1)
-        XCTAssertEqual(session["ready_ssh_session_count"] as? Int, 1)
-        XCTAssertEqual(session["had_terminal_input"] as? Bool, true)
-        XCTAssertEqual(session["duration_seconds"] as? Int, 90)
+        #expect(session["saved_host_count"] as? Int == 2)
+        #expect(session["active_host_present"] as? Bool == true)
+        #expect(session["had_paywall_visible"] as? Bool == true)
+        #expect(session["ssh_session_count"] as? Int == 1)
+        #expect(session["ready_ssh_session_count"] as? Int == 1)
+        #expect(session["had_terminal_input"] as? Bool == true)
+        #expect(session["duration_seconds"] as? Int == 90)
     }
 
-    func testAnalyticsClientFlushesPendingEventsWhileSceneRemainsActive() async throws {
+    @Test
+    func analyticsClientFlushesPendingEventsWhileSceneRemainsActive() async throws {
         let transport = AnalyticsClientTestTransport()
         let client = makeAnalyticsClient(
             transport: transport,
@@ -479,7 +473,7 @@ final class AnalyticsTests: XCTestCase {
             await Task.yield()
         }
 
-        XCTAssertEqual(transport.requests.count, 1)
+        #expect(transport.requests.count == 1)
 
         await client.setSceneActive(
             false,
@@ -489,7 +483,8 @@ final class AnalyticsTests: XCTestCase {
         )
     }
 
-    func testAnalyticsClientFlushLoadsLegacyOutboxEventsWithoutPayloadVersion() async throws {
+    @Test
+    func analyticsClientFlushLoadsLegacyOutboxEventsWithoutPayloadVersion() async throws {
         let transport = AnalyticsClientTestTransport()
         let outboxDirectoryURL = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString.lowercased(), isDirectory: true)
@@ -542,9 +537,7 @@ final class AnalyticsTests: XCTestCase {
         )
 
         let outboxFileURL = outboxDirectoryURL.appendingPathComponent("analytics-outbox.v1.json")
-        var persistedOutbox = try XCTUnwrap(
-            JSONSerialization.jsonObject(with: Data(contentsOf: outboxFileURL)) as? [[String: Any]]
-        )
+        var persistedOutbox = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: outboxFileURL)) as? [[String: Any]])
         persistedOutbox[0]["payload_version"] = nil
         let legacyOutboxData = try JSONSerialization.data(withJSONObject: persistedOutbox)
         try legacyOutboxData.write(to: outboxFileURL, options: .atomic)
@@ -557,22 +550,21 @@ final class AnalyticsTests: XCTestCase {
 
         await client.flushPendingEvents()
 
-        XCTAssertEqual(transport.requests.count, 1)
-        let requestBody = try XCTUnwrap(transport.requestBodies.first)
-        let requestJSON = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
-        )
-        let events = try XCTUnwrap(requestJSON["events"] as? [[String: Any]])
-        let event = try XCTUnwrap(events.first)
-        let payload = try XCTUnwrap(event["payload"] as? [String: Any])
+        #expect(transport.requests.count == 1)
+        let requestBody = try #require(transport.requestBodies.first)
+        let requestJSON = try #require(try JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+        let events = try #require(requestJSON["events"] as? [[String: Any]])
+        let event = try #require(events.first)
+        let payload = try #require(event["payload"] as? [String: Any])
 
-        XCTAssertNil(event["payload_version"])
-        XCTAssertEqual((payload["flow"] as? [String: Any])?["method"] as? String, "manual")
-        XCTAssertEqual((payload["flow"] as? [String: Any])?["stage"] as? String, "save_succeeded")
-        XCTAssertEqual((payload["host"] as? [String: Any])?["saved_host_count"] as? Int, 1)
+        #expect(event["payload_version"] == nil)
+        #expect((payload["flow"] as? [String: Any])?["method"] as? String == "manual")
+        #expect((payload["flow"] as? [String: Any])?["stage"] as? String == "save_succeeded")
+        #expect((payload["host"] as? [String: Any])?["saved_host_count"] as? Int == 1)
     }
 
-    func testAnalyticsClientConcurrentFlushesCoalesce() async throws {
+    @Test
+    func analyticsClientConcurrentFlushesCoalesce() async throws {
         let transport = AnalyticsClientTestTransport()
         let client = makeAnalyticsClient(
             transport: transport,
@@ -591,18 +583,17 @@ final class AnalyticsTests: XCTestCase {
             }
         }
 
-        XCTAssertEqual(transport.ensureDeviceIdentityCallCount, 1)
-        XCTAssertEqual(transport.requests.count, 1)
+        #expect(transport.ensureDeviceIdentityCallCount == 1)
+        #expect(transport.requests.count == 1)
     }
 
-    func testAnalyticsClientQuarantinesSingleValidationRejectedEventAndFlushesLaterEvents() async throws {
+    @Test
+    func analyticsClientQuarantinesSingleValidationRejectedEventAndFlushesLaterEvents() async throws {
         let transport = AnalyticsClientTestTransport { request, body, _ in
-            let url = try XCTUnwrap(request.url)
-            let requestBody = try XCTUnwrap(body)
-            let requestJSON = try XCTUnwrap(
-                JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
-            )
-            let events = try XCTUnwrap(requestJSON["events"] as? [[String: Any]])
+            let url = try #require(request.url)
+            let requestBody = try #require(body)
+            let requestJSON = try #require(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+            let events = try #require(requestJSON["events"] as? [[String: Any]])
             let rejectedEvent = events.first { $0["event_type"] as? String == "host_setup_flow_event" }
 
             if let rejectedEvent {
@@ -620,7 +611,7 @@ final class AnalyticsTests: XCTestCase {
             }
 
             return (
-                try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
+                try #require(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
                 Data()
             )
         }
@@ -669,22 +660,23 @@ final class AnalyticsTests: XCTestCase {
 
         await client.flushPendingEvents()
 
-        XCTAssertEqual(transport.requests.count, 3)
+        #expect(transport.requests.count == 3)
         let sentBatches = try transport.requestBodies.map { body in
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-            return try XCTUnwrap(object["events"] as? [[String: Any]])
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            return try #require(object["events"] as? [[String: Any]])
         }
-        XCTAssertEqual(sentBatches.map(\.count), [2, 1, 1])
-        XCTAssertEqual(sentBatches[1].first?["event_type"] as? String, "host_setup_flow_event")
-        XCTAssertEqual(sentBatches[2].first?["event_type"] as? String, "paywall_event")
+        #expect(sentBatches.map(\.count) == [2, 1, 1])
+        #expect(sentBatches[1].first?["event_type"] as? String == "host_setup_flow_event")
+        #expect(sentBatches[2].first?["event_type"] as? String == "paywall_event")
 
         await client.flushPendingEvents()
-        XCTAssertEqual(transport.requests.count, 3)
+        #expect(transport.requests.count == 3)
     }
 
-    func testAnalyticsClientRetryableFailureKeepsEventInOutbox() async throws {
+    @Test
+    func analyticsClientRetryableFailureKeepsEventInOutbox() async throws {
         let transport = AnalyticsClientTestTransport { request, _, transport in
-            let url = try XCTUnwrap(request.url)
+            let url = try #require(request.url)
             if transport.requests.count == 1 {
                 return try makeJSONResponse(
                     url: url,
@@ -694,7 +686,7 @@ final class AnalyticsTests: XCTestCase {
             }
 
             return (
-                try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
+                try #require(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
                 Data()
             )
         }
@@ -710,23 +702,22 @@ final class AnalyticsTests: XCTestCase {
         await client.flushPendingEvents()
         await client.flushPendingEvents()
 
-        XCTAssertEqual(transport.requests.count, 2)
+        #expect(transport.requests.count == 2)
         let eventIDs = try transport.requestBodies.map { body in
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-            let events = try XCTUnwrap(object["events"] as? [[String: Any]])
-            return try XCTUnwrap(events.first?["event_id"] as? String)
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let events = try #require(object["events"] as? [[String: Any]])
+            return try #require(events.first?["event_id"] as? String)
         }
-        XCTAssertEqual(Set(eventIDs).count, 1)
+        #expect(Set(eventIDs).count == 1)
     }
 
-    func testAnalyticsClientPersistsPartialFlushBeforeRetryableFailure() async throws {
+    @Test
+    func analyticsClientPersistsPartialFlushBeforeRetryableFailure() async throws {
         let transport = AnalyticsClientTestTransport { request, body, transport in
-            let url = try XCTUnwrap(request.url)
-            let requestBody = try XCTUnwrap(body)
-            let requestJSON = try XCTUnwrap(
-                JSONSerialization.jsonObject(with: requestBody) as? [String: Any]
-            )
-            let events = try XCTUnwrap(requestJSON["events"] as? [[String: Any]])
+            let url = try #require(request.url)
+            let requestBody = try #require(body)
+            let requestJSON = try #require(JSONSerialization.jsonObject(with: requestBody) as? [String: Any])
+            let events = try #require(requestJSON["events"] as? [[String: Any]])
             let eventTypes = events.compactMap { $0["event_type"] as? String }
 
             if let rejectedEvent = events.first(where: { $0["event_type"] as? String == "host_setup_flow_event" }) {
@@ -752,7 +743,7 @@ final class AnalyticsTests: XCTestCase {
             }
 
             return (
-                try XCTUnwrap(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
+                try #require(HTTPURLResponse(url: url, statusCode: 204, httpVersion: nil, headerFields: nil)),
                 Data()
             )
         }
@@ -811,23 +802,20 @@ final class AnalyticsTests: XCTestCase {
         await client.flushPendingEvents()
         await client.flushPendingEvents()
 
-        XCTAssertEqual(transport.requests.count, 6)
+        #expect(transport.requests.count == 6)
         let sentBatches = try transport.requestBodies.map { body in
-            let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-            let events = try XCTUnwrap(object["events"] as? [[String: Any]])
+            let object = try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
+            let events = try #require(object["events"] as? [[String: Any]])
             return events.compactMap { $0["event_type"] as? String }
         }
-        XCTAssertEqual(
-            sentBatches,
-            [
+        #expect(sentBatches == [
                 ["paywall_event", "host_setup_flow_event", "key_material_event"],
                 ["paywall_event"],
                 ["host_setup_flow_event", "key_material_event"],
                 ["host_setup_flow_event"],
                 ["key_material_event"],
                 ["key_material_event"],
-            ]
-        )
+            ])
     }
 
     private func makeAnalyticsClient(
@@ -850,11 +838,10 @@ final class AnalyticsTests: XCTestCase {
         activeFlushInterval: Duration = .seconds(15),
         sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) -> AgenTTYAnalyticsClient {
-        let bundle = Bundle(for: Self.self)
         let identity = AgenTTYAnalyticsResolvedIdentity(
             appTransactionID: "app-transaction-id",
             originalPurchaseDateEpochSeconds: 1_715_000_000,
-            bundleID: bundle.bundleIdentifier ?? "com.example.agentty.tests",
+            bundleID: "com.example.agentty.tests",
             appTransactionEnvironment: .production
         )
         let session = makeRequestHandlerURLSession(handler: transport.handle)
@@ -865,7 +852,7 @@ final class AnalyticsTests: XCTestCase {
             flavor: .main,
             urlSession: session,
             fileManager: .default,
-            bundle: bundle,
+            bundle: .main,
             appVersionOverride: "1.0.7",
             buildNumberOverride: "2",
             outboxDirectoryURL: resolvedOutboxDirectoryURL,

@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 /// Coverage for passphrase-protected `openssh-key-v1` import.
@@ -8,7 +8,8 @@ import XCTest
 /// the *same* key as its plaintext sibling, re-encrypted in place with
 /// `ssh-keygen -p -P '' -N 'correct horse'`, so a successful import must produce byte-identical
 /// stored material. The `aes256-cbc` fixture additionally passed `-Z aes256-cbc`.
-final class SSHKeyImportDecryptionTests: XCTestCase {
+@Suite
+struct SSHKeyImportDecryptionTests {
     private static let fixturePassphrase = "correct horse"
 
     // MARK: - bcrypt_pbkdf known-answer vectors
@@ -17,7 +18,8 @@ final class SSHKeyImportDecryptionTests: XCTestCase {
     /// `regress/lib/libutil/bcrypt_pbkdf/bcrypt_pbkdf_test.c` (`$OpenBSD: ...,v 1.7 2014/08/10`).
     /// Every vector was independently re-derived with the Python `bcrypt` 5.0.0 `kdf()` reference
     /// before being committed.
-    func testBcryptPBKDFMatchesOpenBSDRegressVectors() throws {
+    @Test
+    func bcryptPBKDFMatchesOpenBSDRegressVectors() throws {
         let vectors: [(rounds: Int, passwordHex: String, saltHex: String, expectedHex: String)] = [
             (
                 rounds: 4,
@@ -109,111 +111,94 @@ final class SSHKeyImportDecryptionTests: XCTestCase {
                 rounds: vector.rounds,
                 outputByteCount: vector.expectedHex.count / 2
             )
-            XCTAssertEqual(Self.hex(derived), vector.expectedHex, "OpenBSD vector \(index)")
+            #expect(Self.hex(derived) == vector.expectedHex, "OpenBSD vector \(index)")
         }
     }
 
-    func testBcryptPBKDFRejectsDegenerateParameters() {
-        XCTAssertThrowsError(
-            try BcryptPBKDF.derive(passphrase: [1], salt: [2], rounds: 0, outputByteCount: 32)
-        ) { XCTAssertEqual($0 as? BcryptPBKDFError, .invalidRounds) }
+    @Test
+    func bcryptPBKDFRejectsDegenerateParameters() {
+        #expect(throws: BcryptPBKDFError.invalidRounds) { try BcryptPBKDF.derive(passphrase: [1], salt: [2], rounds: 0, outputByteCount: 32) }
 
-        XCTAssertThrowsError(
-            try BcryptPBKDF.derive(passphrase: [], salt: [2], rounds: 4, outputByteCount: 32)
-        ) { XCTAssertEqual($0 as? BcryptPBKDFError, .invalidPassphrase) }
+        #expect(throws: BcryptPBKDFError.invalidPassphrase) { try BcryptPBKDF.derive(passphrase: [], salt: [2], rounds: 4, outputByteCount: 32) }
 
-        XCTAssertThrowsError(
-            try BcryptPBKDF.derive(passphrase: [1], salt: [], rounds: 4, outputByteCount: 32)
-        ) { XCTAssertEqual($0 as? BcryptPBKDFError, .invalidSalt) }
+        #expect(throws: BcryptPBKDFError.invalidSalt) { try BcryptPBKDF.derive(passphrase: [1], salt: [], rounds: 4, outputByteCount: 32) }
 
-        XCTAssertThrowsError(
-            try BcryptPBKDF.derive(passphrase: [1], salt: [2], rounds: 4, outputByteCount: 0)
-        ) { XCTAssertEqual($0 as? BcryptPBKDFError, .invalidOutputLength) }
+        #expect(throws: BcryptPBKDFError.invalidOutputLength) { try BcryptPBKDF.derive(passphrase: [1], salt: [2], rounds: 4, outputByteCount: 0) }
     }
 
     // MARK: - Encrypted round-trips
 
     @MainActor
-    func testEncryptedEd25519KeyImportsToSameMaterialAsPlaintextKey() throws {
+    @Test
+    func encryptedEd25519KeyImportsToSameMaterialAsPlaintextKey() throws {
         let plaintext = try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519PlaintextKey)
         let encrypted = try AgenTTYSSHPrivateKeyParser.parse(
             Self.ed25519EncryptedKey,
             passphrase: Self.fixturePassphrase
         )
 
-        XCTAssertEqual(plaintext.kind, .ed25519)
-        XCTAssertEqual(encrypted.kind, plaintext.kind)
-        XCTAssertEqual(encrypted.rawRepresentation, plaintext.rawRepresentation)
-        XCTAssertEqual(try encrypted.openSSHPublicKey(), Self.ed25519PublicKey)
+        #expect(plaintext.kind == .ed25519)
+        #expect(encrypted.kind == plaintext.kind)
+        #expect(encrypted.rawRepresentation == plaintext.rawRepresentation)
+        #expect((try encrypted.openSSHPublicKey()) == Self.ed25519PublicKey)
     }
 
     @MainActor
-    func testEncryptedECDSAP256KeyImportsToSameMaterialAsPlaintextKey() throws {
+    @Test
+    func encryptedECDSAP256KeyImportsToSameMaterialAsPlaintextKey() throws {
         let plaintext = try AgenTTYSSHPrivateKeyParser.parse(Self.ecdsaPlaintextKey)
         let encrypted = try AgenTTYSSHPrivateKeyParser.parse(
             Self.ecdsaEncryptedKey,
             passphrase: Self.fixturePassphrase
         )
 
-        XCTAssertEqual(plaintext.kind, .ecdsaP256)
-        XCTAssertEqual(encrypted.kind, plaintext.kind)
-        XCTAssertEqual(encrypted.rawRepresentation, plaintext.rawRepresentation)
-        XCTAssertEqual(try encrypted.openSSHPublicKey(), Self.ecdsaPublicKey)
+        #expect(plaintext.kind == .ecdsaP256)
+        #expect(encrypted.kind == plaintext.kind)
+        #expect(encrypted.rawRepresentation == plaintext.rawRepresentation)
+        #expect((try encrypted.openSSHPublicKey()) == Self.ecdsaPublicKey)
     }
 
     @MainActor
-    func testPlaintextKeyIgnoresASuppliedPassphrase() throws {
+    @Test
+    func plaintextKeyIgnoresASuppliedPassphrase() throws {
         let withoutPassphrase = try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519PlaintextKey)
         let withPassphrase = try AgenTTYSSHPrivateKeyParser.parse(
             Self.ed25519PlaintextKey,
             passphrase: "unused"
         )
 
-        XCTAssertEqual(withPassphrase.rawRepresentation, withoutPassphrase.rawRepresentation)
+        #expect(withPassphrase.rawRepresentation == withoutPassphrase.rawRepresentation)
     }
 
     // MARK: - Negatives
 
     @MainActor
-    func testEncryptedKeyWithoutPassphraseReportsPassphraseRequired() {
-        XCTAssertThrowsError(try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519EncryptedKey)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .privateKeyPassphraseRequired)
-        }
+    @Test
+    func encryptedKeyWithoutPassphraseReportsPassphraseRequired() {
+        #expect(throws: AgenTTYSSHKeyMaterialError.privateKeyPassphraseRequired) { try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519EncryptedKey) }
 
-        XCTAssertThrowsError(
-            try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519EncryptedKey, passphrase: "")
-        ) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .privateKeyPassphraseRequired)
-        }
+        #expect(throws: AgenTTYSSHKeyMaterialError.privateKeyPassphraseRequired) { try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519EncryptedKey, passphrase: "") }
     }
 
     @MainActor
-    func testEncryptedKeyWithWrongPassphraseReportsIncorrectPassphrase() {
-        XCTAssertThrowsError(
-            try AgenTTYSSHPrivateKeyParser.parse(Self.ecdsaEncryptedKey, passphrase: "wrong horse")
-        ) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .privateKeyPassphraseIncorrect)
-        }
+    @Test
+    func encryptedKeyWithWrongPassphraseReportsIncorrectPassphrase() {
+        #expect(throws: AgenTTYSSHKeyMaterialError.privateKeyPassphraseIncorrect) { try AgenTTYSSHPrivateKeyParser.parse(Self.ecdsaEncryptedKey, passphrase: "wrong horse") }
     }
 
     @MainActor
-    func testAES256CBCEncryptedKeyReportsUnsupportedCipher() {
+    @Test
+    func aes256CBCEncryptedKeyReportsUnsupportedCipher() {
         // The cipher is rejected before a passphrase is demanded, so both callers see the
         // actionable re-export message rather than a passphrase prompt.
         for passphrase in [nil, Self.fixturePassphrase] as [String?] {
-            XCTAssertThrowsError(
-                try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519CBCEncryptedKey, passphrase: passphrase)
-            ) { error in
-                XCTAssertEqual(
-                    error as? AgenTTYSSHKeyMaterialError,
-                    .unsupportedPrivateKeyCipher("aes256-cbc")
-                )
-            }
+            #expect(throws: AgenTTYSSHKeyMaterialError.unsupportedPrivateKeyCipher("aes256-cbc")) { try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519CBCEncryptedKey, passphrase: passphrase) }
         }
     }
 
     @MainActor
-    func testLegacyEncryptedPEMRemainsRejected() {
+    @Test
+    func legacyEncryptedPEMRemainsRejected() {
         let legacyPEM = [
             "-----BEGIN RSA " + "PRIVATE KEY-----",
             "Proc-Type: 4,ENCRYPTED",
@@ -223,9 +208,7 @@ final class SSHKeyImportDecryptionTests: XCTestCase {
             "-----END RSA " + "PRIVATE KEY-----",
         ].joined(separator: "\n")
 
-        XCTAssertThrowsError(try AgenTTYSSHPrivateKeyParser.parse(legacyPEM)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .encryptedPrivateKeyNotSupported)
-        }
+        #expect(throws: AgenTTYSSHKeyMaterialError.encryptedPrivateKeyNotSupported) { try AgenTTYSSHPrivateKeyParser.parse(legacyPEM) }
     }
 
     // MARK: - Helpers
