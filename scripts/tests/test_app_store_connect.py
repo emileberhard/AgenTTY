@@ -1,5 +1,6 @@
 import importlib.machinery
 import importlib.util
+import io
 import json
 import tempfile
 import unittest
@@ -10,6 +11,12 @@ loader = importlib.machinery.SourceFileLoader("app_store_connect", str(Path(__fi
 spec = importlib.util.spec_from_loader(loader.name, loader)
 asc = importlib.util.module_from_spec(spec)
 loader.exec_module(asc)
+
+
+def setUpModule():
+    quiet = patch("sys.stderr", new_callable=io.StringIO)
+    quiet.start()
+    unittest.addModuleCleanup(quiet.stop)
 
 
 class ScreenshotProcessingTests(unittest.TestCase):
