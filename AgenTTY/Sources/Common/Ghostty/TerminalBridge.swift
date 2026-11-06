@@ -5,9 +5,7 @@ import NIOSSH
 import OSLog
 import Synchronization
 import UserNotifications
-#if os(iOS)
 import UIKit
-#endif
 
 @MainActor
 enum TerminalShellSwipeDirection {
@@ -199,9 +197,7 @@ final class TerminalBridge {
     private var notificationsProvisionTask: Task<Void, Never>?
     private var notificationsRefreshTask: Task<Void, Never>?
     private var relayConnectorMaintenanceTask: Task<Void, Never>?
-#if os(iOS)
     private var backgroundWarmHoldTask: UIBackgroundTaskIdentifier = .invalid
-#endif
     private var reconnectAttempt = 0
     private var reconnectRetryDeadline: Date?
     private let reconnectScreen = TerminalReconnectScreenPresenter()
@@ -370,9 +366,7 @@ final class TerminalBridge {
         relayConnectorMaintenanceTask?.cancel()
         relayConnectorMaintenanceTask = nil
         endConnectionDiagnostics(outcome: "bridge_deinit")
-#if os(iOS)
         endBackgroundWarmHoldIfNeeded(reason: "bridge_deinit")
-#endif
         if let apnsTokenDidChangeObserver {
             NotificationCenter.default.removeObserver(apnsTokenDidChangeObserver)
             self.apnsTokenDidChangeObserver = nil
@@ -1429,7 +1423,6 @@ final class TerminalBridge {
     }
 
     private func beginBackgroundWarmHoldIfNeeded(reason: String) {
-#if os(iOS)
         guard backgroundWarmHoldTask == .invalid else {
             EsmaLog.terminal.info(
                 "background warm hold already active reason=\(reason, privacy: .public) remaining=\(UIApplication.shared.backgroundTimeRemaining, privacy: .public)s"
@@ -1451,13 +1444,9 @@ final class TerminalBridge {
         EsmaLog.terminal.info(
             "began background warm hold reason=\(reason, privacy: .public) remaining=\(UIApplication.shared.backgroundTimeRemaining, privacy: .public)s"
         )
-#else
-        _ = reason
-#endif
     }
 
     private func endBackgroundWarmHoldIfNeeded(reason: String) {
-#if os(iOS)
         guard backgroundWarmHoldTask != .invalid else { return }
         let taskID = backgroundWarmHoldTask
         backgroundWarmHoldTask = .invalid
@@ -1465,19 +1454,14 @@ final class TerminalBridge {
         EsmaLog.terminal.info(
             "ended background warm hold reason=\(reason, privacy: .public)"
         )
-#else
-        _ = reason
-#endif
     }
 
     private func handleBackgroundWarmHoldExpired() {
-#if os(iOS)
         guard backgroundWarmHoldTask != .invalid else { return }
         EsmaLog.terminal.info(
             "background warm hold expired; leaving terminal connection state unchanged"
         )
         endBackgroundWarmHoldIfNeeded(reason: "expiration")
-#endif
     }
 
     private func setHostConnectionPhase(_ phase: AgenTTYHostConnectionPhase) {

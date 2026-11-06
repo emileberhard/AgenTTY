@@ -1,7 +1,5 @@
 import Foundation
-#if canImport(UIKit)
 import UIKit
-#endif
 
 private nonisolated struct AgenTTYAnalyticsQueuedEvent: Codable, Equatable, Sendable {
     let eventID: String
@@ -997,16 +995,11 @@ actor AgenTTYAnalyticsClient {
 
     @MainActor
     private static func currentSystemVersion() -> String {
-        #if canImport(UIKit)
         UIDevice.current.systemVersion
-        #else
-        ProcessInfo.processInfo.operatingSystemVersionString
-        #endif
     }
 
     @MainActor
     private static func currentDeviceFamily() -> AgenTTYAnalyticsDeviceFamily {
-        #if canImport(UIKit)
         switch UIDevice.current.userInterfaceIdiom {
         case .phone:
             .phone
@@ -1023,9 +1016,6 @@ actor AgenTTYAnalyticsClient {
         default:
             .unspecified
         }
-        #else
-        .unspecified
-        #endif
     }
 
     @MainActor

@@ -1,10 +1,6 @@
 import Foundation
 import GhosttyKit
-#if os(iOS)
 import UIKit
-#elseif os(macOS)
-import AppKit
-#endif
 
 enum GhosttyRuntimeCallbacks {
     private enum URLPayloadDecodeError: Error {
@@ -142,7 +138,6 @@ enum GhosttyRuntimeCallbacks {
             return
         }
 
-        #if os(iOS)
         EsmaLog.ghostty.info("ghostty action open_url dispatch scheme=\(scheme, privacy: .public) kind=\(actionKind, privacy: .public)")
         UIApplication.shared.open(parsedURL, options: [:]) { didOpen in
             if didOpen {
@@ -151,14 +146,6 @@ enum GhosttyRuntimeCallbacks {
                 EsmaLog.ghostty.error("ghostty action open_url failed scheme=\(scheme, privacy: .public)")
             }
         }
-        #elseif os(macOS)
-        let didOpen = NSWorkspace.shared.open(parsedURL)
-        if didOpen {
-            EsmaLog.ghostty.info("ghostty action open_url succeeded scheme=\(scheme, privacy: .public)")
-        } else {
-            EsmaLog.ghostty.error("ghostty action open_url failed scheme=\(scheme, privacy: .public)")
-        }
-        #endif
     }
 
     nonisolated private static func openURLActionKindDescription(_ kind: ghostty_action_open_url_kind_e) -> String {

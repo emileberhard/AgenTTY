@@ -1,11 +1,7 @@
 import Foundation
 import GhosttyKit
 
-#if os(macOS)
-import AppKit
-#elseif os(iOS)
 import UIKit
-#endif
 
 @safe
 @MainActor
@@ -17,10 +13,8 @@ protocol GhosttySurfaceProvider: AnyObject {
 @MainActor
 final class GhosttyRuntime {
     private static var didInitGhostty = false
-    #if os(iOS)
     private static var retainedInitArgv: [UnsafeMutablePointer<CChar>?] = unsafe []
     private static let nativeProbeModeKey = "AGENTTY_NATIVE_PROBE_MODE"
-    #endif
 
     private var config: ghostty_config_t!
     private var app: ghostty_app_t!
@@ -32,20 +26,17 @@ final class GhosttyRuntime {
     private var wakeupCount = 0
     private var discoveredThemeFileDataByName: [String: DiscoveredThemeFileData] = [:]
 
-    #if os(iOS)
     private(set) var terminalBackgroundUIColor = UIColor(
         red: 40 / 255.0,
         green: 44 / 255.0,
         blue: 52 / 255.0,
         alpha: 1
     )
-    #endif
 
     init() {
         EsmaLog.ghostty.info("runtime init start")
         GhosttyRuntimeEnvironment.configureCoreLoggingEnvironment()
         if !Self.didInitGhostty {
-            #if os(iOS)
             Self.configureIOSEmbeddedEnvironment()
             AgenTTYGhosttyConfig.logBundledReferenceDriftIfNeeded()
             if unsafe Self.retainedInitArgv.isEmpty {
@@ -62,11 +53,6 @@ final class GhosttyRuntime {
             guard initResult == GHOSTTY_SUCCESS else {
                 fatalError("ghostty_init failed")
             }
-            #else
-            guard ghostty_init(UInt(CommandLine.argc), CommandLine.unsafeArgv) == GHOSTTY_SUCCESS else {
-                fatalError("ghostty_init failed")
-            }
-            #endif
             Self.didInitGhostty = true
             EsmaLog.ghostty.info("ghostty_init ok")
         }
@@ -75,17 +61,12 @@ final class GhosttyRuntime {
             fatalError("ghostty_config_new failed")
         }
 
-        #if os(macOS)
-        ghostty_config_load_default_files(config)
-        #endif
         unsafe ghostty_config_load_cli_args(config)
         unsafe ghostty_config_finalize(config)
         unsafe self.config = config
 
-        #if os(iOS)
         unsafe runNativeProbeIfEnabled(config)
         unsafe applyResolvedIOSThemeColors(from: config)
-        #endif
 
         let diagnosticsCount = unsafe ghostty_config_diagnostics_count(config)
         EsmaLog.ghostty.debug("config finalized diagnostics=\(diagnosticsCount)")
@@ -108,22 +89,6 @@ final class GhosttyRuntime {
         unsafe self.app = app
         EsmaLog.ghostty.info("app created")
 
-        #if os(macOS)
-        ghostty_app_set_focus(app, NSApp.isActive)
-
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appDidBecomeActive),
-            name: NSApplication.didBecomeActiveNotification,
-            object: nil
-        )
-        NotificationCenter.default.addObserver(
-            self,
-            selector: #selector(appDidResignActive),
-            name: NSApplication.didResignActiveNotification,
-            object: nil
-        )
-        #elseif os(iOS)
         unsafe ghostty_app_set_focus(app, true)
 
         NotificationCenter.default.addObserver(
@@ -138,7 +103,6 @@ final class GhosttyRuntime {
             name: UIApplication.willResignActiveNotification,
             object: nil
         )
-        #endif
     }
 
     isolated deinit {
@@ -153,13 +117,6 @@ final class GhosttyRuntime {
         let viewObject = view as AnyObject
         unsafe cfg.userdata = Unmanaged.passUnretained(viewObject).toOpaque()
 
-        #if os(macOS)
-        cfg.platform_tag = GHOSTTY_PLATFORM_MACOS
-        cfg.platform = ghostty_platform_u(macos: ghostty_platform_macos_s(
-            nsview: Unmanaged.passUnretained(viewObject).toOpaque()
-        ))
-        cfg.scale_factor = Double(NSScreen.main?.backingScaleFactor ?? 2.0)
-        #elseif os(iOS)
         unsafe cfg.platform_tag = GHOSTTY_PLATFORM_IOS
         unsafe cfg.platform = ghostty_platform_u(ios: ghostty_platform_ios_s(
             uiview: Unmanaged.passUnretained(viewObject).toOpaque()
@@ -168,7 +125,6 @@ final class GhosttyRuntime {
             ?? (view as? UIView)?.traitCollection.displayScale
             ?? 2.0
         unsafe cfg.scale_factor = Double(viewScale)
-        #endif
 
         unsafe cfg.font_size = Float(TerminalFontSizeSetting.persistedValue())
 
@@ -217,7 +173,6 @@ final class GhosttyRuntime {
         unsafe ghostty_app_set_focus(app, focused)
     }
 
-    #if os(iOS)
     func cachedDiscoveredThemeFileData(named themeName: String) -> DiscoveredThemeFileData? {
         discoveredThemeFileDataByName[themeName]
     }
@@ -229,7 +184,6 @@ final class GhosttyRuntime {
     func setTerminalBackgroundColor(_ color: UIColor) {
         terminalBackgroundUIColor = color
     }
-    #endif
 
     func handleWakeupFromRuntimeCallback() {
         wakeupCount += 1
@@ -253,7 +207,6 @@ final class GhosttyRuntime {
         EsmaLog.ghostty.info("app inactive: paused ghostty rendering")
     }
 
-    #if os(iOS)
     private static var nativeProbeModeEnabled: Bool {
         let rawValue: String
         if let value = unsafe getenv(nativeProbeModeKey) {
@@ -487,5 +440,4 @@ final class GhosttyRuntime {
         EsmaLog.ghostty.info("ghostty init cli args: \(joined, privacy: .public)")
     }
 
-    #endif
 }
