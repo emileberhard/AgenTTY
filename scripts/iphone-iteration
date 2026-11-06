@@ -1,0 +1,122 @@
+#!/usr/bin/env bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+usage='Usage: iphone-iteration [--flavor dev|exp|main] [--build-only | --app-path APP] [--device UDID] [--delivery auto|direct|mdm]'
+flavor=dev
+build_only=false
+app_path=""
+device=""
+delivery=auto
+while (($#)); do
+    case "$1" in
+        --flavor) flavor="${2:?flavor required}"; shift 2 ;;
+        --build-only) build_only=true; shift ;;
+        --app-path) app_path="${2:?app path required}"; shift 2 ;;
+        --device) device="${2-}"; shift 2 ;;
+        --delivery) delivery="${2:?delivery required}"; shift 2 ;;
+        -h|--help) echo "$usage"; exit 0 ;;
+        *) echo "Unknown argument: $1" >&2; echo "$usage" >&2; exit 2 ;;
+    esac
+done
+case "$flavor" in
+    dev) scheme=AgenTTY-iOS-Dev ;;
+    exp) scheme=AgenTTY-iOS-Exp ;;
+    main) scheme=AgenTTY-iOS ;;
+    *) echo "Unsupported flavor: $flavor" >&2; exit 2 ;;
+esac
+case "$delivery" in auto|direct|mdm) ;; *) echo "Unsupported delivery: $delivery" >&2; exit 2 ;; esac
+[[ $flavor != main || $delivery == direct ]] || { echo 'The main app installs only directly: pass --delivery direct.' >&2; exit 2; }
+[[ $build_only == false || -z $app_path ]] || { echo '--build-only cannot use --app-path' >&2; exit 2; }
+
+devops="$HOME/configs/skills/apple-devops/scripts"
+installer="$HOME/configs/skills/swift-development/scripts/ios-install-device"
+common_root="$(cd "$(git rev-parse --path-format=absolute --git-common-dir)/.." && pwd)"
+scripts/prepare-local-inputs
+scripts/check-build-identity
+base_bundle="$(sed -n 's/^AGENTTY_BUNDLE_ID *= *//p' Config/Local.xcconfig | tail -1)"
+bundle="$base_bundle$([[ $flavor == main ]] || echo ".$flavor")"
+
+if [[ -z $app_path ]]; then
+    mkdir -p .local
+    build_lock=.local/iphone-build.lock
+    mkdir "$build_lock" || { echo "Another iPhone build owns $PWD/$build_lock; inspect it before removing a stale lock." >&2; exit 1; }
+    trap 'rmdir "$build_lock"' EXIT
+    "$devops/ensure-signing-keychain"
+    if [[ $flavor == dev ]]; then
+        uv run "$devops/asc_api.py" ensure-profile --name "AgenTTY iOS Dev Development" \
+            --type IOS_APP_DEVELOPMENT --bundle-id "$bundle"
+        uv run "$devops/asc_api.py" ensure-profile --name "AgenTTY Notification Service Dev Development" \
+            --type IOS_APP_DEVELOPMENT --bundle-id "$bundle.NotificationService"
+    fi
+    scripts/ghostty-xcframework ensure
+    if [[ $flavor == main ]]; then
+        version="$(scripts/resolve-release-marketing-version)"
+        settings=(MARKETING_VERSION="$version" 'OTHER_SWIFT_FLAGS=$(inherited) -D AGENTTY_LOCAL_MAIN_UNLOCK')
+        output="$common_root/.local/iphone-builds/$bundle/$(uuidgen)"
+    else
+        version=0.0.0
+        build_number="$("$devops/ios-next-build-number" --bundle-id "$bundle")"
+        settings=(MARKETING_VERSION="$version" CURRENT_PROJECT_VERSION="$build_number")
+        output="$common_root/.local/iphone-builds/$bundle/$build_number"
+    fi
+    mkdir -p "$(dirname "$output")"
+    build_json="$("$installer" --project AgenTTY.xcodeproj --scheme "$scheme" --allow-provisioning-updates \
+        --build-only --json --artifact-output "$output" \
+        -- -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipMacroValidation \
+        DEBUG_INFORMATION_FORMAT=dwarf-with-dsym "${settings[@]}")"
+    app_path="$(python3 -c 'import json,sys; v=json.load(sys.stdin); assert v["status"] == "built"; print(v["appPath"])' <<< "$build_json")"
+    python3 - "$app_path" "$bundle" "$version" "${build_number-}" "$build_json" <<'PY'
+import json, pathlib, plistlib, subprocess, sys
+app, bundle, version, build, built = pathlib.Path(sys.argv[1]), *sys.argv[2:]
+for info in [app / 'Info.plist', *app.glob('PlugIns/*.appex/Info.plist')]:
+    value = plistlib.loads(info.read_bytes())
+    if not value['CFBundleIdentifier'].startswith(bundle) or value['CFBundleShortVersionString'] != version \
+            or build and value['CFBundleVersion'] != build:
+        raise SystemExit(f'Unexpected build identity in {info}')
+receipt = json.loads(built) | {'schemaVersion': 1, 'sourceCommit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+                               'sourceDirty': bool(subprocess.check_output(['git', 'status', '--porcelain']))}
+(app.parent / 'build.json').write_text(json.dumps(receipt, indent=2) + '\n')
+print(json.dumps(receipt))
+PY
+fi
+
+[[ $build_only == false ]] || exit 0
+expected="$(python3 - "$app_path" "$bundle" <<'PY'
+import json, pathlib, sys
+app = pathlib.Path(sys.argv[1]).resolve()
+value = json.loads((app.parent / 'artifact.json').read_text())
+if pathlib.Path(value['appPath']).resolve() != app or value['bundleIdentifier'] != sys.argv[2]:
+    raise SystemExit(f'Expected a retained {sys.argv[2]} checkpoint')
+print(value['appSHA256'])
+PY
+)"
+device_type=""
+if [[ -n $device ]]; then
+    devices="$(mktemp)"
+    xcrun devicectl list devices --timeout 5 --json-output "$devices" --quiet >/dev/null
+    device_type="$(python3 - "$devices" "$device" <<'PY'
+import json, sys
+rows = json.load(open(sys.argv[1]))['result']['devices']
+print(next((row['hardwareProperties'].get('deviceType', '') for row in rows
+            if str(row['hardwareProperties'].get('udid', '')).lower() == sys.argv[2].lower()), ''))
+PY
+)"
+    rm -f "$devices"
+fi
+if [[ $device_type == iPad ]]; then
+    [[ $delivery != mdm ]] || { echo 'Managed delivery covers only the enrolled iPhone.' >&2; exit 2; }
+    "$installer" --app-path "$app_path" --device "$device" --device-type ipad --launch
+else
+    mkdir -p "$common_root/.local/iphone-deliveries"
+    device_args=()
+    [[ -z $device ]] || device_args=(--device "$device")
+    "$devops/ios-deliver-app" --app-path "$app_path" ${device_args[@]+"${device_args[@]}"} \
+        --expected-app-sha256 "$expected" --delivery "$delivery" --launch \
+        --prepare-mdm "$PWD/scripts/prepare-iphone-mdm" \
+        --receipt "$common_root/.local/iphone-deliveries/$(uuidgen).json"
+fi
+if [[ $flavor == main ]]; then
+    SENTRY_ORG="${SENTRY_ORG:-${AGENTTY_SENTRY_ORG:-}}" SENTRY_PROJECT="${SENTRY_PROJECT:-agentty}" \
+        sentry-cli debug-files upload --include-sources "$(dirname "$app_path")/symbols" \
+        || echo 'warning: the Sentry dSYM upload failed, so this main build may symbolicate incompletely.' >&2
+fi

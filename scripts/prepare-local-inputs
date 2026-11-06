@@ -3,12 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+main_checkout="$(git rev-parse --path-format=absolute --git-common-dir)/.."
 secrets="AgenTTY/Resources/AgenTTYLocalSecrets.json"
-main_secrets="$(git rev-parse --path-format=absolute --git-common-dir)/../$secrets"
-if [[ ! -e "$secrets" && -s "$main_secrets" ]]; then
-    install -m 600 "$main_secrets" "$secrets"
-    echo "Copied local secrets from the main checkout"
-fi
+for input in Config/Local.xcconfig "$secrets"; do
+    if [[ ! -e "$input" && -s "$main_checkout/$input" ]]; then
+        install -m 600 "$main_checkout/$input" "$input"
+        echo "Copied $input from the main checkout"
+    fi
+done
 
 [[ -e "$secrets" ]] || (umask 077 && echo '{}' > "$secrets")
 

@@ -58,7 +58,9 @@ nonisolated enum AgenTTYBuildFlavor: String, Sendable {
         case .main:
             .production
         case .dev, .exp:
-            .development
+            Bundle.main.object(forInfoDictionaryKey: "AgenTTYPushEnvironment") as? String == "production"
+                ? .production
+                : .development
         }
     }
 
