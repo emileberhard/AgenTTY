@@ -1,7 +1,5 @@
 import Foundation
-#if os(iOS)
 import UIKit
-#endif
 
 /// What the in-terminal reconnect screen reports while AgenTTY is automatically
 /// working its way back to the host. Manual-recovery and permanently-blocked
@@ -412,10 +410,6 @@ final class TerminalReconnectScreenPresenter {
     }
 
     static var systemReduceMotionEnabled: Bool {
-#if os(iOS)
         unsafe UIAccessibility.isReduceMotionEnabled
-#else
-        false
-#endif
     }
 }

@@ -1,4 +1,3 @@
-#if os(iOS)
 import Foundation
 import GhosttyKit
 import UIKit
@@ -306,4 +305,3 @@ extension GhosttyRuntime {
     }
 
 }
-#endif

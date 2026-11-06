@@ -1,11 +1,7 @@
 import Foundation
 import GhosttyKit
 
-#if os(macOS)
-import AppKit
-#elseif os(iOS)
 import UIKit
-#endif
 
 enum GhosttyRuntimeClipboard {
     nonisolated static func read(
@@ -29,17 +25,7 @@ enum GhosttyRuntimeClipboard {
             let resolvedState = unsafe stateAddress.flatMap(UnsafeMutableRawPointer.init(bitPattern:))
             guard let surface = unsafe resolveSurface(from: view) else { return }
 
-            #if os(macOS)
-            let text: String
-            switch requestedLocation {
-            case GHOSTTY_CLIPBOARD_SELECTION:
-                text = NSPasteboard(name: .find).string(forType: .string) ?? ""
-            default:
-                text = NSPasteboard.general.string(forType: .string) ?? ""
-            }
-            #elseif os(iOS)
             let text = UIPasteboard.general.string ?? ""
-            #endif
 
             // Swift 6.2 requires the outer acknowledgement; remove this split when releases use Swift 6.4+.
             #if compiler(<6.4)
@@ -104,12 +90,7 @@ enum GhosttyRuntimeClipboard {
 
         guard let text = unsafe extractPlainText(from: content, count: len) else { return }
         Task { @MainActor in
-            #if os(macOS)
-            NSPasteboard.general.clearContents()
-            NSPasteboard.general.setString(text, forType: .string)
-            #elseif os(iOS)
             UIPasteboard.general.string = text
-            #endif
         }
     }
 

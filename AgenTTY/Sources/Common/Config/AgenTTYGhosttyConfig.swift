@@ -107,7 +107,6 @@ enum AgenTTYGhosttyConfig {
         )
     }()
 
-    #if os(iOS)
     @MainActor
     private static var didCheckBundledReferenceVersion = false
 
@@ -169,5 +168,4 @@ enum AgenTTYGhosttyConfig {
         }
         return String(hashPrefix)
     }
-    #endif
 }
