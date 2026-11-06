@@ -71,7 +71,9 @@ commit a push to `main` ended on, after its CI passed.
    later jobs select that exact build.
 7. `testflight-notes` sets What to Test from the tag message. The workflow
    never distributes to beta groups or submits for beta review.
-8. `app-store` captures fresh screenshots (`AppStore/capture app-store`) and
+8. `screenshots` needs only `admit` and holds no credentials: alongside
+   `archive`, it captures the slides (`AppStore/capture app-store`) and
+   uploads them as an artifact. `app-store`, on Linux, downloads them and
    prepares the App Store version with manual release: it applies
    `AppStore/metadata/<locale>/*.txt` (description, keywords, promotional text,
    support URL, and the app's name, subtitle and privacy URL), sets What's New
@@ -176,16 +178,18 @@ saves the mirrored manifest-referenced files.
 applies it. Differences from the store are the only writes, and an app info that
 is not editable keeps its name, subtitle and privacy URL.
 
-The `app-store` job captures the screenshots fresh with
+The `screenshots` job captures the screenshots fresh with
 `AppStore/capture app-store`: on new simulators deleted afterwards, the app
 renders the dark `terminal`, `themes`, `hosts`, `switch-hosts` and `keys`
 `CaptureScreen`s from its Debug fixture, and `AppStore/compose.swift` frames
 them with the marketing copy into the `IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE`
 (iPhone 18 Pro Max) and `IPAD_13_PROFILE` placement groups. The composer fails
-on a wrong size, a transparent pixel or two identical slides. The release
-replaces only the captured placement groups. `just screenshots` runs the same
-capture into `.local/screenshots`; look at the slides before tagging a change
-to them.
+on a wrong size, a transparent pixel or two identical slides. Screens that
+need a tap, the open host menu and the iPhone themes sheet's large detent, are
+tapped by accessibility label with AXe, which the driver downloads at a pinned
+version and checksum into `.local/axe`. The release replaces only the captured
+placement groups. `just screenshots` runs the same capture into
+`.local/screenshots`; look at the slides before tagging a change to them.
 
 ## Verification
 

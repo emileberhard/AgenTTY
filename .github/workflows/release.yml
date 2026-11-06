@@ -364,15 +364,10 @@ jobs:
           gh api "repos/$GITHUB_REPOSITORY/git/tags/$tag" --jq .message > "$RUNNER_TEMP/notes.md"
           scripts/app-store-connect what-to-test "$VERSION" "$BUILD_NUMBER" "$RUNNER_TEMP/notes.md"
 
-  app-store:
-    needs: testflight
+  screenshots:
+    needs: admit
     runs-on: xcode-27
-    environment: testflight
-    concurrency: app-store
     timeout-minutes: 60
-    env:
-      VERSION: ${{ github.ref_name }}
-      BUILD_NUMBER: ${{ needs.testflight.outputs.build }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -382,6 +377,33 @@ jobs:
 
       - name: Capture the screenshots
         run: AppStore/capture app-store
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-store-screenshots
+          path: .local/screenshots
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
+
+  app-store:
+    needs: [testflight, screenshots]
+    runs-on: ubuntu-24.04
+    environment: testflight
+    concurrency: app-store
+    timeout-minutes: 45
+    env:
+      VERSION: ${{ github.ref_name }}
+      BUILD_NUMBER: ${{ needs.testflight.outputs.build }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app-store-screenshots
+          path: .local/screenshots
 
       - name: Prepare the App Store version
         env:

@@ -137,11 +137,12 @@ number and `archive` builds unsigned and ad-hoc signs embedded frameworks
 deepest first, then app bundles. `testflight` waits until the backend's
 `/healthz` reports the tag or newer, exports once through Xcode cloud signing,
 checks that export's entitlements and framework signatures, and uploads exactly
-it with `altool` behind a step-history fence. `testflight-notes` sets What to
-Test, `app-store` captures fresh screenshots, applies `AppStore/` to the
-prepared version and submits it for App Review, `github-release` publishes the
-tag message verbatim with the runtime assets, and `npm` publishes the pairing
-package with OIDC and provenance. App Store release stays manual. Rerun failed
+it with `altool` behind a step-history fence. `screenshots` captures the
+slides without credentials alongside `archive`. `testflight-notes` sets What to
+Test, `app-store` applies `AppStore/` and those slides to the prepared version
+and submits it for App Review, `github-release` publishes the tag message
+verbatim with the runtime assets, and `npm` publishes the pairing package with
+OIDC and provenance. App Store release stays manual. Rerun failed
 jobs from the tag's own run while it is still the newest version; a fix ships
 as the next patch. See the [CI guide](docs/agent-guides/ci-pipeline.md).
 
