@@ -10,7 +10,7 @@ AgenTTY → checksum-pinned GitHub release → Vendor/GhosttyKit.xcframework
                         emileberhard/ghostty + mitchellh/libxev
 ```
 
-`just _ensure-xcframework` downloads the release pinned in
+`scripts/ghostty-xcframework ensure` downloads the release pinned in
 `scripts/ghostty-artifact.json` and verifies its archive SHA-256 before extracting
 only the allowlisted files into checkout-local ignored storage. Every installed
 file is checked against its pinned SHA-256 on reuse. Concurrent installers share
@@ -143,10 +143,10 @@ Falls back to `GhosttyResolvedTheme.fallback` (dark colors) if background/foregr
 ## Vendor Rebuild
 
 ```bash
-just ghostty-rebuild-xcframework
+just ghostty-rebuild
 ```
 
-This runs three steps: `_setup` (clone + pin repos), `_build-xcframework` (Zig build), `_install-xcframework` (copy + module map fix).
+This runs three steps: `_ghostty-setup` (clone + pin repos), `_ghostty-build` (Zig build), `_ghostty-install` (copy + module map fix).
 
 The rebuild uses patched Zig 0.15.2 with `-Dstrip=false -Dsentry=false
 -Di18n=false`, normalizes archive indexes with Apple `ranlib`, and links the
@@ -160,8 +160,8 @@ separate sentry-cocoa integration.
 To prepare an updated immutable release after rebuilding:
 
 ```bash
-just ghostty-package-xcframework /tmp/GhosttyKit.xcframework.zip https://github.com/emileberhard/ghostty/releases/download/1.0.0/GhosttyKit.xcframework.zip
-just ghostty-validate-release-xcframework
+just ghostty-package /tmp/GhosttyKit.xcframework.zip https://github.com/emileberhard/ghostty/releases/download/1.0.0/GhosttyKit.xcframework.zip
+just ghostty-validate-release
 ```
 
 Use the next release version for a changed artifact. Packaging updates the

@@ -46,23 +46,24 @@ from App Store builds and from this repository.
 
 ## Development
 
-Use an Apple Silicon Mac with Xcode 27.1 and Just. Rust helpers use `rust-toolchain.toml`;
-the pairing CLI uses Bun 1.3.10. Dependencies are pinned in `AgenTTY.xcodeproj` and its
+Use an Apple Silicon Mac with the Xcode that `.xcode-version` names and Just.
+Rust helpers use `rust-toolchain.toml`; the pairing CLI uses Bun 1.4.3. Dependencies are pinned in `AgenTTY.xcodeproj` and its
 `Package.resolved`, and the package lockfiles.
 
 ```bash
-just ios-check             # unsigned simulator app build; no private configuration
-just ios-test              # maintained iOS unit tests on the configured simulator
-just backend-test          # relay tests
-just notify-helper-test
-just host-connector-test
-just host-shell-test
-cd tools/agentty-host && bun install --frozen-lockfile && bun test
+just build                # unsigned simulator app build; no private configuration
+just test                 # iOS unit tests on the newest installed simulator
+just ui-previews          # renders the app's screens into .local/ui-previews/sheet.jpg
+just test-backend         # relay tests
+just test-notify-helper
+just test-host-connector
+just test-host-shell
+cd tools/agentty-host && bun install --frozen-lockfile && bun run test
 ```
 
 The ordinary build downloads and verifies the reviewed GhosttyKit release
 asset. Explicit vendor rebuilds use the pinned source and toolchain in the
-Justfile. The macOS app target is an unvalidated scaffold.
+Justfile.
 
 [AGENTS.md](AGENTS.md) records ownership and invariants;
 [docs/architecture.md](docs/architecture.md) explains the boundaries.

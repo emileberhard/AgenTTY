@@ -5,12 +5,13 @@
 ## Local Development
 
 ```bash
-just backend-dev
-just backend-test
-just backend-build
+just run-backend
+just test-backend
+just build-backend
 ```
 
-The local runner lives at `services/backend/scripts/run-backend`. Production deployment is operator-owned and intentionally not tracked in the public tree.
+`services/backend/scripts/run-backend` runs the backend with `cargo run` and the
+environment its caller provides.
 
 ## Deployment Contract
 
@@ -20,29 +21,29 @@ A production deployment needs:
 - backend storage path for SQLite
 - any companion-client bearer tokens
 - an llm-router origin and inference key for main-flavor MAI-Transcribe-2 dictation; the router owns the Azure credential and routing
-- a separate static artifact host for host-runtime payloads
+- a static artifact host for the latest host-runtime channel
 
-Repo-tracked deploy entrypoints are intentionally generic:
-- `just backend-reload-local` requires `AGENTTY_BACKEND_DEPLOY_SCRIPT`
-- `just backend-deploy-local` requires `AGENTTY_BACKEND_DEPLOY_SCRIPT`
-- `just host-runtime-deploy-local` requires `AGENTTY_HOST_RUNTIME_DEPLOY_SCRIPT`
-
-Those env vars should point at ignored, operator-owned scripts.
+The tag release's `backend` job deploys the tagged version to the Linux host
+before any client ships; `services/backend/deploy` holds the image, the forced
+SSH gateway, the deploy script, backups and systemd units, and
+[AGENTS.md](../AGENTS.md#backend-deployment-and-host-moves) records how to move
+hosts.
 
 ## Host Runtime
 
 AgenTTY no longer bundles host runtime binaries in the app. The app fetches a manifest and platform-specific payload from the configured artifact host, verifies SHA-256, caches the bytes locally, and uploads them to the SSH host under `~/.agentty/`.
 
-Publish commands:
+Release runtimes are built by the tag workflow and attached to its GitHub
+release. The Dev/Exp latest channel is published from a Mac:
+
 ```bash
-just notify-helper-rebuild
-just host-connector-rebuild
-just tmux-runtime-rebuild
-just host-runtime-publish-latest
-just host-runtime-publish-release <version>
+just build-notify-helper
+just build-host-connector
+just build-tmux-runtime
+just publish-host-runtime
 ```
 
-`.local/host-runtime/**` is generated and ignored. Before publishing, `scripts/publish-host-runtime-artifacts` checks that notifier and host-connector artifacts match their source stamps and that tmux/terminfo payloads exist for every supported target. Published manifests also record notifier/connector source fingerprints, so an immutable semver runtime can be reused only by the exact locked source and pinned build-tool contract that produced it; changed helper source requires a new patch version.
+`.local/host-runtime/**` is generated and ignored. Before publishing, `scripts/publish-host-runtime-artifacts` checks that notifier and host-connector artifacts match their source stamps and that tmux/terminfo payloads exist for every supported target. Published manifests also record notifier/connector source fingerprints. The [CI guide](agent-guides/ci-pipeline.md#host-runtime) covers publication and retention.
 
 ## Connector Liveness
 
@@ -164,13 +165,30 @@ Analytics authenticates before validating or writing durable diagnostics. Failur
 
 The internal RemoteCoder and PingBooks APNs contracts, topics and payloads remain caller-scoped. Their configured tokens must be at least 32 characters, are compared in constant time, and remain in the operator credential store. Public requests cannot select provider upstream URLs. Internal failures return generic errors without stack traces or credentials.
 
-### Deployment and Remaining Acceptance
+### Deployment
 
-Build/test on an isolated checkout, hydrate the App Store ID and trusted-device hashes in ignored operator configuration, and deploy through `just backend-deploy-local`. The backend exposes `GET /status`, `POST /fence` and `POST /resume` only on a mode-0600 Unix socket under a mode-0700 directory; `AGENTTY_BACKEND_CONTROL_SOCKET_PATH` defaults to `~/.agentty/backend-control/socket`. Status includes the owning PID and live SSH-session count. Fencing and relay attachment share the broker lock, so pending connections cannot turn an idle fenced broker active. Existing sessions continue forwarding and pair creation/claims pause. The operator updater fences, waits up to 120 seconds for zero live sessions and reopens admission on an abort. It then backs up SQLite, swaps the executable, verifies health and restores the prior binary automatically if health fails; accepted database writes are never rolled back. SIGTERM has a separate ten-second SSH grace followed by at most forty seconds of HTTP drain. The fifty-second maximum leaves cleanup headroom within macOS GUI launchd's observed sixty-second exit limit; a larger plist value is clamped by launchd.
+Hydrate the App Store ID and trusted-device hashes in the operator's ignored
+configuration. The backend exposes `GET /status`, `POST /fence` and
+`POST /resume` only on a mode-0600 Unix socket under a mode-0700 directory
+(`AGENTTY_BACKEND_CONTROL_SOCKET_PATH`). Status includes the owning PID and live
+SSH-session count. Fencing and relay attachment share the broker lock, so
+pending connections cannot turn an idle fenced broker active. Existing sessions
+continue forwarding and pair creation/claims pause.
 
-For the first deployment only, the running binary lacks this control. The updater reconstructs connector control sockets from the current process startup onward and compares them with its established backend TCP sockets. Any unclassified connection prevents deployment. Two idle observations are required, then the exact old PID is suspended to fence admission and the evidence is checked again before replacement. If the current process log is incomplete, counts disagree or idle cannot be established within 120 seconds, the updater aborts. Database rows alone are never accepted as proof of idleness. The old PID is resumed on an aborted cutover. The added tables/columns preserve compatibility for binary rollback.
+`services/backend/deploy/deploy` builds the tagged image and starts it offline
+on a snapshot of the current state. It rejects a candidate that changes the
+SQLite schema, which needs a separate migration, and checks that the previous
+image still starts on that state. It then waits up to 120 seconds for ten idle seconds before it fences admission, and
+reopens it on an abort. It recreates the container, waits for `/healthz` to
+report the version and otherwise restores the previous image; accepted database
+writes are never rolled back. SIGTERM has a separate ten-second SSH grace
+followed by at most forty seconds of HTTP drain, within the container's
+sixty-second stop grace period.
 
-After lead approval, deploy the backend first with host-adoption proof enforcement off. The 2.12.0 tag publishes the matching `@agentty-app/pair` helper; do not publish it independently. Then enable `AGENTTY_BACKEND_REQUIRE_HOST_ADOPTION_PROOF=true` through the guarded operator deploy path and verify health and rejected forged requests read-only. The next app release carries JWS admission, notification scoping and typed limit recovery; the rebuilt Rust helpers ship with the next host-runtime release. Production Apple JWS acceptance, the combined iOS build/install and the guarded live deployment still require their respective acceptance checks. Acceptance follow-up: [#453](https://github.com/emileberhard/tracker/issues/453).
+`AGENTTY_BACKEND_REQUIRE_HOST_ADOPTION_PROOF=true` turns on host-adoption proof
+once every supported pairing helper sends it; enable it through the operator
+configuration and verify health and rejected forged requests read-only.
+Acceptance follow-up: [#453](https://github.com/emileberhard/tracker/issues/453).
 
 Verification references: [Apple's signed-data verifier](https://github.com/apple/app-store-server-library-python/blob/main/appstoreserverlibrary/signed_data_verifier.py), [AppTransaction](https://developer.apple.com/documentation/storekit/apptransaction), [Apple Root CA G3](https://www.apple.com/certificateauthority/AppleRootCA-G3.cer).
 
