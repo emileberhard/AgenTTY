@@ -132,7 +132,9 @@ does not release an original recording. The app bounds its producer spool.
   replaced a Next.js page, Apple bezel downloads, an ascelerate config and a
   launch-argument screenshot mode inside production code, including a fake host
   switcher. The capture build is ad-hoc signed so the Keychain works in the
-  simulator.
+  simulator. The slides are composed only after the screenshot simulators are
+  deleted: on a hosted runner, `ImageRenderer` drew an empty canvas while a
+  simulator was booted, which the composer's opacity check caught.
 - **One phone iteration path.** `scripts/iphone-iteration` builds Dev or Exp
   with a reserved build number into a retained checkpoint and installs it on
   the paired iPhone directly, or through SimpleMDM after

@@ -202,20 +202,20 @@ def app_store():
         try:
             run("xcrun", "simctl", "bootstatus", udid, "-b")
             run("xcrun", "simctl", "install", udid, APP)
-            raw = ROOT / ".local/screenshot-captures" / display
             with simulator_appearance(udid, "dark"):
-                capture(udid, bundle, raw, APP_STORE_SCREENS, appearance="dark", timeout=300)
-            slides = ROOT / ".local/screenshots" / display
-            shutil.rmtree(slides, ignore_errors=True)
-            slides.mkdir(parents=True)
-            run("xcrun", "swift", ROOT / "AppStore/compose.swift", raw, slides, display)
-            for slide in sorted(slides.glob("*.png")):
-                print(slide, flush=True)
+                capture(udid, bundle, ROOT / ".local/screenshot-captures" / display, APP_STORE_SCREENS, appearance="dark", timeout=300)
         finally:
             subprocess.run(["xcrun", "simctl", "shutdown", udid], capture_output=True)
             deletion = subprocess.run(["xcrun", "simctl", "delete", udid], capture_output=True)
             if deletion.returncode:
                 raise RuntimeError(f"Could not delete screenshot simulator {udid}: {deletion.stderr.decode()}")
+    for display in APP_STORE_DISPLAYS:
+        slides = ROOT / ".local/screenshots" / display
+        shutil.rmtree(slides, ignore_errors=True)
+        slides.mkdir(parents=True)
+        run("xcrun", "swift", ROOT / "AppStore/compose.swift", ROOT / ".local/screenshot-captures" / display, slides, display)
+        for slide in sorted(slides.glob("*.png")):
+            print(slide, flush=True)
 
 
 def main():
