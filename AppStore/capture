@@ -69,6 +69,17 @@ def axe():
     return AXE
 
 
+def load_accessibility(udid, deadline):
+    for _ in range(3):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("describe-ui", 0)
+        attempt = subprocess.run([axe(), "describe-ui", "--udid", udid], text=True, capture_output=True, timeout=remaining)
+        if attempt.returncode == 0:
+            return
+    raise SystemExit(f"AXe could not load the simulator's Accessibility:\n{attempt.stderr}")
+
+
 def settled_screenshot(udid, shot, deadline):
     previous = None
     while True:
@@ -109,6 +120,7 @@ def capture(udid, bundle, output, screens, appearance, timeout):
     console = output / "console.log"
     deadline = time.monotonic() + timeout
     expired = False
+    accessible = False
     app = None
     try:
         run("xcrun", "simctl", "status_bar", udid, "override", *STATUS_BAR, timeout=max(0.001, deadline - time.monotonic()))
@@ -129,6 +141,9 @@ def capture(udid, bundle, output, screens, appearance, timeout):
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(launch, timeout)
                     if tap := request.get("tap"):
+                        if not accessible:
+                            load_accessibility(udid, deadline)
+                            accessible = True
                         run(axe(), "tap", "--label", tap["label"], "--element-type", tap["type"], "--wait-timeout", "10", "--udid", udid,
                             timeout=remaining)
                         settled_screenshot(udid, shot, deadline)

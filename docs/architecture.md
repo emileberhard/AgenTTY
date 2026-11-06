@@ -138,9 +138,12 @@ does not release an original recording. The app bounds its producer spool.
   A screen that needs a real interaction, such as the open host menu or the
   themes sheet at its large detent, names an accessibility label in its ready
   signal, and the driver taps it with the pinned, checksum-verified AXe CLI,
-  then waits for two identical screenshots. A capture-only XCUITest target
-  could tap too, but it adds a second build and test runner to every capture;
-  a production hook that opens the menu would fake it. Because Ghostty applies
+  then waits for two identical screenshots. On a freshly booted simulator
+  AXe's first request always timed out loading Accessibility and the second
+  succeeded, so the driver loads it with up to three `describe-ui` calls
+  before the first tap. A capture-only XCUITest target could tap too, but it
+  adds a second build and test runner to every capture; a production hook
+  that opens the menu would fake it. Because Ghostty applies
   the grid resize after a font change asynchronously, the fixture asks the
   terminal for its size (`CSI 18 t`) after each injection and redraws until
   the reply matches the grid it rendered for. The release captures in a
