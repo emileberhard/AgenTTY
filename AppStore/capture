@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import platform
@@ -8,7 +9,9 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
+import urllib.request
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -27,6 +30,9 @@ APP_STORE_DISPLAYS = {
 }
 PREVIEW_DEVICES = {"iphone": "iPhone 18 Pro", "ipad": "iPad Pro 13-inch (M5)"}
 SHARED_SIMULATORS = Path.home() / "Library" / "Caches" / "ui-previews"
+AXE_VERSION = "1.8.0"
+AXE_SHA256 = "7b76340b72e90d0f211bc7c4636f15009076eff07acef2f2b632b175debd8834"
+AXE = ROOT / ".local" / "axe" / AXE_VERSION / "axe"
 LOCALE = ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
 STATUS_BAR = ["--time", datetime(2007, 1, 9, 9, 41).astimezone().isoformat(timespec="milliseconds"), "--dataNetwork", "wifi", "--wifiMode", "active", "--wifiBars", "3",
               "--cellularMode", "active", "--cellularBars", "4", "--batteryState", "charged", "--batteryLevel", "100"]
@@ -47,6 +53,34 @@ def latest_runtime(devices):
     if not supported:
         raise SystemExit(f"Install an iOS simulator runtime supporting {', '.join(devices)}.")
     return max(supported, key=lambda r: tuple(int(p) for p in r["version"].split(".")))["identifier"]
+
+
+def axe():
+    if not AXE.exists():
+        url = f"https://github.com/cameroncooke/AXe/releases/download/v{AXE_VERSION}/AXe-macOS-v{AXE_VERSION}-universal.tar.gz"
+        with urllib.request.urlopen(url, timeout=120) as response:
+            archive = response.read()
+        if hashlib.sha256(archive).hexdigest() != AXE_SHA256:
+            raise SystemExit(f"AXe {AXE_VERSION} from {url} does not match its pinned SHA-256.")
+        AXE.parent.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=AXE.parent.parent) as staging:
+            subprocess.run(["tar", "-xzf", "-", "-C", staging], input=archive, check=True)
+            Path(staging).rename(AXE.parent)
+    return AXE
+
+
+def settled_screenshot(udid, shot, deadline):
+    previous = None
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("screenshot", 0)
+        run("xcrun", "simctl", "io", udid, "screenshot", "--mask=black", shot, timeout=remaining)
+        current = shot.read_bytes()
+        if current == previous:
+            return
+        previous = current
+        time.sleep(0.2)
 
 
 def build():
@@ -85,15 +119,21 @@ def capture(udid, bundle, output, screens, appearance, timeout):
                 if remaining <= 0:
                     raise subprocess.TimeoutExpired(launch, timeout)
                 if ready.exists():
-                    screen = ready.read_text().strip()
+                    request = json.loads(ready.read_text())
                     ready.unlink()
+                    screen = request["screen"]
                     if not screen or Path(screen).name != screen:
                         raise RuntimeError(f"Invalid screen ID from app: {screen!r}")
                     shot = output / f".{screen}.png"
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
                         raise subprocess.TimeoutExpired(launch, timeout)
-                    run("xcrun", "simctl", "io", udid, "screenshot", "--mask=black", shot, timeout=remaining)
+                    if tap := request.get("tap"):
+                        run(axe(), "tap", "--label", tap["label"], "--element-type", tap["type"], "--wait-timeout", "10", "--udid", udid,
+                            timeout=remaining)
+                        settled_screenshot(udid, shot, deadline)
+                    else:
+                        run("xcrun", "simctl", "io", udid, "screenshot", "--mask=black", shot, timeout=remaining)
                     shot.rename(output / f"{screen}.png")
                 else:
                     time.sleep(min(0.02, remaining))
@@ -242,4 +282,4 @@ if __name__ == "__main__":
     try:
         main()
     except subprocess.CalledProcessError as error:
-        raise SystemExit(f"{error.cmd[0]} failed:\n{error.stdout}\n{error.stderr}")
+        raise SystemExit(f"{error.cmd[0]} exited with {error.returncode}:\n{error.stdout}\n{error.stderr}")
