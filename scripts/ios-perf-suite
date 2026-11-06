@@ -710,7 +710,7 @@ def main() -> int:
     output_dir = (
         args.output_dir.expanduser().resolve()
         if args.output_dir
-        else (Path.cwd() / "perf-traces" / "runs" / timestamp)
+        else (Path.cwd() / ".local" / "perf-traces" / "runs" / timestamp)
     )
 
     if args.host == "auto" and not args._remote_inner:
