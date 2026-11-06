@@ -871,6 +871,13 @@ final class TerminalBridge {
             emitStatusLine("[agentty] waiting for terminal size before ssh connect...")
             return
         }
+        #if DEBUG
+        if let output = CaptureFixture.terminalOutput(for: activeHost) {
+            setHostConnectionPhase(.connected)
+            injectTerminalOutputLocally(Data(output.utf8), source: "capture")
+            return
+        }
+        #endif
         startSSHConnection(reason: reason)
     }
 
@@ -1103,12 +1110,6 @@ final class TerminalBridge {
         lastPublishedActiveShellContextSignature = nil
         setHostConnectionPhase(.connected)
         markAnalyticsSSHSessionReady(generation: generation)
-        if AgenTTYSSHSeedPolicy.isScreenshotMode {
-            renderScreenshotFixture()
-            EsmaLog.terminal.info("ssh generation=\(generation) connected in screenshot mode")
-            endConnectionDiagnostics(generation: generation, outcome: "ready")
-            return
-        }
         emitStatusLine("[agentty] ssh connected (tmux session: \(AgenTTYConnection.tmuxSessionName))")
         EsmaLog.terminal.info("ssh generation=\(generation) connected")
         let diagnosticData = connectionDiagnosticData(generation: generation)
@@ -1475,8 +1476,7 @@ final class TerminalBridge {
     /// retrying on its own. Manual recovery and permanently blocked states keep
     /// the recovery alert plus ordinary `[agentty]` status lines.
     private var reconnectScreenPhase: AgenTTYReconnectScreenPhase? {
-        guard !AgenTTYSSHSeedPolicy.isScreenshotMode,
-              !hasNoHosts,
+        guard !hasNoHosts,
               activeConnectionTarget != nil,
               connectionRecoveryRequest == nil,
               hostConnectionPhase == .connecting else {
@@ -2052,38 +2052,6 @@ final class TerminalBridge {
         let text = "\u{1B}[0m\(line)\u{1B}[0m\r\n"
         guard let data = text.data(using: .utf8) else { return }
         receiveRemoteData(data, source: "status")
-    }
-
-    private func renderScreenshotFixture() {
-        terminalInboundDataRouter.setAcceptingData(false)
-        let lines = [
-            "\u{1B}[2J\u{1B}[H",
-            "\u{1B}[1;35m╭─ Claude Code ───────────────╮\u{1B}[0m",
-            "\u{1B}[1;35m│\u{1B}[0m  AgenTTY release workspace    \u{1B}[1;35m│\u{1B}[0m",
-            "\u{1B}[1;35m╰──────────────────────────────╯\u{1B}[0m",
-            "",
-            "\u{1B}[1;36m›\u{1B}[0m Finish the App Store release.",
-            "",
-            "\u{1B}[2m⏺ I’ll build and verify the full\u{1B}[0m",
-            "\u{1B}[2m  iPhone + iPad screenshot flow.\u{1B}[0m",
-            "",
-            "\u{1B}[1;32m✓\u{1B}[0m Captured the production UI",
-            "\u{1B}[1;32m✓\u{1B}[0m Framed official Apple devices",
-            "\u{1B}[1;32m✓\u{1B}[0m Exported App Store artwork",
-            "\u{1B}[1;32m✓\u{1B}[0m Verified every output size",
-            "",
-            "\u{1B}[1;34mReady for App Review.\u{1B}[0m",
-            "",
-            "\u{1B}[2m────────────────────────────────\u{1B}[0m",
-            "\u{1B}[33mAgenTTY\u{1B}[0m  Claude Code & Codex anywhere",
-        ]
-        injectTerminalOutputLocally(
-            Data(lines.joined(separator: "\r\n").utf8),
-            source: "screenshot-fixture"
-        )
-        if let screen = AgenTTYScreenshotScreen.current {
-            AgenTTYScreenshotReadySignal.markReady(screen)
-        }
     }
 
     private func emitNoHostsOnboardingIfNeeded(force: Bool, reason: String) {

@@ -37,7 +37,7 @@ test-llm:
 ui-previews *args:
     AppStore/capture previews "$@"
 
-# Shut down the shared preview simulator
+# Shut down the shared preview simulators
 [group('app')]
 ui-previews-stop:
     AppStore/capture stop

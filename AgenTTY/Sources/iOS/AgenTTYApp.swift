@@ -55,6 +55,14 @@ final class AgenTTYAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         }
     }
 
+    private static var isCapturing: Bool {
+        #if DEBUG
+        CaptureView.directory != nil
+        #else
+        false
+        #endif
+    }
+
     private static func tokenTail(_ value: String) -> String {
         String(value.suffix(8))
     }
@@ -63,12 +71,12 @@ final class AgenTTYAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificat
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        if !AgenTTYSSHSeedPolicy.isScreenshotMode {
+        if !Self.isCapturing {
             AgenTTYSentryService.configure()
         }
         let center = UNUserNotificationCenter.current()
         center.delegate = self
-        if !AgenTTYSSHSeedPolicy.isScreenshotMode {
+        if !Self.isCapturing {
             Task {
                 let granted = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
                 EsmaLog.notifications.notice("event=notification_authorization_result granted=\(granted ?? false)")
@@ -356,24 +364,11 @@ struct AgenTTYiOSApp: App {
     @State private var sshKeyStore: AgenTTYSSHKeyStore
     @State private var hostReachabilityMonitor = AgenTTYHostReachabilityMonitor()
     @State private var sheetPresentation: SheetPresentation
-    @State private var didPrepareScreenshotScreen = false
     @State private var themeToken = AppThemeToken()
-    @State private var pendingThemeDismissRefresh = false
     @State private var lifetimeAccessController: AgenTTYLifetimeAccessController
 
     init() {
         AgenTTYDictation.migrateModelSelectionIfNeeded()
-
-        if AgenTTYSSHSeedPolicy.isScreenshotMode {
-            AgenTTYScreenshotReadySignal.reset()
-            AgenTTYSharedDefaults.store.set(
-                AgenTTYThemeSelection.defaultThemeName,
-                forKey: AgenTTYThemeSelection.storageKey
-            )
-            if ProcessInfo.processInfo.arguments.contains("-ASC_DISABLE_ANIMATIONS") {
-                UIView.setAnimationsEnabled(false)
-            }
-        }
 
         let flavor = AgenTTYBuildFlavor.current()
         let materialStore = AgenTTYSSHKeyMaterialStore(flavor: flavor)
@@ -409,187 +404,110 @@ struct AgenTTYiOSApp: App {
     }
 
     var body: some Scene {
-        let themeNonce = themeToken.nonce
-
         WindowGroup {
-            AgenTTYMainWindowView(
-                appDelegate: appDelegate,
-                ghostty: ghostty,
-                keyStore: sshKeyStore,
-                passwordStore: passwordStore,
-                trustedHostKeyStore: trustedHostKeyStore,
-                inputRouter: inputRouter,
-                shellState: shellState,
-                keyboardState: keyboardState,
-                hostStore: hostStore,
-                sheetPresentation: sheetPresentation,
-                themeToken: themeToken,
-                themeNonce: themeNonce,
-                terminalFontSize: terminalFontSize,
-                keyboardInputMode: keyboardInputMode,
-                lifetimeAccessController: lifetimeAccessController,
-                analyticsClient: analyticsClient,
-                shortcutExecutionContext: shortcutExecutionContext
-            )
-            .onAppear {
-                appDelegate.shellState = shellState
-                inputRouter.keyboardEncodingMode = keyboardEncodingMode
-                inputRouter.lifetimeAccessController = lifetimeAccessController
-                lifetimeAccessController.setSceneActive(scenePhase == .active)
-                hostReachabilityMonitor.updateHosts(hostStore.hosts)
-                hostReachabilityMonitor.setSceneActive(scenePhase == .active)
-                Task {
-                    await analyticsClient.setSceneActive(
-                        scenePhase == .active,
-                        accessState: lifetimeAccessController.analyticsAccessState,
-                        savedHostCount: hostStore.hosts.count,
-                        activeHostPresent: hostStore.activeHost != nil
-                    )
-                }
+            #if DEBUG
+            if let directory = CaptureView.directory {
+                CaptureView(directory: directory, ghostty: ghostty)
+            } else {
+                mainWindow
             }
-            .task {
-                await AgenTTYDictationLibrary.shared.resumePublication()
-                await prepareScreenshotScreenIfNeeded()
-            }
-            .onChange(of: scenePhase) { _, newPhase in
-                lifetimeAccessController.setSceneActive(newPhase == .active)
-                hostReachabilityMonitor.setSceneActive(newPhase == .active)
-                Task {
-                    await analyticsClient.setSceneActive(
-                        newPhase == .active,
-                        accessState: lifetimeAccessController.analyticsAccessState,
-                        savedHostCount: hostStore.hosts.count,
-                        activeHostPresent: hostStore.activeHost != nil
-                    )
-                }
-                guard newPhase == .active else { return }
-                Task {
-                    await AgenTTYDictationLibrary.shared.resumePublication()
-                    await lifetimeAccessController.refreshForForeground()
-                }
-            }
-            .onChange(of: lifetimeAccessController.hasLifetimeAccess) { _, _ in
-                Task { await AgenTTYDictationRelayClient.shared.invalidateSession() }
-            }
-            .onChange(of: hostStore.hosts) { _, newHosts in
-                hostReachabilityMonitor.updateHosts(newHosts)
-            }
-            .onChange(of: keyboardEncodingModeRawValue) { _, _ in
-                inputRouter.keyboardEncodingMode = keyboardEncodingMode
-            }
-            .onChange(of: keyboardInputModeRawValue) { _, _ in
-                // Switching to the system keyboard unmounts `InAppKeyboardView`,
-                // whose `onDisappear` would otherwise read as an accidental
-                // home-indicator swipe and send a stray backspace.
-                keyboardState.suppressLifecycleUndo()
-            }
-            .onChange(of: appDelegate.pendingNavigationWindowId) { _, windowId in
-                if let windowId {
-                    shellState.navigateAndClearUnread(windowId)
-                    appDelegate.pendingNavigationWindowId = nil
-                }
-            }
-            .onChange(of: shellState.activeWindowId) { _, activeWindowId in
-                if let activeWindowId {
-                    appDelegate.dismissCurrentNotificationIfMatchingWindow(activeWindowId)
-                }
-            }
-            .onChange(of: appDelegate.inAppNotification) { _, notification in
-                if let windowId = notification?.tmuxWindowId {
-                    if shellState.activeWindowId == windowId {
-                        appDelegate.dismissCurrentNotificationIfMatchingWindow(windowId)
-                    } else {
-                        shellState.markUnread(windowId)
-                    }
-                }
-            }
-            .alert(
-                inputRouter.dictationAlert?.title ?? "",
-                isPresented: Binding(
-                    get: { inputRouter.dictationAlert != nil },
-                    set: { if !$0 { inputRouter.dictationAlert = nil } }
-                ),
-                presenting: inputRouter.dictationAlert
-            ) { alert in
-                if alert == .microphoneAccessOff {
-                    Button("Open Settings") {
-                        if let url = URL(string: UIApplication.openSettingsURLString) {
-                            UIApplication.shared.open(url)
-                        }
-                    }
-                    Button("Cancel", role: .cancel) {}
-                } else {
-                    Button("OK") {}
-                }
-            } message: { alert in
-                Text(alert.message)
-            }
-            .sheet(
-                isPresented: $sheetPresentation.showSettings,
-                onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
-            ) {
-                TerminalSettingsSheet()
-                    .presentationDetents([.medium, .large])
-                    .esmaTermSheetBackground()
-            }
-            .sheet(
-                isPresented: $sheetPresentation.showTips,
-                onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
-            ) {
-                TerminalTipsSheet()
-                    .presentationDetents([.medium, .large])
-                    .esmaTermSheetBackground()
-            }
-            .sheet(
-                isPresented: $sheetPresentation.showHosts,
-                onDismiss: {
-                    sheetPresentation.pendingHostEditorID = nil
-                    TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface()
-                }
-            ) {
-                TerminalHostsSheet(
-                    trustedHostKeyStore: trustedHostKeyStore,
-                    passwordStore: passwordStore,
-                    analyticsClient: analyticsClient,
-                    initialHostEditorID: sheetPresentation.pendingHostEditorID
+            #else
+            mainWindow
+            #endif
+        }
+    }
+
+    private var mainWindow: some View {
+        AgenTTYMainWindowView(
+            appDelegate: appDelegate,
+            ghostty: ghostty,
+            keyStore: sshKeyStore,
+            passwordStore: passwordStore,
+            trustedHostKeyStore: trustedHostKeyStore,
+            inputRouter: inputRouter,
+            shellState: shellState,
+            keyboardState: keyboardState,
+            hostStore: hostStore,
+            hostReachabilityMonitor: hostReachabilityMonitor,
+            sheetPresentation: sheetPresentation,
+            themeToken: themeToken,
+            themeNonce: themeToken.nonce,
+            terminalFontSize: terminalFontSize,
+            keyboardInputMode: keyboardInputMode,
+            lifetimeAccessController: lifetimeAccessController,
+            analyticsClient: analyticsClient,
+            shortcutExecutionContext: shortcutExecutionContext
+        )
+        .onAppear {
+            appDelegate.shellState = shellState
+            inputRouter.keyboardEncodingMode = keyboardEncodingMode
+            inputRouter.lifetimeAccessController = lifetimeAccessController
+            lifetimeAccessController.setSceneActive(scenePhase == .active)
+            hostReachabilityMonitor.updateHosts(hostStore.hosts)
+            hostReachabilityMonitor.setSceneActive(scenePhase == .active)
+            Task {
+                await analyticsClient.setSceneActive(
+                    scenePhase == .active,
+                    accessState: lifetimeAccessController.analyticsAccessState,
+                    savedHostCount: hostStore.hosts.count,
+                    activeHostPresent: hostStore.activeHost != nil
                 )
-                    .environment(inputRouter)
-                    .environment(hostStore)
-                    .environment(sshKeyStore)
-                    .environment(hostReachabilityMonitor)
-                    .esmaTermSheetBackground()
             }
-            .sheet(
-                isPresented: $sheetPresentation.showSSHKeys,
-                onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
-            ) {
-                TerminalSSHKeysSheet(analyticsClient: analyticsClient)
-                    .environment(sshKeyStore)
-                    .environment(hostStore)
-                    .esmaTermSheetBackground()
+        }
+        .task {
+            await AgenTTYDictationLibrary.shared.resumePublication()
+        }
+        .onChange(of: scenePhase) { _, newPhase in
+            lifetimeAccessController.setSceneActive(newPhase == .active)
+            hostReachabilityMonitor.setSceneActive(newPhase == .active)
+            Task {
+                await analyticsClient.setSceneActive(
+                    newPhase == .active,
+                    accessState: lifetimeAccessController.analyticsAccessState,
+                    savedHostCount: hostStore.hosts.count,
+                    activeHostPresent: hostStore.activeHost != nil
+                )
             }
-            .sheet(
-                isPresented: $sheetPresentation.showThemes,
-                onDismiss: {
-                    handleThemesSheetDismissed()
-                    TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface()
+            guard newPhase == .active else { return }
+            Task {
+                await AgenTTYDictationLibrary.shared.resumePublication()
+                await lifetimeAccessController.refreshForForeground()
+            }
+        }
+        .onChange(of: lifetimeAccessController.hasLifetimeAccess) { _, _ in
+            Task { await AgenTTYDictationRelayClient.shared.invalidateSession() }
+        }
+        .onChange(of: hostStore.hosts) { _, newHosts in
+            hostReachabilityMonitor.updateHosts(newHosts)
+        }
+        .onChange(of: keyboardEncodingModeRawValue) { _, _ in
+            inputRouter.keyboardEncodingMode = keyboardEncodingMode
+        }
+        .onChange(of: keyboardInputModeRawValue) { _, _ in
+            // Switching to the system keyboard unmounts `InAppKeyboardView`,
+            // whose `onDisappear` would otherwise read as an accidental
+            // home-indicator swipe and send a stray backspace.
+            keyboardState.suppressLifecycleUndo()
+        }
+        .onChange(of: appDelegate.pendingNavigationWindowId) { _, windowId in
+            if let windowId {
+                shellState.navigateAndClearUnread(windowId)
+                appDelegate.pendingNavigationWindowId = nil
+            }
+        }
+        .onChange(of: shellState.activeWindowId) { _, activeWindowId in
+            if let activeWindowId {
+                appDelegate.dismissCurrentNotificationIfMatchingWindow(activeWindowId)
+            }
+        }
+        .onChange(of: appDelegate.inAppNotification) { _, notification in
+            if let windowId = notification?.tmuxWindowId {
+                if shellState.activeWindowId == windowId {
+                    appDelegate.dismissCurrentNotificationIfMatchingWindow(windowId)
+                } else {
+                    shellState.markUnread(windowId)
                 }
-            ) {
-                TerminalThemesSheet { newThemeName in
-                    let didApply = ghostty.applyTheme(named: newThemeName)
-                    if didApply {
-                        keyboardState.invalidateVisualsForThemeChange()
-                        pendingThemeDismissRefresh = true
-                        themeToken.invalidate()
-                    }
-                    return didApply
-                }
-                    .environment(themeToken)
-                    .presentationDetents([.medium, .large])
-                    .esmaTermSheetBackground()
             }
-            .preferredColorScheme(AppTheme.preferredColorScheme)
-            .statusBar(hidden: true)
         }
     }
 
@@ -606,44 +524,10 @@ struct AgenTTYiOSApp: App {
         }
         return .defaultValue
     }
-
-    private func prepareScreenshotScreenIfNeeded() async {
-        guard !didPrepareScreenshotScreen,
-              let screenshotScreen = AgenTTYScreenshotScreen.current else { return }
-        didPrepareScreenshotScreen = true
-
-        try? await Task.sleep(for: .milliseconds(500))
-        guard !Task.isCancelled else { return }
-
-        switch screenshotScreen {
-        case .themes:
-            sheetPresentation.showThemes = true
-        case .hosts:
-            sheetPresentation.showHosts = true
-        case .keys:
-            sheetPresentation.showSSHKeys = true
-        case .terminal, .switchHosts:
-            return
-        }
-
-        try? await Task.sleep(for: .milliseconds(500))
-        guard !Task.isCancelled else { return }
-        AgenTTYScreenshotReadySignal.markReady(screenshotScreen)
-    }
-
-    private func handleThemesSheetDismissed() {
-        guard pendingThemeDismissRefresh else { return }
-        pendingThemeDismissRefresh = false
-
-        Task { @MainActor in
-            await Task.yield()
-            keyboardState.invalidateVisualsForThemeChange()
-        }
-    }
 }
 
 @safe
-private struct AgenTTYMainWindowView: View {
+struct AgenTTYMainWindowView: View {
     let appDelegate: AgenTTYAppDelegate
     let ghostty: GhosttyRuntime
     let keyStore: AgenTTYSSHKeyStore
@@ -653,7 +537,8 @@ private struct AgenTTYMainWindowView: View {
     let shellState: ShellIndicatorState
     let keyboardState: KeyboardState
     let hostStore: AgenTTYHostStore
-    let sheetPresentation: SheetPresentation
+    let hostReachabilityMonitor: AgenTTYHostReachabilityMonitor
+    @Bindable var sheetPresentation: SheetPresentation
     let themeToken: AppThemeToken
     let themeNonce: Int
     let terminalFontSize: Double
@@ -663,6 +548,7 @@ private struct AgenTTYMainWindowView: View {
     let shortcutExecutionContext: AgenTTYShortcutExecutionContext
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var pendingThemeDismissRefresh = false
 
     /// Approximates the system keyboard's slide curve so hiding/showing the
     /// custom key grid feels like the native keyboard instead of snapping.
@@ -692,11 +578,6 @@ private struct AgenTTYMainWindowView: View {
 
             ZStack {
                 terminalLayer(systemKeyboardIsActive: keyboardSurfaceMode == .systemKeyboard)
-                if masksTerminalForScreenshotSheet {
-                    Color(red: 0.035, green: 0.03, blue: 0.08)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                }
             }
             .clipped()
             .environment(inputRouter)
@@ -766,14 +647,6 @@ private struct AgenTTYMainWindowView: View {
             .overlay(alignment: .top) {
                 topChromeOverlay(statusBarBlackoutHeight: statusBarBlackoutHeight)
             }
-            .overlay(alignment: .topTrailing) {
-                if AgenTTYScreenshotScreen.current == .switchHosts {
-                    AgenTTYScreenshotHostSwitcher(hostStore: hostStore)
-                        .padding(.top, statusBarBlackoutHeight + 8)
-                        .padding(.trailing, 14)
-                        .zIndex(VisualLayering.AppShell.inAppNotificationBanner)
-                }
-            }
             .overlay(alignment: .bottomLeading) {
                 // Without the key grid there is no in-key recording indicator,
                 // so the floating badge is the only dictation state left.
@@ -812,7 +685,7 @@ private struct AgenTTYMainWindowView: View {
                 Button("Edit Host") {
                     if let request = inputRouter.connectionRecoveryRequest,
                        let host = hostStore.hosts.first(where: { $0.id == request.hostID }) {
-                        sheetPresentation.presentHosts(hostEditorID: host.id)
+                        sheetPresentation.presentHosts(route: .edit(host))
                     }
                     inputRouter.dismissConnectionRecovery()
                 }
@@ -825,6 +698,103 @@ private struct AgenTTYMainWindowView: View {
                 }
             }
         }
+        .alert(
+            inputRouter.dictationAlert?.title ?? "",
+            isPresented: Binding(
+                get: { inputRouter.dictationAlert != nil },
+                set: { if !$0 { inputRouter.dictationAlert = nil } }
+            ),
+            presenting: inputRouter.dictationAlert
+        ) { alert in
+            if alert == .microphoneAccessOff {
+                Button("Open Settings") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+                Button("Cancel", role: .cancel) {}
+            } else {
+                Button("OK") {}
+            }
+        } message: { alert in
+            Text(alert.message)
+        }
+        .sheet(
+            isPresented: $sheetPresentation.showSettings,
+            onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
+        ) {
+            TerminalSettingsSheet()
+                .presentationDetents([.medium, .large])
+                .esmaTermSheetBackground()
+        }
+        .sheet(
+            isPresented: $sheetPresentation.showTips,
+            onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
+        ) {
+            TerminalTipsSheet()
+                .presentationDetents([.medium, .large])
+                .esmaTermSheetBackground()
+        }
+        .sheet(
+            isPresented: $sheetPresentation.showHosts,
+            onDismiss: {
+                sheetPresentation.pendingHostsRoute = nil
+                TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface()
+            }
+        ) {
+            TerminalHostsSheet(
+                trustedHostKeyStore: trustedHostKeyStore,
+                passwordStore: passwordStore,
+                analyticsClient: analyticsClient,
+                initialRoute: sheetPresentation.pendingHostsRoute
+            )
+                .environment(inputRouter)
+                .environment(hostStore)
+                .environment(keyStore)
+                .environment(hostReachabilityMonitor)
+                .esmaTermSheetBackground()
+        }
+        .sheet(
+            isPresented: $sheetPresentation.showSSHKeys,
+            onDismiss: { TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface() }
+        ) {
+            TerminalSSHKeysSheet(analyticsClient: analyticsClient)
+                .environment(keyStore)
+                .environment(hostStore)
+                .esmaTermSheetBackground()
+        }
+        .sheet(
+            isPresented: $sheetPresentation.showThemes,
+            onDismiss: {
+                handleThemesSheetDismissed()
+                TerminalSurfaceViewIOS.claimFirstResponderForActiveSurface()
+            }
+        ) {
+            TerminalThemesSheet { newThemeName in
+                let didApply = ghostty.applyTheme(named: newThemeName)
+                if didApply {
+                    keyboardState.invalidateVisualsForThemeChange()
+                    pendingThemeDismissRefresh = true
+                    themeToken.invalidate()
+                }
+                return didApply
+            }
+                .environment(themeToken)
+                .presentationDetents([.medium, .large])
+                .esmaTermSheetBackground()
+        }
+        .preferredColorScheme(AppTheme.preferredColorScheme)
+        .statusBar(hidden: true)
+    }
+
+    private func handleThemesSheetDismissed() {
+        guard pendingThemeDismissRefresh else { return }
+        pendingThemeDismissRefresh = false
+
+        Task { @MainActor in
+            await Task.yield()
+            keyboardState.invalidateVisualsForThemeChange()
+        }
     }
 
     private var ignoredContainerSafeAreaEdges: Edge.Set {
@@ -832,15 +802,6 @@ private struct AgenTTYMainWindowView: View {
             return [.top, .horizontal, .bottom]
         }
         return [.top, .horizontal]
-    }
-
-    private var masksTerminalForScreenshotSheet: Bool {
-        switch AgenTTYScreenshotScreen.current {
-        case .themes, .hosts, .keys:
-            true
-        case .terminal, .switchHosts, nil:
-            false
-        }
     }
 
     @ViewBuilder
@@ -1046,98 +1007,3 @@ private struct AgenTTYMainWindowView: View {
         }
     }
 }
-
-@safe
-private struct AgenTTYScreenshotHostSwitcher: View {
-    let hostStore: AgenTTYHostStore
-
-    var body: some View {
-        VStack(spacing: 0) {
-            ForEach(hostStore.hosts) { host in
-                hostRow(host)
-            }
-
-            Divider()
-
-            Label("Manage Hosts…", systemImage: "list.bullet")
-                .font(.system(size: 16, weight: .medium))
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 14)
-                .frame(height: 44)
-        }
-        .frame(width: UIDevice.current.userInterfaceIdiom == .pad ? 260 : 220)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .stroke(.white.opacity(0.14), lineWidth: 0.5)
-        }
-        .shadow(color: .black.opacity(0.38), radius: 22, y: 12)
-        .accessibilityIdentifier("agentty-screenshot-host-switcher")
-    }
-
-    private func hostRow(_ host: AgenTTYHost) -> some View {
-        let isActive = host.id == hostStore.activeHostID
-        return HStack(spacing: 10) {
-            Image(systemName: "checkmark")
-                .font(.system(size: 13, weight: .semibold))
-                .opacity(isActive ? 1 : 0)
-                .frame(width: 16)
-            Text(host.label)
-                .font(.system(size: 16, weight: .medium))
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 44)
-    }
-}
-
-#if DEBUG
-#Preview("Main App (Welcome)") {
-    let flavor = AgenTTYBuildFlavor.dev
-    let materialStore = AgenTTYSSHKeyMaterialStore(flavor: flavor)
-    let passwordStore = AgenTTYSSHPasswordStore(flavor: flavor)
-    let trustedHostKeyStore = AgenTTYTrustedHostKeyStore(
-        userDefaults: .standard,
-        flavor: flavor
-    )
-    let hostStore = AgenTTYHostStore(userDefaults: .standard, flavor: flavor)
-    let lifetimeAccessController = AgenTTYLifetimeAccessController(flavor: flavor)
-    let analyticsClient = AgenTTYAnalyticsClient(flavor: flavor)
-    let shortcutExecutionContext = AgenTTYShortcutExecutionContext(
-        hostStore: hostStore,
-        keyMaterialStore: materialStore,
-        passwordStore: passwordStore,
-        trustedHostKeyStore: trustedHostKeyStore,
-        lifetimeAccessController: lifetimeAccessController
-    )
-    let shellState = ShellIndicatorState()
-    let _ = shellState.update(windowCount: 1, activePosition: 0, windowIds: [1])
-    let _ = shellState.updateWindowContext(
-        windowID: 1,
-        workingDirectoryPath: "/home/developer/projects/my-app",
-        branchName: "main"
-    )
-
-    AgenTTYMainWindowView(
-        appDelegate: AgenTTYAppDelegate(),
-        ghostty: GhosttyRuntime(),
-        keyStore: AgenTTYSSHKeyStore(flavor: flavor, materialStore: materialStore),
-        passwordStore: passwordStore,
-        trustedHostKeyStore: trustedHostKeyStore,
-        inputRouter: TerminalInputRouter(),
-        shellState: shellState,
-        keyboardState: KeyboardState(),
-        hostStore: hostStore,
-        sheetPresentation: SheetPresentation(),
-        themeToken: AppThemeToken(),
-        themeNonce: 0,
-        terminalFontSize: TerminalFontSizeSetting.defaultValue,
-        keyboardInputMode: .defaultValue,
-        lifetimeAccessController: lifetimeAccessController,
-        analyticsClient: analyticsClient,
-        shortcutExecutionContext: shortcutExecutionContext
-    )
-    .statusBar(hidden: true)
-    .preferredColorScheme(.dark)
-}
-#endif

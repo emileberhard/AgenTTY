@@ -176,10 +176,7 @@ struct HostCardRow: View {
     }
 
     private var endpointSummary: String {
-        guard AgenTTYSSHSeedPolicy.isScreenshotMode else {
-            return "\(host.username)@\(host.address):\(host.port)"
-        }
-        return "developer@\(host.label).local:\(host.port)"
+        "\(host.username)@\(host.address):\(host.port)"
     }
 
     var body: some View {

@@ -103,14 +103,6 @@ nonisolated enum AgenTTYSSHSeedPolicy {
     static let bootstrapSeedMacBookHostID = UUID(uuidString: "8CB62533-3E4A-4A66-B01D-C9CC16C4905D")!
     static let bootstrapSeedKeyName = "agentty@iphone"
 
-    static var isScreenshotMode: Bool {
-#if AGENTTY_BOOTSTRAP_SEED
-        ProcessInfo.processInfo.arguments.contains("-ASC_SCREENSHOT")
-#else
-        false
-#endif
-    }
-
     static var isBootstrapSeedCompiledIn: Bool {
         AgenTTYSSHBootstrapConfigurationProvider.current != nil
     }
@@ -165,77 +157,7 @@ nonisolated enum AgenTTYSSHSeedPolicy {
         )
     }
 
-    static func screenshotDemoHosts() -> [AgenTTYHost]? {
-        guard isScreenshotMode,
-              let bootstrapHost = bootstrapSeedHost() else {
-            return nil
-        }
-
-        let macMini = AgenTTYHost(
-            id: bootstrapHost.id,
-            label: "workstation",
-            address: bootstrapHost.address,
-            usesTailscaleAddress: bootstrapHost.usesTailscaleAddress,
-            port: bootstrapHost.port,
-            username: bootstrapHost.username,
-            authentication: bootstrapHost.authentication,
-            connectionRoutePolicy: bootstrapHost.connectionRoutePolicy,
-            relayHostID: bootstrapHost.relayHostID
-        )
-        let laptop = AgenTTYHost(
-            id: bootstrapSeedMacBookHostID,
-            label: "laptop",
-            address: "laptop.example.invalid",
-            port: AgenTTYConnection.defaultPort,
-            username: "developer",
-            authentication: .key(bootstrapSeedKeyID),
-            connectionRoutePolicy: .directOnly,
-            relayHostID: nil
-        )
-        return [macMini, laptop]
-    }
-
     static var bootstrapSeedPrivateKeyRawBase64: String? {
         AgenTTYSSHBootstrapConfigurationProvider.current?.privateKeyRawBase64
-    }
-}
-
-nonisolated enum AgenTTYScreenshotScreen: String, Sendable {
-    case terminal = "01-terminal-anywhere"
-    case themes = "02-themes"
-    case hosts = "03-hosts"
-    case switchHosts = "04-switch-hosts"
-    case keys = "05-secure-keys"
-
-    static var current: AgenTTYScreenshotScreen? {
-#if AGENTTY_BOOTSTRAP_SEED
-        guard AgenTTYSSHSeedPolicy.isScreenshotMode else { return nil }
-        let arguments = ProcessInfo.processInfo.arguments
-        guard let flagIndex = arguments.firstIndex(of: "-ASC_SCREENSHOT_SCREEN"),
-              arguments.indices.contains(flagIndex + 1) else {
-            return .terminal
-        }
-        return AgenTTYScreenshotScreen(rawValue: arguments[flagIndex + 1])
-#else
-        nil
-#endif
-    }
-}
-
-nonisolated enum AgenTTYScreenshotReadySignal {
-    private static let filename = "agentty-screenshot-ready"
-
-    static func reset() {
-        guard AgenTTYSSHSeedPolicy.isScreenshotMode else { return }
-        try? FileManager.default.removeItem(at: markerURL)
-    }
-
-    static func markReady(_ screen: AgenTTYScreenshotScreen) {
-        guard AgenTTYSSHSeedPolicy.isScreenshotMode else { return }
-        try? screen.rawValue.write(to: markerURL, atomically: true, encoding: .utf8)
-    }
-
-    private static var markerURL: URL {
-        FileManager.default.temporaryDirectory.appendingPathComponent(filename)
     }
 }
