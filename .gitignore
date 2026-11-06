@@ -15,3 +15,4 @@ tools/agentty-host/THIRD-PARTY-NOTICES.txt
 Local.xcconfig
 AgenTTYLocalSecrets.json
 *.p8
+.private/
