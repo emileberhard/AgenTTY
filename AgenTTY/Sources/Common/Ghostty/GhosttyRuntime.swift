@@ -1,6 +1,5 @@
 import Foundation
 import GhosttyKit
-
 import UIKit
 
 @safe
