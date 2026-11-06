@@ -4,22 +4,29 @@
 
 `ci.yml` runs on pushes to `main` and on pull requests, on disposable hosted
 runners with no secrets or operator files. It executes the three Rust test
-suites and the shell wrapper checks, the pairing CLI type check, tests and
-bundle, the release tooling tests in `scripts/tests`, the iOS unit tests, and
-an unsigned archive of the Release configuration, so a compile error in
-anything the release builds fails CI instead of the release. Apple jobs select
+suites and the shell wrapper checks, builds the deployed backend image without
+pushing it, runs the pairing CLI type check, tests and bundle, the release
+tooling tests in `scripts/tests` and the iOS unit tests, compiles the live LLM
+integration tests without running them, and archives the Release configuration
+unsigned, so a compile error in anything the release builds fails CI instead of
+the release. When `AppStore/`, `Capture.swift`, `.xcode-version` or `ci.yml`
+change, `capture` also runs the release's screenshot capture on fresh
+simulators. Apple jobs select
 the Xcode that `.xcode-version` names with `scripts/select-xcode` and fail when
 the runner lacks it.
 
 Actions are pinned by full SHA, workflows default to a read-only token and
-never use `pull_request_target`. Dependabot covers Actions, Cargo and Bun;
+never use `pull_request_target`. Dependabot covers Actions, Cargo, Bun and the
+backend image;
 weekly version updates are grouped and use a one-day cooldown. Swift package
 revisions are updated together in the project and its `Package.resolved` by a
 maintainer.
 
-`just ios-check` and `just ios-test` are the local entry points to
+`just build` and `just test` are the local entry points to
 `scripts/ios-public`, which fetches the reviewed GhosttyKit artifact and builds
-from the committed project and lock only. Headless commands allow compiler
+from the committed project and lock only, in the checkout's
+`.local/DerivedData`. It resolves packages again whenever `Package.resolved`
+changes. Headless commands allow compiler
 macros from those reviewed, locked package revisions. Never weaken strict
 concurrency to make a new toolchain compile. Public simulator tests select the
 newest installed iOS runtime with an available iPhone.
@@ -121,7 +128,7 @@ during the jobs that call App Store Connect.
 Registry publication, Apple upload and GitHub publication are separate service
 boundaries: after an uncertain failure inspect all three before retrying.
 
-## Host runtime and deployment boundary
+## Host runtime
 
 `build-tmux-runtime.yml` runs manually or as a reusable release job and builds
 all four Darwin/Linux ARM64/x86_64 tmux targets. The `runtime` job builds
@@ -143,11 +150,24 @@ jobs hold read-only repository permissions and only `github-release` can write.
 GitHub and App Store Connect cannot publish atomically: if Apple accepts an
 upload but a later job fails, inspect both services and rerun that job.
 
-The Dev/Exp mutable-latest publication path remains maintainer-local.
-`scripts/publish-host-runtime-artifacts` writes into an operator-owned static
-host; public CI has no access to that filesystem or any live relay deployment.
-`host-runtime-verify-release` separates missing (exit 3) from invalid (exit 1).
-Only missing local releases can be created; mismatches require a new patch.
+Dev, Exp and development pairing CLIs read the mutable latest channel on R2.
+`just publish-host-runtime` builds the platform artifacts on the Mac and
+publishes to the bucket configured by `~/.config/agentty-r2/rclone.conf`; a
+missing config fails publication. The bucket token is scoped to that bucket and
+readable only by the publisher. Self-hosters set
+`AGENTTY_HOST_RUNTIME_PUBLIC_ROOT` to publish to their own static host instead.
+The publisher serializes publication, checks existing release bytes, uploads and
+verifies every payload before its manifest, and replaces `latest.json` last.
+`latest.json` uses no-cache and release objects are immutable. The latest
+channel retains its current and 16 previous releases, and publication reports
+an error if the bucket exceeds 20 GiB. It no longer writes versioned releases;
+the existing semver objects stay for the installed apps that compiled their
+URLs.
+
+The publisher updates a public index of retained releases. A Linux timer pulls
+its manifests and checksum-verified payloads and replaces the mirror under the
+service backup lock, and the `agentty-assets` selective backup verifies and
+saves the mirrored manifest-referenced files.
 
 ## App Store text and screenshots
 
@@ -155,14 +175,16 @@ Only missing local releases can be created; mismatches require a new patch.
 applies it. Differences from the store are the only writes, and an app info that
 is not editable keeps its name, subtitle and privacy URL.
 
-`just screenshots` uses an explicitly configured SSH fixture host and ignored
-bootstrap credentials, injects deterministic synthetic terminal/UI data, composes
-the marketing slides, validates their dimensions and copies the captured device
-sets into `AppStore/screenshots/<placement group>` (`IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE`,
-`IPAD_13_PROFILE`). Visually inspect every exported scene, then commit the
-sets. The release replaces only the placement groups present there and
-otherwise leaves the version's existing screenshots. Apple bezels, raw captures,
-generated exports and frontend dependencies stay ignored.
+The `app-store` job captures the screenshots fresh with
+`AppStore/capture app-store`: on new simulators deleted afterwards, the app
+renders the dark `terminal`, `themes`, `hosts`, `switch-hosts` and `keys`
+`CaptureScreen`s from its Debug fixture, and `AppStore/compose.swift` frames
+them with the marketing copy into the `IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE`
+(iPhone 18 Pro Max) and `IPAD_13_PROFILE` placement groups. The composer fails
+on a wrong size, a transparent pixel or two identical slides. The release
+replaces only the captured placement groups. `just screenshots` runs the same
+capture into `.local/screenshots`; look at the slides before tagging a change
+to them.
 
 ## Verification
 

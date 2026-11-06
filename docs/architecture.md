@@ -15,6 +15,28 @@ flowchart LR
   SSH -. encrypted SSH fallback .-> Relay[Backend + host connector]
 ```
 
+## Goals
+
+- Run coding agents such as Claude Code and Codex on your own machines from an
+  iPhone or iPad, with sessions that survive suspension, roaming and
+  disconnects because tmux on the host owns them.
+- Keep OpenSSH's trust model: strict trust on first use, private keys in the
+  Keychain, and a relay that carries SSH without terminating it.
+- Ship every artifact from one pushed tag with one version: the app,
+  TestFlight, the prepared App Store version, the host runtime, the GitHub
+  release, the npm pairing package and the backend.
+- Build the public repository without private credentials, and let others
+  self-host the backend and artifacts.
+
+## Non-goals
+
+- A macOS app. The scaffold was never validated and is gone; Ghostty already
+  serves the desktop.
+- A staging branch or environment. Dev and Exp are app flavors installed beside
+  the main app, not deployment stages.
+- Personal or self-hosted runners for this public repository.
+- Provider or router credentials in a shipped app.
+
 ## App and host
 
 `GhosttyRuntime` owns the emulator and renderer. UIKit owns the Metal surface;
@@ -44,10 +66,9 @@ relay sessions, analytics and transcription quota admission. SQLite is its
 durable state boundary, including shared spending and bandwidth reservations.
 Signed StoreKit app transactions establish eligibility for hosted features;
 notification and dictation credentials have separate purposes. Compatibility
-limits cover older clients during rollout. Operators own deployment, keys,
-retention and ingress;
-real deployment files are excluded from this tree. See [backend.md](backend.md)
-and [PRIVACY.md](../PRIVACY.md) for the exact data surfaces.
+limits cover older clients during rollout. Operators own keys, retention and
+ingress. See [backend.md](backend.md) and [PRIVACY.md](../PRIVACY.md) for the
+exact data surfaces.
 
 StoreKit access is app-owned: five foreground hours, then a non-consumable
 unlock in the official main flavor. Dev/Exp bypass the gate. Analytics use
@@ -60,39 +81,90 @@ transcription and the optional account-fenced private CloudKit library. Archive
 publication and terminal insertion have separate outcomes: a successful paste
 does not release an original recording. The app bounds its producer spool.
 
-## Configuration decision
+## Decisions
 
-The public build must resolve without private credentials, while the official
-app must retain its bundle IDs, App Group, Keychain namespaces, unlock product,
-CloudKit container and public endpoints. `Config/Defaults.xcconfig` supplies
-example settings; ignored `Local.xcconfig` overrides them. The same Xcode build
-settings feed Info.plist and entitlements; `AgenTTYBuildConfiguration` validates
-runtime values once. Signed/release commands reject the example identity.
+- **Identity through xcconfig.** The public build resolves without private
+  credentials while the official app keeps its identities.
+  `Config/Defaults.xcconfig` holds the example identity and every setting the
+  targets share; ignored `Local.xcconfig` overrides it. The same build settings
+  feed Info.plist and entitlements, and `AgenTTYBuildConfiguration` validates
+  runtime values once. A parallel runtime settings file or custom parser would
+  duplicate Xcode's mechanism. Signed and release commands reject the example
+  identity.
+- **GhosttyKit as a pinned download.** Ordinary builds fetch the reviewed
+  release asset and verify its digest; only explicit vendor maintenance
+  rebuilds the source pins. Building Ghostty in CI would add a Zig toolchain and
+  minutes to every run, and Git LFS would put a large binary in clones.
+- **Cloud signing of one checked export.** The release archives unsigned,
+  ad-hoc signs embedded frameworks deepest first and then app bundles, exports
+  once through Xcode cloud signing, checks the export's entitlements and every
+  framework's Apple Distribution signature, and uploads exactly that IPA with
+  `altool`. Exporting again with `destination` `upload` signed a second time and
+  shipped bytes nobody checked.
+- **One exact upload.** The `numbers` job reserves the build number and the
+  serialized TestFlight job uploads with it; GitHub's step history fences a
+  rerun after an upload began, so it reuses that build instead of uploading
+  again. This replaced a rule against rerunning the upload job. A fresh number
+  per retry could send testers a duplicate after a lost acknowledgement.
+- **Shared App Store Connect tooling.** `scripts/app-store-connect` and its
+  tests are identical to `emileberhard/app-template`'s; AgenTTY's metadata,
+  version check and What-to-Test-only TestFlight moved into the template rather
+  than living in a fork that drifts.
+- **Backend before clients.** `testflight`, `github-release` and `npm` need the
+  `backend` deploy, and TestFlight waits until the public `/healthz` reports
+  this version or newer, so no client ships before its server. The backend keeps
+  compatibility lanes, so installed older apps keep working against it.
+- **Release runtimes on GitHub, the latest channel on R2.** A main-flavor app
+  reads the host runtime attached to its own tag's GitHub release. Dev, Exp and
+  development pairing CLIs read R2's mutable latest channel, so the publisher
+  writes only that channel; versioned R2 objects stay for the installed apps
+  that compiled their URLs. See the [CI guide](agent-guides/ci-pipeline.md#host-runtime).
+- **Screens captured from the app.** `AgenTTY/Sources/iOS/Capture.swift` is a
+  Debug-only catalog of `CaptureScreen`s, each rendering the real main window
+  from a seeded fixture. The terminal shows a local Claude Code or Codex
+  transcript injected through `TerminalBridge` without SSH; the hosts sheet
+  opens on any route. The app waits for a stable drawn frame, then
+  `AppStore/capture` takes a `simctl` screenshot, which includes Ghostty's Metal
+  surface. Light and dark are terminal themes, because the app's color scheme
+  follows the theme's luminance. `just ui-previews` renders the catalog into a
+  contact sheet; the release captures the App Store screens on fresh simulators
+  and `AppStore/compose.swift` frames them with the marketing copy. This
+  replaced a Next.js page, Apple bezel downloads, an ascelerate config and a
+  launch-argument screenshot mode inside production code, including a fake host
+  switcher. The capture build is ad-hoc signed so the Keychain works in the
+  simulator.
+- **One phone iteration path.** `scripts/iphone-iteration` builds Dev or Exp
+  with a reserved build number into a retained checkpoint and installs it on
+  the paired iPhone directly, or through SimpleMDM after
+  `scripts/prepare-iphone-mdm` removes private inputs from the managed copy. An
+  iPad UDID installs directly. It replaced several install recipes, an
+  uninstall path and an over-the-air script.
+- **Worktree inputs from the main checkout.** `scripts/prepare-local-inputs`
+  copies missing ignored inputs such as `Config/Local.xcconfig` from the main
+  checkout with mode 0600 and never overwrites. Symlinks would let one
+  worktree's edit change every other one.
+- **Derived output in `.local/`.** Builds, DerivedData, captures, the host
+  runtime and traces live in the checkout's ignored `.local/`, so they leave
+  with the worktree, and parallel worktrees never share a build. Xcode's default
+  DerivedData outlived deleted worktrees and kept a broken package checkout that
+  `-skipPackageUpdates` never repaired; the build now resolves packages again
+  when `Package.resolved` changes.
+- **Recipes named by intent.** `just` lists grouped recipes, and the Justfile
+  exports the `DEVELOPER_DIR` that `scripts/select-xcode` finds for
+  `.xcode-version`, so local commands, CI and the release use one Xcode.
+- **Swift Testing.** The whole `AgenTTY-iOS-Tests` target uses Swift Testing;
+  XCTest remains only where Apple requires it.
 
-This uses Xcode's existing configuration mechanism rather than a parallel
-runtime settings file or custom parser. Service changes require a new app
-build, which is appropriate for signing identity and distribution boundaries.
-Changing an official storage identifier later requires an explicit migration;
-it cannot be treated as a cosmetic rebrand. Provider keys and host bootstrap
-seeds remain separate ignored resources compiled only in Dev/Exp.
+Record each later decision here with the alternatives it beat.
 
-## Distribution
+## Expensive to change
 
-Source dependencies and build locks are immutable inputs. Ordinary builds
-fetch the reviewed GhosttyKit release asset and verify its digest; explicit
-vendor maintenance rebuilds the source pins. Third-party notices accompany the
-app, downloadable runtime and npm package, independently of AgenTTY's Shield
-license. Public CI never runs on an operator's personal machine.
-
-Hosted cloud signing is attempted only for distribution export of an unsigned
-archive. App Groups/CloudKit/extension provisioning must be proved with the
-actual Apple account. Every embedded framework is ad-hoc signed before its
-containing app so cloud export replaces linker-generated signatures. The export
-is checked for entitlements and for every embedded framework carrying the team's
-Apple Distribution signature before anything uploads. A matching team alone does
-not establish a distribution signature. App Store
-text and screenshots are committed under `AppStore/` and applied to the version
-the tag prepares, which carries the same version as the app, TestFlight, runtime
-and npm package.
-
-New main builds resolve their matching host-runtime manifest from the same GitHub release tag. The tag workflow builds tmux and both helpers, packages checksums/notices, and attaches them to the release only after the app archive and runtime pass. The GitHub release with the runtime follows the TestFlight upload. Dev/Exp keep the mutable local artifact channel, and previously shipped immutable static-host URLs remain intact.
+- The shipped identities: the bundle IDs under `dev.tuist.agentty.*`, the App
+  Group, the CloudKit container, the Keychain namespace and the StoreKit
+  product. Changing any of them strands installed data or purchases and needs
+  an explicit migration.
+- The backend's SQLite database, which holds device identities, grants and
+  service budgets that installed apps and hosts depend on.
+- Published host runtime objects and their URLs, which installed apps compiled
+  in, and the npm package name `@agentty-app/pair`.
+- Public endpoints compiled into shipped apps.
