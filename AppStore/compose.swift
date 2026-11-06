@@ -143,8 +143,11 @@ MainActor.assumeIsolated {
         rgba.clear(bounds)
         rgba.draw(rendered, in: bounds)
         let pixels = UnsafeBufferPointer(start: rgba.data!.assumingMemoryBound(to: UInt8.self), count: rendered.width * rendered.height * 4)
-        guard !stride(from: 3, to: pixels.count, by: 4).contains(where: { pixels[$0] != 255 }) else {
-            fail("\(name) rendered with transparent pixels instead of covering its canvas")
+        let transparent = stride(from: 3, to: pixels.count, by: 4).filter { pixels[$0] != 255 }.map { $0 / 4 }
+        guard transparent.isEmpty else {
+            let columns = transparent.map { $0 % rendered.width }, rows = transparent.map { $0 / rendered.width }
+            fail("\(name) rendered \(transparent.count) transparent pixels, alpha down to \(transparent.map { pixels[$0 * 4 + 3] }.min()!), "
+                 + "in x \(columns.min()!)...\(columns.max()!), y \(rows.min()!)...\(rows.max()!), instead of covering its canvas")
         }
         guard drawn.insert(Data(pixels)).inserted else { fail("\(name) rendered the same pixels as an earlier slide") }
         context.draw(rendered, in: bounds)
