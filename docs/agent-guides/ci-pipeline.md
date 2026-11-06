@@ -79,8 +79,8 @@ commit a push to `main` ended on, after its CI passed.
    support URL, and the app's name, subtitle and privacy URL), sets What's New
    from the tag message from the second release on, replaces the screenshots of
    every captured placement group and attaches the build, then, once the app
-   has a release, submits it for App Review, withdrawing an older version still
-   in review.
+   has a release, submits it for App Review. A version waiting for or in review
+   is never withdrawn; the newer tag waits until it is released.
 9. `github-release` attaches the complete runtime in its `gh release create`
    call, which stages the assets before publication. The release uses the bare
    version, the annotated tag message verbatim as its notes, and Latest only
