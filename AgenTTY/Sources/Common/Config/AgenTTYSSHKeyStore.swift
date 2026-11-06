@@ -63,12 +63,6 @@ final class AgenTTYSSHKeyStore {
         keys = []
         usableKeyIDs = []
 
-        if AgenTTYSSHSeedPolicy.isScreenshotMode {
-            _ = ensureBootstrapSeedKey()
-            refreshUsableKeyIDs()
-            return
-        }
-
         let persistedV2 = loadV2Keys()
         let initialKeys: [AgenTTYSSHKey]
         if let persisted = persistedV2 {

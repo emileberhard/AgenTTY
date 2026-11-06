@@ -10,14 +10,7 @@ nonisolated enum AgenTTYHostRuntime {
     static let shareRemotePath = "$HOME/.agentty/share"
     static let terminfoRootRemotePath = "$HOME/.agentty/share/terminfo"
     static let shellConfigRemotePath = "$HOME/.agentty/config/shell"
-    static var tmuxSessionName: String {
-#if AGENTTY_BOOTSTRAP_SEED
-        if AgenTTYSSHSeedPolicy.isScreenshotMode {
-            return "agentty-screenshot"
-        }
-#endif
-        return "agentty-main"
-    }
+    static let tmuxSessionName = "agentty-main"
 
     static let tmuxWrapperRemotePath = "$HOME/.agentty/bin/tmux"
     static let tmuxWrapperShellLiteral = "\"$HOME/.agentty/bin/tmux\""

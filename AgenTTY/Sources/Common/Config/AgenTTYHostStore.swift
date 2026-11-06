@@ -48,12 +48,6 @@ final class AgenTTYHostStore {
         hosts = []
         activeHostID = nil
 
-        if let screenshotHosts = AgenTTYSSHSeedPolicy.screenshotDemoHosts() {
-            hosts = screenshotHosts
-            activeHostID = AgenTTYSSHSeedPolicy.bootstrapSeedHostID
-            return
-        }
-
         let persistedHostsV2 = loadHostsV2()
         let initialHosts: [AgenTTYHost]
         if let persistedV2 = persistedHostsV2 {

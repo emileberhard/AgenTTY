@@ -479,7 +479,7 @@ struct TerminalHostsSheet: View {
     let trustedHostKeyStore: AgenTTYTrustedHostKeyStore
     let passwordStore: AgenTTYSSHPasswordStore
     let analyticsClient: AgenTTYAnalyticsClient
-    private let initialHostEditorID: UUID?
+    private let initialRoute: HostsRoute?
 
     @State private var nav: SheetNavigationCoordinator<HostsRoute>
     @State private var didApplyInitialRoute = false
@@ -488,12 +488,12 @@ struct TerminalHostsSheet: View {
         trustedHostKeyStore: AgenTTYTrustedHostKeyStore,
         passwordStore: AgenTTYSSHPasswordStore,
         analyticsClient: AgenTTYAnalyticsClient,
-        initialHostEditorID: UUID? = nil
+        initialRoute: HostsRoute?
     ) {
         self.trustedHostKeyStore = trustedHostKeyStore
         self.passwordStore = passwordStore
         self.analyticsClient = analyticsClient
-        self.initialHostEditorID = initialHostEditorID
+        self.initialRoute = initialRoute
         _nav = State(initialValue: SheetNavigationCoordinator<HostsRoute>())
     }
 
@@ -577,10 +577,9 @@ struct TerminalHostsSheet: View {
         .onAppear {
             guard !didApplyInitialRoute else { return }
             didApplyInitialRoute = true
-            if let initialHostEditorID,
-               let host = hostStore.hosts.first(where: { $0.id == initialHostEditorID }) {
+            if let initialRoute {
                 nav.selectedDetent = .large
-                nav.path = [.edit(host)]
+                nav.path = [initialRoute]
                 return
             }
 

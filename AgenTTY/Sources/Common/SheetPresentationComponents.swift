@@ -38,10 +38,10 @@ final class SheetPresentation {
     var showHosts = false
     var showSSHKeys = false
     var showThemes = false
-    var pendingHostEditorID: UUID?
+    var pendingHostsRoute: HostsRoute?
 
-    func presentHosts(hostEditorID: UUID? = nil) {
-        pendingHostEditorID = hostEditorID
+    func presentHosts(route: HostsRoute) {
+        pendingHostsRoute = route
         showHosts = true
     }
 }
