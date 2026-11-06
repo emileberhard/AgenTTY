@@ -126,6 +126,7 @@ Terminal font-size live actions are forced once when a new surface attaches, the
 ## Lifecycle (`TerminalSurfaceLifecycleController`)
 
 Maps app lifecycle to Ghostty API:
+- The second argument of `ghostty_surface_set_occlusion` means visible, not occluded; passing occlusion inverts both transitions below.
 - App inactive/background → `ghostty_surface_set_occlusion(surface, false)` — stops Metal submission, prevents `IOGPUMetalError`.
 - App active/foreground → `ghostty_surface_set_occlusion(surface, true)` — resumes rendering.
 - Focus managed separately via `ghostty_surface_set_focus`.
