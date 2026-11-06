@@ -1,8 +1,8 @@
 # AgenTTY
 
-Ghostty-based SSH terminal for iPhone and iPad, iOS 26+. The macOS target is a
-scaffold. Read [docs/architecture.md](docs/architecture.md) before changing a
-boundary. `CLAUDE.md` links to this file.
+Ghostty-based SSH terminal for iPhone and iPad, iOS 26+. Read
+[docs/architecture.md](docs/architecture.md), its goals, decisions and what is
+expensive to change, before changing a boundary. `CLAUDE.md` links to this file.
 
 ## Ownership
 
@@ -18,28 +18,9 @@ boundary. `CLAUDE.md` links to this file.
 | `tools/agentty-notify`, `tools/agentty-host-connector` | Host hooks/notifications and persistent SSH relay connector |
 | `services/backend` | Pairing, device identities, relay, APNs, analytics and paid transcription admission |
 | `AgenTTY.xcodeproj`, `Config`, `Justfile`, `scripts` | The committed JSON Xcode project and its package lock, build identity, entitlements, Info.plists, commands and release tooling |
-| `AppStore` | Committed App Store text per locale and the screenshots per placement group, once committed, applied by the release |
+| `iOS/Capture.swift`, `AppStore` | Debug capture catalog and fixtures, the simulator capture driver, the slide composer and the App Store text per locale |
 
 App source paths above are relative to `AgenTTY/Sources`.
-
-## Host runtime publication
-
-The existing `just host-runtime-publish-*` commands build the platform artifacts
-on the Mac and publish to the bucket configured by
-`~/.config/agentty-r2/rclone.conf`; a missing config fails publication. The bucket token is scoped to
-that bucket and is readable only by the publisher. Self-hosters can set
-`AGENTTY_HOST_RUNTIME_PUBLIC_ROOT` to keep the local static-host workflow.
-
-The publisher serializes publication, checks existing release bytes, uploads and
-verifies every payload before its manifest, and replaces `latest.json` last.
-Semver releases remain available for installed apps; the latest channel retains
-its current and 16 previous releases. Publication reports an error if the bucket
-exceeds 20 GiB. `latest.json` uses no-cache; release objects are immutable. The
-Linux `agentty-assets` selective backup verifies and saves the mirrored
-manifest-referenced files. The publisher updates a public index of retained
-releases; the Linux timer pulls its manifests and checksum-verified payloads,
-then replaces the mirror under the service backup lock. Semver releases remain
-mirrored, and the latest channel follows the publisher's bounded retention.
 
 ## Invariants
 
@@ -76,8 +57,8 @@ mirrored, and the latest channel follows the publisher's bounded retention.
   notification and dictation credentials scoped separately; SSH trust remains
   app-to-host. Preserve explicit compatibility lanes until their documented
   rollout condition is satisfied. Deploys fence and wait for idle SSH,
-  aborting after 120 seconds if busy. Host shutdown allows ten seconds for SSH
-  and forty for HTTP within the loaded sixty-second launchd exit limit.
+  aborting after 120 seconds if busy. Shutdown allows ten seconds for SSH and
+  forty for HTTP within the container's sixty-second stop grace period.
 - Analytics are production-only. Never log credentials, SSH private keys,
   audio or terminal contents as diagnostics. Unknown delivery remains unknown;
   do not blindly retry externally visible side effects.
@@ -87,26 +68,31 @@ mirrored, and the latest channel follows the publisher's bounded retention.
 
 ## Commands and verification
 
-Use the Justfile; do not invoke xcodebuild directly. Load the local
-`swift-development` skill if available before Swift/build/install work.
+Use the Justfile (`just` lists it); do not invoke xcodebuild directly. Load the
+local `swift-development` skill if available before Swift/build/install work.
 
-- `just ios-check`: public unsigned simulator build.
-- `just ios-test`: maintained unit tests on the configured iOS simulator.
-- `ARCHIVE_PATH=<new path> scripts/ios-public archive`: the unsigned Release
-  archive of the shipping app, the compile CI and the release run.
-- `python3 -m unittest discover -s scripts/tests`: release tooling checks.
-- `just backend-test`, `just notify-helper-test`, `just host-connector-test`,
-  `just host-shell-test`: checks for their respective components.
-- `cd tools/agentty-host && bun install --frozen-lockfile && bun run test`:
-  pairing CLI checks.
-- Maintainers: `just ios-build-install-dev` for output-affecting app changes;
-  use `just ios-build-dev` if the phone is unreachable. Main/Exp installs are
-  explicit choices. Paired-device work runs on the connected host.
-- Docs-only changes skip app installation. Compilation, test execution,
-  installation, launch and real-world acceptance are separate evidence.
+| Command | Checks or produces |
+| --- | --- |
+| `just build` | Unsigned Dev simulator build without private configuration |
+| `just test [Suite...]` | iOS unit tests (Swift Testing) on the newest installed simulator runtime |
+| `just ui-previews [--device ipad] [--appearance light] [screen...]` | `.local/ui-previews/sheet.jpg` of every `CaptureScreen`; read it after each UI change |
+| `just screenshots` | The App Store slides in `.local/screenshots`, captured on fresh simulators as the release does |
+| `just test-backend`, `just test-notify-helper`, `just test-host-connector`, `just test-host-shell` | Backend, host helper and shell wrapper checks |
+| `cd tools/agentty-host && bun install --frozen-lockfile && bun run test` | Pairing CLI checks |
+| `python3 -m unittest discover -s scripts/tests` | Release tooling checks |
+| `ARCHIVE_PATH=<new path> scripts/ios-public archive` | The unsigned Release archive that CI and the release build |
+| `just install-dev [UDID]`, `just build-dev` | Maintainers: the signed Dev app on the paired iPhone, or a retained checkpoint without a phone; `just delivery=mdm …` forces SimpleMDM |
 
-GhosttyKit is an ignored, checksum-pinned release download. `_ensure-xcframework`
-fetches/verifies it before app commands; ordinary CI never rebuilds Ghostty or
+Maintainers install output-affecting app changes with `just install-dev`;
+`install-exp` and `install-main` are explicit choices. Paired-device work runs
+on the connected host. Builds, captures and the host runtime write to the
+checkout's ignored `.local/`, and `scripts/prepare-local-inputs` copies missing
+ignored inputs from the main checkout into a worktree. Docs-only changes skip
+app installation. Compilation, test execution, installation, launch and
+real-world acceptance are separate evidence.
+
+GhosttyKit is an ignored, checksum-pinned release download.
+`scripts/ghostty-xcframework ensure` fetches and verifies it before app commands; ordinary CI never rebuilds Ghostty or
 fetches LFS. Preserve `scripts/ghostty-artifact.json` and
 `docs/licenses/GhosttyKit-NOTICES.txt`. Copy the complete Ghostty notices into
 the authoritative combined notice file whenever that asset changes.
@@ -144,22 +130,20 @@ and every uploaded App Store/TestFlight version, is the version everywhere:
 app, TestFlight, App Store metadata, GitHub release, host runtime, npm pairing
 package, Rust build identity and Sentry release. Manifest versions of 0.0.0 are
 inert development placeholders, never manually bumped. `release.yml` runs on
-every pushed tag and rejects anything but that tag; `admit` then waits for `main`'s
-CI on the same commit. The workflow-wide `testflight` concurrency fence serializes
-build-number selection through publication without cancelling a running release.
-`runtime` builds and checksums the four-target host runtime without release
-credentials, alongside `archive`, which reserves the build number, builds unsigned
-and ad-hoc signs embedded frameworks deepest first and then app bundles.
-The archive crosses jobs as a tar file to preserve signatures and symlinks.
-Only after both jobs succeed, `testflight` restores that same-run archive,
-exports through Xcode cloud signing with the `testflight` environment's ASC key,
-checks entitlements and each framework's Apple Distribution signature, and uploads with a
-build number reserved from App Store Connect. `testflight-notes` sets What to
-Test, `app-store` applies `AppStore/` to the prepared version and submits it for App Review, `github-release`
-publishes the tag message verbatim with the runtime assets, and `npm` publishes
-the pairing package with OIDC and provenance. App Store release stays manual.
-Rerun a transiently failed job from the tag's own run while it is still the
-newest version; a fix ships as the next patch. See the CI guide for setup.
+every pushed tag and rejects anything but that tag; `admit` then waits for
+`main`'s CI on the same commit. `backend` deploys first. `runtime` and
+`npm-candidate` build without release credentials, `numbers` reserves the build
+number and `archive` builds unsigned and ad-hoc signs embedded frameworks
+deepest first, then app bundles. `testflight` waits until the backend's
+`/healthz` reports the tag or newer, exports once through Xcode cloud signing,
+checks that export's entitlements and framework signatures, and uploads exactly
+it with `altool` behind a step-history fence. `testflight-notes` sets What to
+Test, `app-store` captures fresh screenshots, applies `AppStore/` to the
+prepared version and submits it for App Review, `github-release` publishes the
+tag message verbatim with the runtime assets, and `npm` publishes the pairing
+package with OIDC and provenance. App Store release stays manual. Rerun failed
+jobs from the tag's own run while it is still the newest version; a fix ships
+as the next patch. See the [CI guide](docs/agent-guides/ci-pipeline.md).
 
 Work in a locked worktree and preserve other agents' work. The task brief sets
 integration authority; do not merge, deploy or publish when assigned a
