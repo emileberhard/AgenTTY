@@ -100,8 +100,9 @@ Local Mac crash reports (tmux, simulators, helpers) land in
 
 ## Relay / backend
 
-Relay deployment files and logs are operator-owned and live outside the public tree.
-On the relay host: structured connection logs (connector websocket durations, disconnect
+The backend's deployment lives in `services/backend/deploy`; its secrets and state stay on
+the Linux host. There, `docker logs agentty-backend-1` against the rootless daemon
+(`DOCKER_HOST=unix:///run/agentty-docker/docker.sock`, rotated at three 10 MB files) holds structured connection logs (connector websocket durations, disconnect
 reasons, rejected SSH relay requests) plus the SQLite analytics database (production
 `AgenTTY-iOS` only — dev/exp builds and side-loaded main builds do not emit analytics,
 so their connection history is only visible in device logs and Sentry). Host-connector

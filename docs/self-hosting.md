@@ -1,7 +1,8 @@
 # Self-hosting
 
-You need an Apple Silicon Mac with Xcode 27.1, Just, an Apple Developer account,
-and a reachable SSH host. Start with `just ios-check`; this unsigned simulator
+You need an Apple Silicon Mac with the Xcode that `.xcode-version` names, Just,
+an Apple Developer account and a reachable SSH host. Start with `just build`;
+this unsigned simulator
 build needs no private files. The simulator cannot establish device delivery,
 push or cloud-signing behavior.
 
@@ -24,13 +25,13 @@ self-hoster's credentials or entitlement grants.
 
 Open `AgenTTY.xcodeproj` and run `AgenTTY-iOS-Dev` on your signed device. Maintainer delivery recipes that use
 private signing/install helpers are separate conveniences; they are not
-prerequisites for `ios-check`, `ios-test`, or building in Xcode.
+prerequisites for `just build`, `just test`, or building in Xcode.
 
 ## Relay and artifacts
 
 Use your own HTTPS backend and artifact endpoint in `AGENTTY_RELAY_URL` and
 `AGENTTY_ARTIFACT_URL`. Set `AGENTTY_RELEASE_ARTIFACT_URL` to your GitHub
-repository releases/download base for new main-flavor releases. Build/run the Rust backend with `just backend-dev`;
+repository releases/download base for new main-flavor releases. Build/run the Rust backend with `just run-backend`;
 [backend.md](backend.md) documents configuration, APNs and API boundaries.
 Provide your own APNs key, allowed app topics, server identity and optional
 paid transcription provider credentials. Protect state and ingress, apply
@@ -49,7 +50,7 @@ attaches them to the same GitHub release as the app. Configure
 `AGENTTY_RELEASE_ARTIFACT_URL` to that repository's releases/download base.
 For Dev/Exp, build the pinned tmux and Rust helpers, set
 `AGENTTY_HOST_RUNTIME_PUBLIC_ROOT` and `AGENTTY_HOST_RUNTIME_BASE_URL` to your
-static host, then run `just host-runtime-publish-latest`. Existing immutable
+static host, then run `just publish-host-runtime`. Existing immutable
 static-host releases belong to older installed apps and must remain unchanged.
 The app verifies every payload before installing it on an SSH host.
 
@@ -68,9 +69,8 @@ the bootstrap object supplies `host`, `label`, `username` and
 you own and do not distribute these development builds publicly. Main builds
 exclude that resource and both compile flags.
 
-For the maintainer's existing router, `scripts/sync-local-llm-router-key` copies
+For the maintainer's existing router, `scripts/prepare-local-inputs` copies
 a local key if present and otherwise leaves the secrets file unchanged. A local
 key without `llmRouter.origin` fails the build instead of shipping without AI.
-A worktree without its own secrets file first copies the main checkout's.
-Generated screenshots and Apple device bezels are ignored; review synthetic
-artwork locally before any explicit App Store upload.
+A worktree without its own secrets file or `Config/Local.xcconfig` first copies
+the main checkout's.
