@@ -3,7 +3,14 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 operation="${1:?Use build, test [suite...], build-llm-tests, test-llm or archive}"
 ./scripts/ghostty-xcframework ensure
-common=(-project AgenTTY.xcodeproj -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -skipMacroValidation -jobs 4)
+derived=.local/DerivedData
+resolved=AgenTTY.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved
+if ! cmp -s "$resolved" "$derived/Package.resolved" || [[ ! -d $derived/SourcePackages/checkouts ]]; then
+  xcodebuild -resolvePackageDependencies -project AgenTTY.xcodeproj -scheme AgenTTY-iOS -derivedDataPath "$derived" \
+    -onlyUsePackageVersionsFromResolvedFile
+  cp "$resolved" "$derived/Package.resolved"
+fi
+common=(-project AgenTTY.xcodeproj -derivedDataPath "$derived" -disableAutomaticPackageResolution -onlyUsePackageVersionsFromResolvedFile -skipPackageUpdates -skipMacroValidation -jobs 4)
 case "$operation" in
   build)
     ./scripts/prepare-local-inputs
