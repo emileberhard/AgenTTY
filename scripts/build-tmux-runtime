@@ -11,7 +11,7 @@ Options:
 
   --output-dir <dir>
       Output root for bundled binaries.
-      Default: HostRuntimeArtifacts/bin
+      Default: .local/host-runtime
 
   --build-root <dir>
       Reuse a caller-provided temporary build root.
@@ -23,7 +23,7 @@ EOF
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-default_output_root="$repo_root/HostRuntimeArtifacts/bin"
+default_output_root="$repo_root/.local/host-runtime"
 source "$script_dir/tmux-runtime-config.sh"
 
 tmux_version="$TMUX_RUNTIME_TMUX_VERSION"

@@ -37,7 +37,7 @@ def local_publish(args, directory):
 
 
 def publish_release(version, directory):
-    if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)|latest-[a-f0-9]{12}', version):
+    if not re.fullmatch(r'latest-[a-f0-9]{12}', version):
         raise ValueError('Invalid release directory')
     source = directory / 'releases' / version
     target = REMOTE + '/releases/' + version
@@ -78,24 +78,15 @@ def retain_latest(current):
 
 
 def main(args):
-    if ('--latest' in args) == ('--version' in args):
-        raise ValueError('Choose exactly one of --latest or --version')
-    if '--latest' in args:
-        mode = 'latest'
-        version = None
-    elif '--version' in args and args.index('--version') + 1 < len(args):
-        mode = 'release'
-        version = args[args.index('--version') + 1]
-        if not re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', version):
-            raise ValueError('Invalid release version')
-    else:
-        raise ValueError('Expected --latest or --version MAJOR.MINOR.PATCH')
+    if '--latest' not in args:
+        raise ValueError('Expected --latest')
     lock_path = CONFIG.parent / 'publish.lock'
     with lock_path.open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         with tempfile.TemporaryDirectory(prefix='agentty-host-runtime-') as temporary:
             directory = Path(temporary)
-            if mode == 'latest' and remote_file(REMOTE + '/latest.json'):
+            version = None
+            if remote_file(REMOTE + '/latest.json'):
                 rclone('copyto', REMOTE + '/latest.json', str(directory / 'latest.json'))
                 version = json.loads((directory / 'latest.json').read_text())['runtime_version']
                 if not re.fullmatch(r'latest-[a-f0-9]{12}', version):
@@ -103,14 +94,9 @@ def main(args):
             if version and remote_file(REMOTE + '/releases/' + version + '/manifest.json'):
                 rclone('copy', REMOTE + '/releases/' + version, str(directory / 'releases' / version))
             local_publish(args, directory)
-            if '--verify-existing-release' in args:
-                return
-            if mode == 'latest':
-                version = json.loads((directory / 'latest.json').read_text())['runtime_version']
-            assert version is not None
+            version = json.loads((directory / 'latest.json').read_text())['runtime_version']
             publish_release(version, directory)
-            if mode == 'latest':
-                rclone('--checksum', '--header-upload', 'Cache-Control: no-cache', 'copyto', str(directory / 'latest.json'), REMOTE + '/latest.json')
+            rclone('--checksum', '--header-upload', 'Cache-Control: no-cache', 'copyto', str(directory / 'latest.json'), REMOTE + '/latest.json')
             current = json.loads(rclone('cat', REMOTE + '/latest.json', capture=True))['runtime_version']
             if not re.fullmatch(r'latest-[a-f0-9]{12}', current):
                 raise ValueError('Invalid current latest runtime')

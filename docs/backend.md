@@ -42,7 +42,7 @@ just host-runtime-publish-latest
 just host-runtime-publish-release <version>
 ```
 
-`HostRuntimeArtifacts/bin/**` is generated and ignored. Before publishing, `scripts/publish-host-runtime-artifacts` checks that notifier and host-connector artifacts match their source stamps and that tmux/terminfo payloads exist for every supported target. Published manifests also record notifier/connector source fingerprints, so an immutable semver runtime can be reused only by the exact locked source and pinned build-tool contract that produced it; changed helper source requires a new patch version.
+`.local/host-runtime/**` is generated and ignored. Before publishing, `scripts/publish-host-runtime-artifacts` checks that notifier and host-connector artifacts match their source stamps and that tmux/terminfo payloads exist for every supported target. Published manifests also record notifier/connector source fingerprints, so an immutable semver runtime can be reused only by the exact locked source and pinned build-tool contract that produced it; changed helper source requires a new patch version.
 
 ## Connector Liveness
 

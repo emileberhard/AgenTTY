@@ -4,9 +4,6 @@ set -euo pipefail
 usage() {
   cat <<'EOF' >&2
 Usage:
-  publish-host-runtime-artifacts --version <semver> [--auto-rebuild-notify]
-  publish-host-runtime-artifacts --version <semver> --reuse-existing-release [--auto-rebuild-notify]
-  publish-host-runtime-artifacts --version <semver> --verify-existing-release
   publish-host-runtime-artifacts --latest [--auto-rebuild-notify]
 EOF
 }
@@ -21,7 +18,7 @@ if [[ "${AGENTTY_R2_LOCAL_STAGE:-}" != 1 && -z "${AGENTTY_HOST_RUNTIME_PUBLIC_RO
   exec "$script_dir/publish-host-runtime-r2" "$@"
 fi
 repo_root="$(cd "$script_dir/.." && pwd)"
-source_root="$repo_root/HostRuntimeArtifacts/bin"
+source_root="$repo_root/.local/host-runtime"
 public_root="${AGENTTY_HOST_RUNTIME_PUBLIC_ROOT:-$HOME/.agentty/public/host-runtime}"
 base_url="${AGENTTY_HOST_RUNTIME_BASE_URL:-https://agentty-assets.esmadil.se/host-runtime}"
 base_url="${base_url%/}"
@@ -96,9 +93,9 @@ ensure_notify_helper_artifacts_current() {
 
   if [[ "$auto_rebuild_notify" != true ]]; then
     if [[ -z "$stamped_hash" ]]; then
-      echo "Missing $notify_source_hash_stamp. Run 'just notify-helper-rebuild' before publishing host runtime artifacts." >&2
+      echo "Missing $notify_source_hash_stamp. Run 'just build-notify-helper' before publishing host runtime artifacts." >&2
     else
-      echo "agentty-notify artifacts drift from tools/agentty-notify source. Run 'just notify-helper-rebuild' before publishing host runtime artifacts." >&2
+      echo "agentty-notify artifacts drift from tools/agentty-notify source. Run 'just build-notify-helper' before publishing host runtime artifacts." >&2
     fi
     exit 1
   fi
@@ -106,11 +103,11 @@ ensure_notify_helper_artifacts_current() {
   echo "agentty-notify artifacts drift from source; rebuilding host runtime helper"
   (
     cd "$repo_root"
-    just --justfile "$repo_root/Justfile" notify-helper-rebuild
+    just --justfile "$repo_root/Justfile" build-notify-helper
   )
 
   [[ -f "$notify_source_hash_stamp" ]] || {
-    echo "Missing $notify_source_hash_stamp after notify-helper-rebuild." >&2
+    echo "Missing $notify_source_hash_stamp after build-notify-helper." >&2
     exit 1
   }
 
@@ -142,11 +139,11 @@ ensure_host_connector_artifacts_current() {
   echo "agentty-host-connector artifacts drift from source; rebuilding host runtime connector"
   (
     cd "$repo_root"
-    just --justfile "$repo_root/Justfile" host-connector-rebuild
+    just --justfile "$repo_root/Justfile" build-host-connector
   )
 
   [[ -f "$connector_source_hash_stamp" ]] || {
-    echo "Missing $connector_source_hash_stamp after host-connector-rebuild." >&2
+    echo "Missing $connector_source_hash_stamp after build-host-connector." >&2
     exit 1
   }
 
@@ -426,37 +423,6 @@ except (OSError, ValueError, json.JSONDecodeError) as error:
 PY
 }
 
-publish_immutable_release() {
-  local runtime_version="$1"
-  local release_root="$public_root/releases/$runtime_version"
-  local staging_root="$public_root/.publish-release-$runtime_version-$$"
-  local generated_at
-
-  if [[ -d "$release_root" ]]; then
-    if release_payload_matches_source "$release_root" &&
-       release_manifest_matches_payload "$runtime_version" "$release_root"; then
-      echo "release runtime already published version=$runtime_version"
-      return 0
-    fi
-
-    echo "Refusing to overwrite existing host runtime release $runtime_version with different bytes." >&2
-    exit 1
-  fi
-
-  stage_release_tree "$staging_root"
-  generated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  render_manifest \
-    "$staging_root/manifest.json" \
-    "$runtime_version" \
-    "$generated_at" \
-    "$base_url/releases/$runtime_version" \
-    "$staging_root"
-
-  mkdir -p "$(dirname "$release_root")"
-  mv "$staging_root" "$release_root"
-  echo "published release runtime version=$runtime_version path=$release_root"
-}
-
 publish_latest_manifest() {
   local latest_manifest="$public_root/latest.json"
   local runtime_hash
@@ -507,31 +473,15 @@ publish_latest_manifest() {
 }
 
 mode=""
-version=""
 auto_rebuild_notify=false
-reuse_existing_release=false
-verify_existing_release=false
 while (($# > 0)); do
   case "$1" in
-    --version)
-      mode="release"
-      version="${2:-}"
-      shift 2
-      ;;
     --latest)
       mode="latest"
       shift
       ;;
     --auto-rebuild-notify)
       auto_rebuild_notify=true
-      shift
-      ;;
-    --reuse-existing-release)
-      reuse_existing_release=true
-      shift
-      ;;
-    --verify-existing-release)
-      verify_existing_release=true
       shift
       ;;
     -h|--help)
@@ -546,69 +496,13 @@ while (($# > 0)); do
   esac
 done
 
-if [[ "$mode" == "release" && ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Release version must be semver (x.y.z)." >&2
-  exit 1
-fi
-
-if [[ "$mode" != "release" && "$mode" != "latest" ]]; then
+if [[ "$mode" != "latest" ]]; then
   usage
   exit 2
 fi
 
-if [[ "$reuse_existing_release" == true && "$verify_existing_release" == true ]]; then
-  echo "Choose either --reuse-existing-release or --verify-existing-release." >&2
-  exit 2
-fi
-
-if [[ "$mode" != "release" && ("$reuse_existing_release" == true || "$verify_existing_release" == true) ]]; then
-  echo "Existing-release options require --version <semver>." >&2
-  exit 2
-fi
-
-if [[ "$verify_existing_release" == true && "$auto_rebuild_notify" == true ]]; then
-  echo "--verify-existing-release cannot rebuild artifacts." >&2
-  exit 2
-fi
-
 require_mac_mini_host
-
-if [[ "$mode" == "release" && "$verify_existing_release" == true ]]; then
-  existing_release_root="$public_root/releases/$version"
-  if [[ ! -d "$existing_release_root" ]]; then
-    echo "host runtime release is not published version=$version"
-    exit 3
-  fi
-  if release_manifest_matches_payload "$version" "$existing_release_root"; then
-    echo "verified immutable release runtime version=$version"
-    exit 0
-  fi
-  echo "Host runtime release $version exists but failed verification." >&2
-  exit 1
-fi
-
 mkdir -p "$public_root/releases"
-
-if [[ "$mode" == "release" && "$reuse_existing_release" == true ]]; then
-  existing_release_root="$public_root/releases/$version"
-  if [[ -d "$existing_release_root" ]]; then
-    if release_manifest_matches_payload "$version" "$existing_release_root"; then
-      echo "reusing verified immutable release runtime version=$version"
-      exit 0
-    fi
-    echo "Refusing to reuse invalid host runtime release $version." >&2
-    exit 1
-  fi
-fi
-
 assert_source_files
 verify_staged_host_connector_artifact
-
-case "$mode" in
-  release)
-    publish_immutable_release "$version"
-    ;;
-  latest)
-    publish_latest_manifest
-    ;;
-esac
+publish_latest_manifest

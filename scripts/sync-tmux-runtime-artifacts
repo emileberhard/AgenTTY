@@ -15,7 +15,7 @@ fi
 run_id="$1"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/.." && pwd)"
-resource_root="$repo_root/HostRuntimeArtifacts/bin"
+resource_root="$repo_root/.local/host-runtime"
 gh_cli="${AGENTTY_GH_CLI:-ghp}"
 source "$script_dir/tmux-runtime-config.sh"
 tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/agentty-tmux-artifacts.XXXXXX")"
