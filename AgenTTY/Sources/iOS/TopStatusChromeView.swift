@@ -125,7 +125,6 @@ struct TopStatusChromeView: View {
         .foregroundStyle(chromeForegroundColor)
         .lineLimit(1)
         .monospacedDigit()
-        .accessibilityLabel("status chrome")
     }
 
     @ViewBuilder
