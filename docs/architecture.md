@@ -132,9 +132,10 @@ does not release an original recording. The app bounds its producer spool.
   replaced a Next.js page, Apple bezel downloads, an ascelerate config and a
   launch-argument screenshot mode inside production code, including a fake host
   switcher. The capture build is ad-hoc signed so the Keychain works in the
-  simulator. The slides are composed only after the screenshot simulators are
-  deleted: on a hosted runner, `ImageRenderer` drew an empty canvas while a
-  simulator was booted, which the composer's opacity check caught.
+  simulator. The composer draws each slide's SwiftUI view into its own Core
+  Graphics bitmap: on hosted runners `ImageRenderer.cgImage` returned a fully
+  transparent image in four of five CI runs, with or without a booted
+  simulator, which the composer's opacity check caught.
   A screen that needs a real interaction, such as the open host menu or the
   themes sheet at its large detent, names an accessibility label in its ready
   signal, and the driver taps it with the pinned, checksum-verified AXe CLI,
