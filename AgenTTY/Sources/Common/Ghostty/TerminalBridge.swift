@@ -494,6 +494,17 @@ final class TerminalBridge {
             analyticsSSHSession?.inputEventCount += 1
         }
         let data = unsafe Data(bytes: bytes, count: count)
+        #if DEBUG
+        if let size = latestWindowSize,
+           let drawn = CaptureFixture.terminalDrewOutput(reporting: data, columns: size.columns, rows: size.rows) {
+            if !drawn {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+                    self?.maybeStartSSHConnection(reason: "capture drew in a stale grid")
+                }
+            }
+            return
+        }
+        #endif
         ssh?.send(data)
         scheduleImmediateShellPollingIfNeeded(for: data)
     }
@@ -872,8 +883,12 @@ final class TerminalBridge {
             return
         }
         #if DEBUG
-        if let output = CaptureFixture.terminalOutput(for: activeHost) {
+        if let size = latestWindowSize,
+           let output = CaptureFixture.terminalOutput(for: activeHost, columns: size.columns, rows: size.rows) {
             setHostConnectionPhase(.connected)
+            CaptureFixture.redrawTerminal = { [weak self] in
+                self?.maybeStartSSHConnection(reason: "capture redraw")
+            }
             injectTerminalOutputLocally(Data(output.utf8), source: "capture")
             return
         }

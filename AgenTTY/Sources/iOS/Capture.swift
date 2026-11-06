@@ -31,6 +31,24 @@ enum CaptureScreen: String, CaseIterable {
         }
         return screens
     }
+
+    var tap: CaptureTap? {
+        switch self {
+        case .switchHosts: CaptureTap(label: "Host quick picker", type: "PopUpButton")
+        case .themes where UIDevice.current.userInterfaceIdiom == .phone: CaptureTap(label: "Sheet Grabber", type: "Button")
+        default: nil
+        }
+    }
+}
+
+nonisolated struct CaptureTap: Encodable {
+    let label: String
+    let type: String
+}
+
+nonisolated private struct CaptureReady: Encodable {
+    let screen: String
+    let tap: CaptureTap?
 }
 
 private struct CaptureScene: View {
@@ -61,7 +79,7 @@ private struct CaptureScene: View {
         }
         _sheets = State(initialValue: sheets)
         let keyboard = KeyboardState()
-        if screen == .keyboardHidden || screen == .switchHosts {
+        if screen == .keyboardHidden {
             keyboard.hideKeyboard()
         }
         _keyboard = State(initialValue: keyboard)
@@ -85,7 +103,7 @@ private struct CaptureScene: View {
             sheetPresentation: sheets,
             themeToken: fixture.themeToken,
             themeNonce: fixture.themeToken.nonce,
-            terminalFontSize: TerminalFontSizeSetting.defaultValue,
+            terminalFontSize: UIDevice.current.userInterfaceIdiom == .pad ? TerminalFontSizeSetting.maximumValue : TerminalFontSizeSetting.defaultValue,
             keyboardInputMode: .defaultValue,
             lifetimeAccessController: fixture.lifetimeAccessController,
             analyticsClient: fixture.analyticsClient,
@@ -99,52 +117,180 @@ final class CaptureFixture {
     private struct Machine {
         let label: String
         let address: String
-        let session: [String]
+        let session: ((Int, Int) -> TerminalPage)?
     }
 
     private static let suiteName = "dev.tuist.agentty.capture"
     private static let machines = [
-        Machine(label: "workstation", address: "workstation.local", session: [
-            "\u{1B}[1;35m╭─ Claude Code ───────────────╮\u{1B}[0m",
-            "\u{1B}[1;35m│\u{1B}[0m  AgenTTY release workspace    \u{1B}[1;35m│\u{1B}[0m",
-            "\u{1B}[1;35m╰──────────────────────────────╯\u{1B}[0m",
-            "",
-            "\u{1B}[1;36m›\u{1B}[0m Finish the App Store release.",
-            "",
-            "\u{1B}[2m⏺ I’ll build and verify the full\u{1B}[0m",
-            "\u{1B}[2m  iPhone + iPad screenshot flow.\u{1B}[0m",
-            "",
-            "\u{1B}[1;32m✓\u{1B}[0m Captured the production UI",
-            "\u{1B}[1;32m✓\u{1B}[0m Composed the App Store slides",
-            "\u{1B}[1;32m✓\u{1B}[0m Verified every output size",
-            "",
-            "\u{1B}[1;34mReady for App Review.\u{1B}[0m",
-        ]),
-        Machine(label: "laptop", address: "laptop.local", session: [
-            "\u{1B}[1;36m>_ Codex\u{1B}[0m \u{1B}[2m(workspace: ~/projects/site)\u{1B}[0m",
-            "",
-            "\u{1B}[1;36m›\u{1B}[0m Fix the flaky checkout test.",
-            "",
-            "\u{1B}[2m• Ran\u{1B}[0m bun test checkout",
-            "\u{1B}[2m  └ 1 failed: totals round twice\u{1B}[0m",
-            "",
-            "\u{1B}[2m• Edited\u{1B}[0m src/cart/total.ts \u{1B}[32m+4\u{1B}[0m \u{1B}[31m-6\u{1B}[0m",
-            "",
-            "\u{1B}[1;32m✓\u{1B}[0m 42 tests pass",
-        ]),
-        Machine(label: "build-server", address: "192.0.2.24", session: []),
+        Machine(label: "workstation", address: "workstation.local", session: claudeCode),
+        Machine(label: "laptop", address: "laptop.local", session: codex),
+        Machine(label: "build-server", address: "192.0.2.24", session: nil),
     ]
 
     static var clockTime: Date? {
         CaptureView.directory == nil ? nil : Calendar.current.date(bySettingHour: 9, minute: 41, second: 0, of: .now)
     }
 
-    static func terminalOutput(for host: AgenTTYHost?) -> String? {
+    static var terminalIsDrawn = false
+    static var redrawTerminal: (() -> Void)?
+
+    static func terminalOutput(for host: AgenTTYHost?, columns: Int, rows: Int) -> String? {
         guard CaptureView.directory != nil,
-              let machine = machines.first(where: { $0.address == host?.address }) else {
+              let session = machines.first(where: { $0.address == host?.address })?.session else {
             return nil
         }
-        return "\u{1B}c" + machine.session.joined(separator: "\r\n")
+        terminalIsDrawn = false
+        return session(columns, rows).output(rows: rows) + TerminalPage.csi + "18t"
+    }
+
+    static func terminalDrewOutput(reporting reply: Data, columns: Int, rows: Int) -> Bool? {
+        guard CaptureView.directory != nil,
+              let match = String(decoding: reply, as: UTF8.self).wholeMatch(of: /\u{1B}\[8;(\d+);(\d+)t/) else {
+            return nil
+        }
+        terminalIsDrawn = Int(match.1) == rows && Int(match.2) == columns
+        return terminalIsDrawn
+    }
+
+    nonisolated private static func claudeCode(columns: Int, rows: Int) -> TerminalPage {
+        let orange = TerminalPage.csi + "38;2;215;119;87m"
+        let gray = TerminalPage.csi + "90m"
+        let green = TerminalPage.csi + "32m"
+        let red = TerminalPage.csi + "31m"
+        let reset = TerminalPage.csi + "0m"
+        var header = TerminalPage(columns: columns)
+        header.add(" \(orange)▐▛███▜▌\(reset)   \(TerminalPage.csi)1mClaude Code\(reset) v2.1.92")
+        header.add("\(orange)▝▜█████▛▘\(reset)  \(gray)Opus 4.6 · Claude Max\(reset)")
+        header.add("  \(orange)▘▘ ▝▝\(reset)    \(gray)~/projects/agentty\(reset)")
+        header.add()
+
+        func prompt(_ text: String) -> TerminalPage {
+            var page = TerminalPage(columns: columns)
+            page.add(TerminalPage.csi + "100m" + "> \(text)".padding(toLength: columns, withPad: " ", startingAt: 0) + reset)
+            page.add()
+            return page
+        }
+        func tool(_ call: String, _ result: [String]) -> TerminalPage {
+            var page = TerminalPage(columns: columns)
+            page.add("\(green)⏺\(reset) \(TerminalPage.csi)1m\(call)\(reset)")
+            for (index, line) in result.enumerated() {
+                page.add((index == 0 ? "  \(gray)⎿\(reset)  " : "     ") + line)
+            }
+            page.add()
+            return page
+        }
+        func reply(_ text: String) -> TerminalPage {
+            var page = TerminalPage(columns: columns)
+            page.wrap(text, marker: "⏺ ", indent: 2)
+            page.add()
+            return page
+        }
+
+        let earlier = [
+            prompt("add a retry with backoff to the webhook sender")
+                + tool("Read(src/webhooks/send.ts)", ["Read 88 lines"])
+                + tool("Update(src/webhooks/send.ts)", [
+                    "Updated src/webhooks/send.ts with 7 additions and 1 removal",
+                    "  \(gray)31\(reset) \(red)-    await post(url, body)\(reset)",
+                    "  \(gray)31\(reset) \(green)+    for (let attempt = 1; ; attempt++) {\(reset)",
+                    "  \(gray)32\(reset) \(green)+      try {\(reset)",
+                    "  \(gray)33\(reset) \(green)+        return await post(url, body)\(reset)",
+                    "  \(gray)34\(reset) \(green)+      } catch (error) {\(reset)",
+                    "  \(gray)35\(reset) \(green)+        if (attempt === 5 || !isRetryable(error)) throw error\(reset)",
+                    "  \(gray)36\(reset) \(green)+        await sleep(2 ** attempt * 250 + Math.random() * 250)\(reset)",
+                    "  \(gray)37\(reset) \(green)+      }\(reset)",
+                ])
+                + reply("Webhook sends now retry transient failures up to five times with jittered exponential backoff."),
+            prompt("the relay drops idle sessions after 30 seconds, find out why")
+                + tool("Search(pattern: \"idle_timeout\", path: \"services/relay\")", ["Found 3 files"])
+                + tool("Read(services/relay/src/session.rs)", ["Read 214 lines"])
+                + reply("The relay closes sessions after 30 idle seconds, but clients send a keepalive only every 45. I lowered the client interval to 15 seconds, and the idle-session test passes."),
+            prompt("pull main and run the tests")
+                + tool("Bash(git pull --ff-only && just test)", [
+                    "Updating 8b31d07..c4e2a91",
+                    "6 files changed, 142 insertions(+), 37 deletions(-)",
+                    "\(green)✔\(reset) 312 tests passed (41.2s)",
+                ])
+                + reply("main is up to date and all 312 tests pass."),
+        ]
+
+        var answer = prompt("why do I need this app?")
+        answer.wrap("AgenTTY turns your iPhone into a real terminal for the agents on your own machines: a GPU-rendered, Ghostty-powered SSH client that feels native to iOS.", marker: "⏺ ", indent: 2)
+        answer.add()
+        for (title, text) in [
+            ("Instant reconnect", "tmux sessions persist across disconnects, so you pick up exactly where you left off"),
+            ("Full terminal rendering", "Metal-backed Ghostty engine with proper fonts, themes and smooth scrolling"),
+            ("Push notifications from your server", "get pinged when a build finishes, a deploy completes or Claude Code needs your attention"),
+            ("Zero-config pairing", "scan a QR code; SSH keys are generated and installed automatically"),
+            ("Custom touch keyboard", "modifier chords, slide gestures and dictation, built for terminal work"),
+            ("Shell quick switcher", "long-press the space bar to flip between tmux sessions like switching apps"),
+        ] {
+            answer.wrap("\(title) – \(text)", marker: "  - ", indent: 4, bold: title.count)
+        }
+        answer.add()
+        answer.wrap("Your agents keep working on your machine; your phone is the window into them, wherever you are.", marker: "  ", indent: 2)
+        answer.add()
+
+        var input = TerminalPage(columns: columns)
+        input.rule()
+        input.add("> ")
+        input.markCursor(column: 3)
+        input.rule()
+        input.add("  \(orange)Opus 4.6\(reset) \(gray)· 12% context ·\(reset) \(TerminalPage.csi)36magentty\(reset) \(green)main\(reset)")
+        input.add("  \(TerminalPage.csi)38;2;255;107;128m⏵⏵ bypass permissions on\(reset)\(gray) (shift+tab to cycle)\(reset)")
+
+        var session = answer + input
+        for exchange in earlier.reversed() where header.lineCount + exchange.lineCount + session.lineCount <= rows {
+            session = exchange + session
+        }
+        return header + session
+    }
+
+    nonisolated private static func codex(columns: Int, rows: Int) -> TerminalPage {
+        let cyan = TerminalPage.csi + "36m"
+        let green = TerminalPage.csi + "32m"
+        let red = TerminalPage.csi + "31m"
+        let gray = TerminalPage.csi + "90m"
+        let bold = TerminalPage.csi + "1m"
+        let reset = TerminalPage.csi + "0m"
+        let box = min(columns - 1, 48) - 2
+        var page = TerminalPage(columns: columns)
+        page.add("╭" + String(repeating: "─", count: box) + "╮")
+        for row in [">_ \(bold)OpenAI Codex\(reset) \(gray)(v0.80.0)\(reset)", "", "\(gray)model:\(reset)     gpt-5.5 high", "\(gray)directory:\(reset) ~/projects/site"] {
+            let visible = row.replacing(/\u{1B}\[[0-9;]*m/, with: "").count
+            page.add("│ " + row + String(repeating: " ", count: max(0, box - 2 - visible)) + " │")
+        }
+        page.add("╰" + String(repeating: "─", count: box) + "╯")
+        page.add()
+        page.wrap("The checkout test fails about one run in ten. Find out why and fix it.", marker: "\(cyan)›\(reset) ", indent: 2)
+        page.add()
+        page.add("\(bold)•\(reset) \(bold)Explored\(reset)")
+        page.add("  \(gray)└\(reset) Read checkout.test.ts, total.ts")
+        page.add("    Search round\\( in src/cart")
+        page.add()
+        page.add("\(bold)•\(reset) \(bold)Ran\(reset) bun test checkout --rerun-each 20")
+        page.add("  \(gray)└\(reset) \(red)2 of 20 runs failed:\(reset) expected 41.97, received 41.96")
+        page.add()
+        page.wrap("Each line total is rounded, then the order total is rounded again, so carts whose lines end in half a cent lose one. I’ll round once, at the end.", marker: "\(bold)•\(reset) ", indent: 2)
+        page.add()
+        page.add("\(bold)•\(reset) \(bold)Edited\(reset) src/cart/total.ts \(green)(+2\(reset) \(red)-2)\(reset)")
+        page.add("    \(gray)12\(reset) \(red)-  const lines = items.map(i => round(i.price * i.qty))\(reset)")
+        page.add("    \(gray)12\(reset) \(green)+  const lines = items.map(i => i.price * i.qty)\(reset)")
+        page.add("    \(gray)18\(reset) \(red)-  return round(sum(lines)) - discount\(reset)")
+        page.add("    \(gray)18\(reset) \(green)+  return round(sum(lines) - discount)\(reset)")
+        page.add()
+        page.add("\(bold)•\(reset) \(bold)Ran\(reset) bun test checkout --rerun-each 50")
+        page.add("  \(gray)└\(reset) \(green)50 of 50 runs passed\(reset)")
+        page.add()
+        page.add(gray + "─ Worked for 1m 12s " + String(repeating: "─", count: max(0, columns - 21)) + reset)
+        page.add()
+        page.wrap("The flaky test came from rounding twice in cartTotal. Totals are now rounded once, and 50 repeated runs pass.", marker: "\(bold)•\(reset) ", indent: 2)
+        page.add()
+        page.add("\(cyan)›\(reset) ")
+        page.markCursor(column: 3)
+        page.add()
+        page.add("  \(gray)⏎ send   ⌃J newline   ⌃T transcript   ⌃C quit\(reset)")
+        return page
     }
 
     let hostStore: AgenTTYHostStore
@@ -228,6 +374,67 @@ final class CaptureFixture {
     }
 }
 
+nonisolated private struct TerminalPage {
+    static let csi = "\u{1B}["
+
+    let columns: Int
+    private var lines: [String] = []
+    private var cursor: (line: Int, column: Int)?
+
+    init(columns: Int) {
+        self.columns = columns
+    }
+
+    mutating func add(_ line: String = "") {
+        lines.append(line)
+    }
+
+    mutating func rule() {
+        add(Self.csi + "90m" + String(repeating: "─", count: columns) + Self.csi + "0m")
+    }
+
+    mutating func wrap(_ text: String, marker: String, indent: Int, bold: Int = 0) {
+        let width = max(columns - indent - 1, 16)
+        var rows: [String] = []
+        for word in text.split(separator: " ") {
+            if let last = rows.last, last.count + 1 + word.count <= width {
+                rows[rows.count - 1] = last + " " + word
+            } else {
+                rows.append(String(word))
+            }
+        }
+        for (index, row) in rows.enumerated() {
+            let body = index == 0 && bold > 0 ? Self.csi + "1m" + row.prefix(bold) + Self.csi + "22m" + row.dropFirst(bold) : row
+            add((index == 0 ? marker : String(repeating: " ", count: indent)) + body)
+        }
+    }
+
+    mutating func markCursor(column: Int) {
+        cursor = (lines.count - 1, column)
+    }
+
+    var lineCount: Int {
+        lines.count
+    }
+
+    static func + (top: TerminalPage, bottom: TerminalPage) -> TerminalPage {
+        var page = top
+        page.lines += bottom.lines
+        if let cursor = bottom.cursor {
+            page.cursor = (top.lines.count + cursor.line, cursor.column)
+        }
+        return page
+    }
+
+    func output(rows: Int) -> String {
+        var output = "\u{1B}c" + Self.csi + "2 q" + lines.joined(separator: "\r\n")
+        if let cursor {
+            output += Self.csi + "\(cursor.line - max(0, lines.count - rows) + 1);\(cursor.column)H"
+        }
+        return output
+    }
+}
+
 struct CaptureView: View {
     static let directory = ProcessInfo.processInfo.environment["AGENTTY_CAPTURE"].map { URL(filePath: $0) }
 
@@ -283,10 +490,16 @@ struct CaptureView: View {
         let thumbnails = try await withThrowingTaskGroup(of: (String, UIImage).self) { group in
             for next in screens {
                 fixture.hostStore.selectHost(id: next == .switchHosts ? fixture.laptop.id : fixture.workstation.id)
+                CaptureFixture.terminalIsDrawn = false
                 screen = next
                 guard await shown.next(isolation: #isolation) == next else {
                     throw CaptureError("\(next.rawValue) did not appear")
                 }
+                try await terminalDrawn(next)
+                try await settle(window, screen: next)
+                CaptureFixture.terminalIsDrawn = false
+                CaptureFixture.redrawTerminal?()
+                try await terminalDrawn(next)
                 try await settle(window, screen: next)
                 let image = try await screenshot(next)
                 let id = next.rawValue
@@ -317,6 +530,14 @@ struct CaptureView: View {
         }
     }
 
+    private func terminalDrawn(_ screen: CaptureScreen) async throws {
+        for _ in 0..<500 {
+            if CaptureFixture.terminalIsDrawn { return }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        throw CaptureError("the \(screen.rawValue) terminal never drew its session in its final grid")
+    }
+
     private func settle(_ window: UIWindow, screen: CaptureScreen) async throws {
         var previous = try await drawnFrame(of: window, screen: screen)
         for _ in 0..<30 {
@@ -345,7 +566,7 @@ struct CaptureView: View {
 
     private func screenshot(_ screen: CaptureScreen) async throws -> UIImage {
         let file = directory.appending(path: "\(screen.rawValue).png")
-        try Data(screen.rawValue.utf8).write(to: directory.appending(path: "ready"), options: .atomic)
+        try JSONEncoder().encode(CaptureReady(screen: screen.rawValue, tap: screen.tap)).write(to: directory.appending(path: "ready"), options: .atomic)
         while true {
             if let image = UIImage(contentsOfFile: file.path()) { return image }
             try await Task.sleep(for: .milliseconds(20))
