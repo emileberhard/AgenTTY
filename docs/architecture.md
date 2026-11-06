@@ -135,6 +135,17 @@ does not release an original recording. The app bounds its producer spool.
   simulator. The slides are composed only after the screenshot simulators are
   deleted: on a hosted runner, `ImageRenderer` drew an empty canvas while a
   simulator was booted, which the composer's opacity check caught.
+  A screen that needs a real interaction, such as the open host menu or the
+  themes sheet at its large detent, names an accessibility label in its ready
+  signal, and the driver taps it with the pinned, checksum-verified AXe CLI,
+  then waits for two identical screenshots. A capture-only XCUITest target
+  could tap too, but it adds a second build and test runner to every capture;
+  a production hook that opens the menu would fake it. Because Ghostty applies
+  the grid resize after a font change asynchronously, the fixture asks the
+  terminal for its size (`CSI 18 t`) after each injection and redraws until
+  the reply matches the grid it rendered for. The release captures in a
+  credential-free `screenshots` job beside `archive`, so App Review waits only
+  for the artifact, not for a capture on the critical path.
 - **One phone iteration path.** `scripts/iphone-iteration` builds Dev or Exp
   with a reserved build number into a retained checkpoint and installs it on
   the paired iPhone directly, or through SimpleMDM after
