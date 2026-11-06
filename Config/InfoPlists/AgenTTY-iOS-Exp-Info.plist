@@ -18,6 +18,8 @@
 	<string>$(AGENTTY_SENTRY_DSN)</string>
 	<key>AGENTTY_UNLOCK_PRODUCT_ID</key>
 	<string>$(AGENTTY_UNLOCK_PRODUCT_ID)</string>
+	<key>AgenTTYPushEnvironment</key>
+	<string>development</string>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
 	<key>CFBundleDevelopmentRegion</key>

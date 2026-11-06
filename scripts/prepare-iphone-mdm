@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import plistlib
+from pathlib import Path
+
+parser = argparse.ArgumentParser(description="Make a private copy of a Dev or Exp app safe for a managed upload.")
+parser.add_argument("--app-path", type=Path, required=True)
+parser.add_argument("--device-udid", required=True)
+app = parser.parse_args().app_path
+
+info_path = app / "Info.plist"
+info = plistlib.loads(info_path.read_bytes())
+bundle = info["CFBundleIdentifier"]
+if not bundle.endswith((".dev", ".exp")):
+    raise SystemExit(f"Only Dev and Exp builds go through managed delivery, not {bundle}")
+extensions = {plistlib.loads(path.read_bytes())["CFBundleIdentifier"] for path in app.glob("PlugIns/*.appex/Info.plist")}
+if extensions != {f"{bundle}.NotificationService"} or any(app.glob("Frameworks/*.appex")):
+    raise SystemExit(f"Expected exactly the {bundle} app and its notification extension")
+
+(app / "AgenTTYLocalSecrets.json").unlink(missing_ok=True)
+for name in ["AgenTTYLocalSecrets.json", "Local.xcconfig", "shared-env.sh", "secret-env.sh", ".env", "*.p8", "*.key"]:
+    if found := next(app.rglob(name), None):
+        raise SystemExit(f"Private build input was bundled: {found.relative_to(app)}")
+if info.get("AgenTTYPushEnvironment") != "development":
+    raise SystemExit("Expected the development push environment that ad hoc signing replaces")
+if not str(info.get("AGENTTY_RELAY_URL", "")).startswith("https://"):
+    raise SystemExit("Expected an HTTPS relay URL")
+info["AgenTTYPushEnvironment"] = "production"
+info_path.write_bytes(plistlib.dumps(info, fmt=plistlib.FMT_BINARY))
+print(json.dumps({"schemaVersion": 1, "uploadSafe": True, "bundleIdentifier": bundle,
+                  "version": info["CFBundleShortVersionString"], "build": info["CFBundleVersion"]}))
