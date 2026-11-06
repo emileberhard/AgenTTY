@@ -1,31 +1,36 @@
+import Foundation
 import UIKit
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
-final class HardwareKeyMappingTests: XCTestCase {
+@Suite
+struct HardwareKeyMappingTests {
     @MainActor
-    func testCommandBackspaceMapsToControlBackspaceLineDeletion() {
+    @Test
+    func commandBackspaceMapsToControlBackspaceLineDeletion() {
         let mapped = HardwareKeyMapping.commandModifiedMapping(
             keyCode: .keyboardDeleteOrBackspace,
             modifierFlags: .command
         )
 
-        XCTAssertEqual(mapped?.action, .backspace)
-        XCTAssertEqual(mapped?.modifiers, Set<ModifierKey>([.ctrl]))
+        #expect(mapped?.action == .backspace)
+        #expect(mapped?.modifiers == Set<ModifierKey>([.ctrl]))
     }
 
     @MainActor
-    func testCommandLetterStillFallsThroughToUIKit() {
+    @Test
+    func commandLetterStillFallsThroughToUIKit() {
         let mapped = HardwareKeyMapping.commandModifiedMapping(
             keyCode: .keyboardW,
             modifierFlags: .command
         )
 
-        XCTAssertNil(mapped)
+        #expect(mapped == nil)
     }
 
     @MainActor
-    func testNordicMagicKeyboardShiftFourEuroMapsToDollar() {
+    @Test
+    func nordicMagicKeyboardShiftFourEuroMapsToDollar() {
         let character = HardwareKeyMapping.printableCharacter(
             characters: "€",
             charactersIgnoringModifiers: "4",
@@ -33,11 +38,12 @@ final class HardwareKeyMappingTests: XCTestCase {
             modifierFlags: .shift
         )
 
-        XCTAssertEqual(character, "$")
+        #expect(character == "$")
     }
 
     @MainActor
-    func testNordicMagicKeyboardFourWithoutShiftStillUsesReportedCharacter() {
+    @Test
+    func nordicMagicKeyboardFourWithoutShiftStillUsesReportedCharacter() {
         let character = HardwareKeyMapping.printableCharacter(
             characters: "4",
             charactersIgnoringModifiers: "4",
@@ -45,11 +51,12 @@ final class HardwareKeyMappingTests: XCTestCase {
             modifierFlags: []
         )
 
-        XCTAssertEqual(character, "4")
+        #expect(character == "4")
     }
 
     @MainActor
-    func testShiftFourDollarLayoutsStillUseReportedCharacter() {
+    @Test
+    func shiftFourDollarLayoutsStillUseReportedCharacter() {
         let character = HardwareKeyMapping.printableCharacter(
             characters: "$",
             charactersIgnoringModifiers: "4",
@@ -57,6 +64,6 @@ final class HardwareKeyMappingTests: XCTestCase {
             modifierFlags: .shift
         )
 
-        XCTAssertEqual(character, "$")
+        #expect(character == "$")
     }
 }

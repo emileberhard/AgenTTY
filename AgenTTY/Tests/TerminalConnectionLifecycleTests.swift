@@ -1,8 +1,11 @@
-import XCTest
+import Foundation
+import Testing
 @testable import AgenTTY_iOS
 
-final class TerminalConnectionLifecycleTests: XCTestCase {
-    func testWillResignActiveBeginsWarmHoldWhenLiveTransportExists() {
+@Suite
+struct TerminalConnectionLifecycleTests {
+    @Test
+    func willResignActiveBeginsWarmHoldWhenLiveTransportExists() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: true,
@@ -11,13 +14,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .willResignActive, state: state),
-            .beginBackgroundWarmHold
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .willResignActive, state: state) == .beginBackgroundWarmHold)
     }
 
-    func testBackgroundBeginsWarmHoldWhenLiveTransportExists() {
+    @Test
+    func backgroundBeginsWarmHoldWhenLiveTransportExists() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: true,
@@ -26,13 +27,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state),
-            .beginBackgroundWarmHold
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state) == .beginBackgroundWarmHold)
     }
 
-    func testBackgroundBeginsWarmHoldWhenReconnectWorkIsPending() {
+    @Test
+    func backgroundBeginsWarmHoldWhenReconnectWorkIsPending() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: false,
@@ -41,13 +40,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state),
-            .beginBackgroundWarmHold
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state) == .beginBackgroundWarmHold)
     }
 
-    func testBackgroundDoesNothingWhenNoConnectionWorkExists() {
+    @Test
+    func backgroundDoesNothingWhenNoConnectionWorkExists() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: false,
@@ -56,13 +53,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state),
-            .none
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didEnterBackground, state: state) == .none)
     }
 
-    func testForegroundReconnectsActiveHostWhenNothingIsRunning() {
+    @Test
+    func foregroundReconnectsActiveHostWhenNothingIsRunning() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: false,
@@ -71,13 +66,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state),
-            .reconnectActiveHost
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state) == .reconnectActiveHost)
     }
 
-    func testForegroundVerifiesLivenessWhenTransportLooksAlive() {
+    @Test
+    func foregroundVerifiesLivenessWhenTransportLooksAlive() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: true,
@@ -86,13 +79,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state),
-            .verifyTransportLiveness
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state) == .verifyTransportLiveness)
     }
 
-    func testForegroundDoesNotReconnectWithoutActiveHost() {
+    @Test
+    func foregroundDoesNotReconnectWithoutActiveHost() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: false,
             hasLiveTransport: false,
@@ -101,13 +92,11 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state),
-            .none
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state) == .none)
     }
 
-    func testForegroundDoesNotReconnectWhenRecoveryIsAlreadyRequired() {
+    @Test
+    func foregroundDoesNotReconnectWhenRecoveryIsAlreadyRequired() {
         let state = AgenTTYConnectionLifecycleState(
             hasActiveConnectionTarget: true,
             hasLiveTransport: false,
@@ -116,9 +105,6 @@ final class TerminalConnectionLifecycleTests: XCTestCase {
             isShuttingDown: false
         )
 
-        XCTAssertEqual(
-            AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state),
-            .none
-        )
+        #expect(AgenTTYConnectionLifecyclePolicy.action(for: .didBecomeActive, state: state) == .none)
     }
 }

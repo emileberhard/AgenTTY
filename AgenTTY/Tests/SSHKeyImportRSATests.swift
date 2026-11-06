@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Testing
 import NIOCore
 import NIOEmbedded
 import NIOSSH
@@ -17,13 +17,15 @@ import NIOSSH
 ///     ssh-keygen -y -f openssh                      # the expected public key
 ///
 /// The sub-minimum fixture is a separate key: `ssh-keygen -t rsa -b 1024 -N '' -f small`.
-final class SSHKeyImportRSATests: XCTestCase {
+@Suite
+struct SSHKeyImportRSATests {
     private static let fixturePassphrase = "correct horse"
 
     // MARK: - Import acceptance
 
     @MainActor
-    func testEveryRSAContainerFormatProducesIdenticalStoredMaterial() throws {
+    @Test
+    func everyRSAContainerFormatProducesIdenticalStoredMaterial() throws {
         let openSSH = try AgenTTYSSHPrivateKeyParser.parse(Self.opensshPlaintextKey)
         let pkcs1 = try AgenTTYSSHPrivateKeyParser.parse(Self.pkcs1PEMKey)
         let pkcs8 = try AgenTTYSSHPrivateKeyParser.parse(Self.pkcs8PEMKey)
@@ -33,25 +35,26 @@ final class SSHKeyImportRSATests: XCTestCase {
         )
 
         for material in [openSSH, pkcs1, pkcs8, encrypted] {
-            XCTAssertEqual(material.kind, .rsa)
-            XCTAssertEqual(material.sshKeyType, .rsa)
+            #expect(material.kind == .rsa)
+            #expect(material.sshKeyType == .rsa)
         }
 
         // The stored payload is PKCS#1 DER, so the four containers must converge byte for byte.
-        XCTAssertEqual(pkcs1.rawRepresentation, openSSH.rawRepresentation)
-        XCTAssertEqual(pkcs8.rawRepresentation, openSSH.rawRepresentation)
-        XCTAssertEqual(encrypted.rawRepresentation, openSSH.rawRepresentation)
+        #expect(pkcs1.rawRepresentation == openSSH.rawRepresentation)
+        #expect(pkcs8.rawRepresentation == openSSH.rawRepresentation)
+        #expect(encrypted.rawRepresentation == openSSH.rawRepresentation)
     }
 
     @MainActor
-    func testImportedRSAKeyReproducesSSHKeygenPublicKey() throws {
+    @Test
+    func importedRSAKeyReproducesSSHKeygenPublicKey() throws {
         for (label, text) in [
             ("openssh-key-v1", Self.opensshPlaintextKey),
             ("pkcs#1", Self.pkcs1PEMKey),
             ("pkcs#8", Self.pkcs8PEMKey),
         ] {
             let material = try AgenTTYSSHPrivateKeyParser.parse(text)
-            XCTAssertEqual(try material.openSSHPublicKey(), Self.rsaPublicKey, label)
+            #expect((try material.openSSHPublicKey()) == Self.rsaPublicKey, "\(label)")
         }
     }
 
@@ -59,78 +62,77 @@ final class SSHKeyImportRSATests: XCTestCase {
     /// the modulus with a leading `0x00` because its high bit is set. A regenerated fixture that lost
     /// that property would silently stop covering the case.
     @MainActor
-    func testRSAFixtureModulusExercisesTheSignBitPadding() throws {
-        let blob = try XCTUnwrap(Data(base64Encoded: Self.rsaPublicKeyBase64))
+    @Test
+    func rsaFixtureModulusExercisesTheSignBitPadding() throws {
+        let blob = try #require(Data(base64Encoded: Self.rsaPublicKeyBase64))
         var reader = SSHBinaryReader(data: blob)
 
-        XCTAssertEqual(try reader.readStringUTF8(), "ssh-rsa")
+        #expect((try reader.readStringUTF8()) == "ssh-rsa")
         let publicExponent = try reader.readStringData()
         let modulus = try reader.readStringData()
 
-        XCTAssertEqual(Array(publicExponent), [0x01, 0x00, 0x01])
-        XCTAssertEqual(modulus.first, 0x00, "modulus must carry the sign-bit pad byte")
-        XCTAssertEqual(modulus.count, 257)
-        XCTAssertGreaterThanOrEqual(try XCTUnwrap(modulus.dropFirst().first), 0x80)
+        #expect(Array(publicExponent) == [0x01, 0x00, 0x01])
+        #expect(modulus.first == 0x00, "modulus must carry the sign-bit pad byte")
+        #expect(modulus.count == 257)
+        let leadingByte = try #require(modulus.dropFirst().first)
+        #expect(leadingByte >= 0x80)
     }
 
     @MainActor
-    func testStoredRSAMaterialRoundTripsThroughKeychainPayload() throws {
+    @Test
+    func storedRSAMaterialRoundTripsThroughKeychainPayload() throws {
         let material = try AgenTTYSSHPrivateKeyParser.parse(Self.opensshPlaintextKey)
         let payload = material.encodePayload()
 
-        XCTAssertEqual(payload.first, 5, "RSA must keep storage tag 5")
+        #expect(payload.first == 5, "RSA must keep storage tag 5")
 
-        let decoded = try XCTUnwrap(AgenTTYStoredSSHPrivateKey.decodePayload(payload))
-        XCTAssertEqual(decoded.kind, .rsa)
-        XCTAssertEqual(decoded.rawRepresentation, material.rawRepresentation)
-        XCTAssertEqual(try decoded.openSSHPublicKey(), Self.rsaPublicKey)
+        let decoded = try #require(AgenTTYStoredSSHPrivateKey.decodePayload(payload))
+        #expect(decoded.kind == .rsa)
+        #expect(decoded.rawRepresentation == material.rawRepresentation)
+        #expect((try decoded.openSSHPublicKey()) == Self.rsaPublicKey)
     }
 
     // MARK: - Negatives
 
     @MainActor
-    func testSubMinimumRSAKeyIsRejectedWithAnActionableError() {
-        XCTAssertThrowsError(try AgenTTYSSHPrivateKeyParser.parse(Self.openssh1024BitKey)) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .rsaKeyTooSmall)
-        }
+    @Test
+    func subMinimumRSAKeyIsRejectedWithAnActionableError() {
+        #expect(throws: AgenTTYSSHKeyMaterialError.rsaKeyTooSmall) { try AgenTTYSSHPrivateKeyParser.parse(Self.openssh1024BitKey) }
     }
 
     @MainActor
-    func testEncryptedRSAKeyWithWrongPassphraseReportsIncorrectPassphrase() {
-        XCTAssertThrowsError(
-            try AgenTTYSSHPrivateKeyParser.parse(Self.opensshEncryptedKey, passphrase: "wrong horse")
-        ) { error in
-            XCTAssertEqual(error as? AgenTTYSSHKeyMaterialError, .privateKeyPassphraseIncorrect)
-        }
+    @Test
+    func encryptedRSAKeyWithWrongPassphraseReportsIncorrectPassphrase() {
+        #expect(throws: AgenTTYSSHKeyMaterialError.privateKeyPassphraseIncorrect) { try AgenTTYSSHPrivateKeyParser.parse(Self.opensshEncryptedKey, passphrase: "wrong horse") }
     }
 
     // MARK: - User-auth ladder
 
     @MainActor
-    func testRSAKeyOffersEverySignatureAlgorithmInPreferenceOrder() throws {
+    @Test
+    func rsaKeyOffersEverySignatureAlgorithmInPreferenceOrder() throws {
         let privateKey = try AgenTTYSSHPrivateKeyParser.parse(Self.opensshPlaintextKey).makeNIOSSHPrivateKey()
         let outcome = try Self.drainPublicKeyOffers(for: privateKey)
 
-        XCTAssertEqual(outcome.signatureAlgorithms, ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"])
+        #expect(outcome.signatureAlgorithms == ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"])
 
-        let rejection = try XCTUnwrap(outcome.finalError as? AgenTTYSSHAuthenticationError)
+        let rejection = try #require(outcome.finalError as? AgenTTYSSHAuthenticationError)
         guard case .publicKeyAuthenticationRejected(let attempted) = rejection else {
-            return XCTFail("Expected a public-key rejection, got \(rejection)")
+            Issue.record("Expected a public-key rejection, got \(rejection)")
+            return
         }
-        XCTAssertEqual(attempted, ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"])
-        XCTAssertTrue(
-            rejection.localizedDescription.contains("rsa-sha2-512, rsa-sha2-256, ssh-rsa"),
-            rejection.localizedDescription
-        )
+        #expect(attempted == ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"])
+        #expect(rejection.localizedDescription.contains("rsa-sha2-512, rsa-sha2-256, ssh-rsa"), "\(rejection.localizedDescription)")
     }
 
     /// The ladder must not change anything for keys that have a single signature algorithm.
     @MainActor
-    func testEd25519KeyOffersExactlyOneSignatureAlgorithm() throws {
+    @Test
+    func ed25519KeyOffersExactlyOneSignatureAlgorithm() throws {
         let privateKey = try AgenTTYSSHPrivateKeyParser.parse(Self.ed25519PlaintextKey).makeNIOSSHPrivateKey()
         let outcome = try Self.drainPublicKeyOffers(for: privateKey)
 
-        XCTAssertEqual(outcome.signatureAlgorithms, ["ssh-ed25519"])
+        #expect(outcome.signatureAlgorithms == ["ssh-ed25519"])
     }
 
     /// Drives the delegate exactly as NIOSSH does: ask for an offer, and on every
@@ -167,7 +169,7 @@ final class SSHKeyImportRSATests: XCTestCase {
                 guard let offer, case .privateKey(let request) = offer.offer else {
                     return (signatureAlgorithms, finalError)
                 }
-                signatureAlgorithms.append(try XCTUnwrap(request.signatureAlgorithm))
+                signatureAlgorithms.append(try #require(request.signatureAlgorithm))
             }
         }
 

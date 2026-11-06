@@ -1,5 +1,5 @@
 import Foundation
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 private func makePendingAutomaticSetupSession(
@@ -34,20 +34,24 @@ private func makePendingAutomaticSetupClaim(
     )
 }
 
-final class RelayAndAutomaticSetupTests: XCTestCase {
-    func testAutomaticSetupModeRecommendedCommand() {
-        XCTAssertEqual(AgenTTYAutomaticSetupMode.recommended.title, "Full AgenTTY Setup")
-        XCTAssertEqual(AgenTTYAutomaticSetupMode.recommended.badge, "Recommended")
-        XCTAssertEqual(AgenTTYAutomaticSetupMode.recommended.command, "npx -y @agentty-app/pair")
+@Suite
+struct RelayAndAutomaticSetupTests {
+    @Test
+    func automaticSetupModeRecommendedCommand() {
+        #expect(AgenTTYAutomaticSetupMode.recommended.title == "Full AgenTTY Setup")
+        #expect(AgenTTYAutomaticSetupMode.recommended.badge == "Recommended")
+        #expect(AgenTTYAutomaticSetupMode.recommended.command == "npx -y @agentty-app/pair")
     }
 
-    func testAutomaticSetupModeDirectOnlyCommand() {
-        XCTAssertEqual(AgenTTYAutomaticSetupMode.directOnly.title, "Direct Connection Only")
-        XCTAssertNil(AgenTTYAutomaticSetupMode.directOnly.badge)
-        XCTAssertEqual(AgenTTYAutomaticSetupMode.directOnly.command, "npx -y @agentty-app/pair --direct-only")
+    @Test
+    func automaticSetupModeDirectOnlyCommand() {
+        #expect(AgenTTYAutomaticSetupMode.directOnly.title == "Direct Connection Only")
+        #expect(AgenTTYAutomaticSetupMode.directOnly.badge == nil)
+        #expect(AgenTTYAutomaticSetupMode.directOnly.command == "npx -y @agentty-app/pair --direct-only")
     }
 
-    func testPendingAutomaticSetupStateStoreRoundTripsActiveClaim() {
+    @Test
+    func pendingAutomaticSetupStateStoreRoundTripsActiveClaim() {
         let suiteName = "AgenTTYTests.pendingAutomaticSetup.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -62,10 +66,11 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             date: Date(timeIntervalSince1970: 1_777_000_100)
         )
 
-        XCTAssertEqual(loaded, .claiming(claim))
+        #expect(loaded == .claiming(claim))
     }
 
-    func testPendingAutomaticSetupStateStoreRoundTripsActiveClaimedSession() {
+    @Test
+    func pendingAutomaticSetupStateStoreRoundTripsActiveClaimedSession() {
         let suiteName = "AgenTTYTests.pendingAutomaticSetupClaimed.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -80,10 +85,11 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             date: Date(timeIntervalSince1970: 1_777_000_100)
         )
 
-        XCTAssertEqual(loaded, .claimed(session))
+        #expect(loaded == .claimed(session))
     }
 
-    func testPendingAutomaticSetupStateStoreClearsExpiredSession() {
+    @Test
+    func pendingAutomaticSetupStateStoreClearsExpiredSession() {
         let suiteName = "AgenTTYTests.pendingAutomaticSetupExpired.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -98,11 +104,12 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             date: Date(timeIntervalSince1970: 200)
         )
 
-        XCTAssertNil(loaded)
-        XCTAssertNil(userDefaults.data(forKey: "automatic_setup_pending_session"))
+        #expect(loaded == nil)
+        #expect(userDefaults.data(forKey: "automatic_setup_pending_session") == nil)
     }
 
-    func testPendingAutomaticSetupStateStoreClearsExpiredClaim() {
+    @Test
+    func pendingAutomaticSetupStateStoreClearsExpiredClaim() {
         let suiteName = "AgenTTYTests.pendingAutomaticSetupClaimExpired.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -117,11 +124,12 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             date: Date(timeIntervalSince1970: 200)
         )
 
-        XCTAssertNil(loaded)
-        XCTAssertNil(userDefaults.data(forKey: "automatic_setup_pending_session"))
+        #expect(loaded == nil)
+        #expect(userDefaults.data(forKey: "automatic_setup_pending_session") == nil)
     }
 
-    func testPendingAutomaticSetupStateStoreLoadsLegacyClaimedSessionPayload() throws {
+    @Test
+    func pendingAutomaticSetupStateStoreLoadsLegacyClaimedSessionPayload() throws {
         let suiteName = "AgenTTYTests.pendingAutomaticSetupLegacy.\(UUID().uuidString)"
         let userDefaults = UserDefaults(suiteName: suiteName)!
         defer {
@@ -137,18 +145,19 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             date: Date(timeIntervalSince1970: 1_777_000_100)
         )
 
-        XCTAssertEqual(loaded, .claimed(session))
+        #expect(loaded == .claimed(session))
     }
 
     @MainActor
-    func testPairingRelayClientRetriesUnauthorizedClaimAfterEnsuringIdentity() async throws {
+    @Test
+    func pairingRelayClientRetriesUnauthorizedClaimAfterEnsuringIdentity() async throws {
         let baseURL = URL(string: "https://agentty.esmadil.se")!
         let identity = AgenTTYNotificationDeviceIdentity(
             deviceID: UUID(uuidString: "11111111-2222-3333-4444-555555555555")!,
             deviceSecret: "device-secret"
         )
         let transport = PairingClientTestTransport { request, transport in
-            let url = try XCTUnwrap(request.url)
+            let url = try #require(request.url)
             switch url.path {
             case "/v1/pairing-sessions/claim":
                 let attempt = transport.incrementClaimAttemptCount()
@@ -185,30 +194,31 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             publicKey: "ssh-ed25519 AAAATEST test"
         )
 
-        XCTAssertEqual(claim.sessionID, "session-1")
-        XCTAssertEqual(claim.expiresAtEpochSeconds, 123)
-        XCTAssertEqual(transport.claimAttemptCount, 2)
-        XCTAssertEqual(transport.ensureDeviceIdentityCallCount, 1)
+        #expect(claim.sessionID == "session-1")
+        #expect(claim.expiresAtEpochSeconds == 123)
+        #expect(transport.claimAttemptCount == 2)
+        #expect(transport.ensureDeviceIdentityCallCount == 1)
 
         let claimRequests = transport.requests.filter { $0.url?.path == "/v1/pairing-sessions/claim" }
-        XCTAssertEqual(claimRequests.count, 2)
+        #expect(claimRequests.count == 2)
 
-        let firstBody = try jsonObject(from: try XCTUnwrap(claimRequests.first))
-        XCTAssertEqual(firstBody["code"] as? String, "ABCD-EFGH")
-        XCTAssertEqual(firstBody["public_key"] as? String, "ssh-ed25519 AAAATEST test")
-        XCTAssertEqual(firstBody["device_id"] as? String, identity.deviceID.uuidString)
-        XCTAssertEqual(firstBody["device_secret"] as? String, identity.deviceSecret)
+        let firstBody = try jsonObject(from: try #require(claimRequests.first))
+        #expect(firstBody["code"] as? String == "ABCD-EFGH")
+        #expect(firstBody["public_key"] as? String == "ssh-ed25519 AAAATEST test")
+        #expect(firstBody["device_id"] as? String == identity.deviceID.uuidString)
+        #expect(firstBody["device_secret"] as? String == identity.deviceSecret)
     }
 
     @MainActor
-    func testSSHRelayClientRetriesUnauthorizedAfterEnsuringIdentity() async throws {
+    @Test
+    func sshRelayClientRetriesUnauthorizedAfterEnsuringIdentity() async throws {
         let baseURL = URL(string: "https://agentty.esmadil.se")!
         let identity = AgenTTYNotificationDeviceIdentity(
             deviceID: UUID(uuidString: "88888888-2222-3333-4444-555555555555")!,
             deviceSecret: "relay-device-secret-2"
         )
         let transport = PairingClientTestTransport { request, transport in
-            let url = try XCTUnwrap(request.url)
+            let url = try #require(request.url)
             let attempt = transport.incrementClaimAttemptCount()
             if attempt == 1 {
                 return try makeJSONResponse(
@@ -239,16 +249,17 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
 
         let session = try await client.issueRelaySession(relayHostID: "relay-host-2")
 
-        XCTAssertEqual(session.relaySessionID, "relay-session-2")
-        XCTAssertEqual(transport.claimAttemptCount, 2)
-        XCTAssertEqual(transport.ensureDeviceIdentityCallCount, 1)
+        #expect(session.relaySessionID == "relay-session-2")
+        #expect(transport.claimAttemptCount == 2)
+        #expect(transport.ensureDeviceIdentityCallCount == 1)
     }
 
     @MainActor
-    func testSSHRelayClientMapsUncodedForbiddenToRelayConnectorOffline() async {
+    @Test
+    func sshRelayClientMapsUncodedForbiddenToRelayConnectorOffline() async throws {
         let client = AgenTTYSSHRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
-                let url = try XCTUnwrap(request.url)
+                let url = try #require(request.url)
                 return try makeJSONResponse(
                     url: url,
                     statusCode: 403,
@@ -257,41 +268,32 @@ final class RelayAndAutomaticSetupTests: XCTestCase {
             }
         )
 
-        await XCTAssertThrowsErrorAsync(
+        let error = try await #require(throws: AgenTTYSSHRelayError.self) {
             try await client.issueRelaySession(relayHostID: "relay-host-3")
-        ) { error in
-            guard case AgenTTYSSHRelayError.relayConnectorOffline = error else {
-                return XCTFail("Expected relayConnectorOffline, got \(error)")
-            }
+        }
+        guard case .relayConnectorOffline = error else {
+            Issue.record("Expected relayConnectorOffline, got \(error)")
+            return
         }
     }
     @MainActor
-    func testSSHRelayClientSurfacesTypedResourceLimitWithoutIdentityRepair() async {
+    @Test
+    func sshRelayClientSurfacesTypedResourceLimitWithoutIdentityRepair() async throws {
         let client = AgenTTYSSHRelayClient(
             urlSession: makeRequestHandlerURLSession { request in
-                XCTAssertEqual(request.value(forHTTPHeaderField: "x-agentty-resource-errors"), "1")
-                return try makeJSONResponse(url: XCTUnwrap(request.url), statusCode: 429, body: ["code": "relay_bandwidth", "detail": "Relay data allowance reached."])
+                #expect(request.value(forHTTPHeaderField: "x-agentty-resource-errors") == "1")
+                return try makeJSONResponse(url: #require(request.url), statusCode: 429, body: ["code": "relay_bandwidth", "detail": "Relay data allowance reached."])
             },
-            deviceIdentityEnsurer: { _, _ in XCTFail("A resource limit must not repair device identity") }
+            deviceIdentityEnsurer: { _, _ in Issue.record("A resource limit must not repair device identity") }
         )
-        await XCTAssertThrowsErrorAsync(try await client.issueRelaySession(relayHostID: "relay-host")) { error in
-            guard case AgenTTYSSHRelayError.resourceLimit(let detail) = error else {
-                return XCTFail("Expected resource limit, got \(error)")
-            }
-            XCTAssertEqual(detail, "Relay data allowance reached.")
+        let error = try await #require(throws: AgenTTYSSHRelayError.self) {
+            try await client.issueRelaySession(relayHostID: "relay-host")
         }
+        guard case .resourceLimit(let detail) = error else {
+            Issue.record("Expected resource limit, got \(error)")
+            return
+        }
+        #expect(detail == "Relay data allowance reached.")
     }
 
-}
-
-private func XCTAssertThrowsErrorAsync<T>(
-    _ expression: @autoclosure () async throws -> T,
-    _ errorHandler: (Error) -> Void
-) async {
-    do {
-        _ = try await expression()
-        XCTFail("Expected expression to throw")
-    } catch {
-        errorHandler(error)
-    }
 }

@@ -1,10 +1,10 @@
 import Foundation
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 func analyticsJSONObject<T: Encodable>(_ value: T) throws -> [String: Any] {
     let encoded = try AgenTTYAnalyticsCodec.makeEncoder().encode(value)
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+    return try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
 }
 
 func requestBodyData(from request: URLRequest) -> Data? {
@@ -37,8 +37,8 @@ func requestBodyData(from request: URLRequest) -> Data? {
 }
 
 func jsonObject(from request: URLRequest) throws -> [String: Any] {
-    let body = try XCTUnwrap(requestBodyData(from: request))
-    return try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+    let body = try #require(requestBodyData(from: request))
+    return try #require(JSONSerialization.jsonObject(with: body) as? [String: Any])
 }
 
 func makeJSONResponse(
@@ -47,14 +47,12 @@ func makeJSONResponse(
     body: Any
 ) throws -> (HTTPURLResponse, Data) {
     let data = try JSONSerialization.data(withJSONObject: body)
-    let response = try XCTUnwrap(
-        HTTPURLResponse(
+    let response = try #require(HTTPURLResponse(
             url: url,
             statusCode: statusCode,
             httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
-        )
-    )
+        ))
     return (response, data)
 }
 

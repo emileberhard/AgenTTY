@@ -1,12 +1,15 @@
+import Foundation
 import Observation
 import SwiftUI
 import UIKit
-import XCTest
+import Testing
 @testable import AgenTTY_iOS
 
 @MainActor
-final class TopStatusChromeLifecycleTests: XCTestCase {
-    func testObservableReferenceStateDefaultValueIsRecreatedDuringRootViewUpdates() {
+@Suite
+struct TopStatusChromeLifecycleTests {
+    @Test
+    func observableReferenceStateDefaultValueIsRecreatedDuringRootViewUpdates() {
         let counter = ReferenceStateLifetimeCounter()
 
         exerciseHostedLifecycle(
@@ -16,15 +19,12 @@ final class TopStatusChromeLifecycleTests: XCTestCase {
             }
         )
 
-        XCTAssertGreaterThan(
-            counter.initCount,
-            1,
-            "Reference-type @State defaults are created repeatedly as SwiftUI reinitializes transient view values."
-        )
-        XCTAssertGreaterThan(counter.deinitCount, 0)
+        #expect(counter.initCount > 1, "Reference-type @State defaults are created repeatedly as SwiftUI reinitializes transient view values.")
+        #expect(counter.deinitCount > 0)
     }
 
-    func testDeferredReferenceInitializationAvoidsTransientReferenceChurn() {
+    @Test
+    func deferredReferenceInitializationAvoidsTransientReferenceChurn() {
         let counter = ReferenceStateLifetimeCounter()
 
         exerciseHostedLifecycle(
@@ -34,12 +34,8 @@ final class TopStatusChromeLifecycleTests: XCTestCase {
             }
         )
 
-        XCTAssertEqual(
-            counter.initCount,
-            1,
-            "Deferring reference creation out of the @State default avoids repeated transient allocations."
-        )
-        XCTAssertLessThanOrEqual(counter.deinitCount, 1)
+        #expect(counter.initCount == 1, "Deferring reference creation out of the @State default avoids repeated transient allocations.")
+        #expect(counter.deinitCount <= 1)
     }
 
     private func exerciseHostedLifecycle<Content: View>(
@@ -51,7 +47,7 @@ final class TopStatusChromeLifecycleTests: XCTestCase {
             .compactMap({ $0 as? UIWindowScene })
             .first
         else {
-            XCTFail("Expected a UIWindowScene while running hosted SwiftUI lifecycle tests.")
+            Issue.record("Expected a UIWindowScene while running hosted SwiftUI lifecycle tests.")
             return
         }
 
