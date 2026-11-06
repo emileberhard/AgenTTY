@@ -22,7 +22,7 @@ PROJECT = ROOT / "AgenTTY.xcodeproj"
 RESOLVED = PROJECT / "project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
 RESOLVED_COPY = BUILD / "Package.resolved"
 APP_STORE_DISPLAYS = {
-    "IPHONE_DYNAMIC_ISLAND_MEDIUM_PROFILE": "iPhone 18 Pro",
+    "IPHONE_DYNAMIC_ISLAND_LARGE_PROFILE": "iPhone 18 Pro Max",
     "IPAD_13_PROFILE": "iPad Pro 13-inch (M5)",
 }
 PREVIEW_DEVICES = {"iphone": "iPhone 18 Pro", "ipad": "iPad Pro 13-inch (M5)"}
